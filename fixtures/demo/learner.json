@@ -1,0 +1,12 @@
+{
+  "learner_id": "demo-learner",
+  "profile": {
+    "display_name": "Demo learner",
+    "subjects": [
+      {"subject": "spanish", "framework_id": "cefr", "target_level": "A2", "estimated_level": "A1",
+       "objectives": ["Talk about sport and free time"]}
+    ],
+    "preferences": {"language_of_instruction": "en", "session_minutes": 30, "explanation_style": "examples-first"}
+  },
+  "request": "Create an A2 lesson about football."
+}

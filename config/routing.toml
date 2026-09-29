@@ -1,0 +1,31 @@
+# Model routing. Tiers map to an ordered fallback chain of provider/model targets.
+# Only the deterministic "mock" provider has an adapter in this release.
+
+[tiers]
+reasoning = [{ provider = "mock", model = "mock-reasoning" }]
+standard = [{ provider = "mock", model = "mock-standard" }]
+cheap = [{ provider = "mock", model = "mock-cheap" }]
+
+# Per-agent overrides of the agent's default tier.
+[agent_tiers]
+
+[max_output_tokens]
+reasoning = 8000
+standard = 4000
+cheap = 1000
+
+# USD per million tokens. Mock prices are nonzero so cost tracking is exercised end to end.
+[pricing.mock-reasoning]
+input_per_mtok = 3.0
+output_per_mtok = 15.0
+cached_input_per_mtok = 0.3
+
+[pricing.mock-standard]
+input_per_mtok = 1.0
+output_per_mtok = 5.0
+cached_input_per_mtok = 0.1
+
+[pricing.mock-cheap]
+input_per_mtok = 0.25
+output_per_mtok = 1.25
+cached_input_per_mtok = 0.025
