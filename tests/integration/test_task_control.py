@@ -66,7 +66,7 @@ async def test_failed_task_can_be_recovered(container, mock_llm) -> None:
     task = await start(container)
     task = await container.task_service.submit_assessment(task.task_id, answers_for(task))
     # Research fails on every attempt of every retry layer -> the task fails at the research node.
-    mock_llm.inject("knowledge_research", *(["not json"] * 6))
+    mock_llm.inject("research", *(["not json"] * 6))
     failed = await container.task_service.submit_assessment(task.task_id, answers_for(task))
     assert failed.status == TaskStatus.FAILED and failed.errors[-1].node_id == "research"
     assert failed.workflow.node_states["research"].attempts == 2  # node retry policy

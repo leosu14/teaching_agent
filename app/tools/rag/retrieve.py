@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime
+
 from pydantic import Field
 
 from app.observability.scope import ExecutionScope
-from app.providers.retrieval.base import Retriever
-from app.schemas.common import Schema
-from app.schemas.lesson import ConceptEntry, ConceptRef, ProbeSpec, SourceCandidate
-from app.tools.base import Tool, ToolError
+from app.providers.retrieval.base import Passage, Retriever
+from app.schemas.common import Schema, utcnow
+from app.schemas.lesson import ConceptEntry, ConceptRef, ProbeSpec
+from app.schemas.research import SearchResult, Source
+from app.tools.base import Tool, ToolError, ToolTransientError
+from app.utils.urls import canonical_url, source_id_for
 
 
 class RetrieveInput(Schema):
@@ -18,7 +23,11 @@ class RetrieveInput(Schema):
 
 
 class RetrieveOutput(Schema):
-    passages: list[SourceCandidate]
+    results: list[SearchResult]
+
+
+def kb_url(doc_id: str) -> str:
+    return f"kb://{doc_id}"
 
 
 class RetrievalTool(Tool[RetrieveInput, RetrieveOutput]):
@@ -28,19 +37,32 @@ class RetrievalTool(Tool[RetrieveInput, RetrieveOutput]):
     output_model = RetrieveOutput
     permissions = frozenset({"knowledge:read"})
 
-    def __init__(self, retriever: Retriever) -> None:
+    def __init__(self, retriever: Retriever, clock: Callable[[], datetime] = utcnow) -> None:
         self._retriever = retriever
+        self._clock = clock
 
     async def run(self, data: RetrieveInput, scope: ExecutionScope) -> RetrieveOutput:
-        passages = await self._retriever.retrieve(data.query, data.k, data.filters or None)
-        return RetrieveOutput(passages=[
-            SourceCandidate(
-                source_id=f"kb_{p.doc_id}", url=f"kb://{p.doc_id}", title=p.title,
-                publisher=str(p.metadata.get("publisher", "knowledge base")), snippet=p.text,
-                retrieved_via="knowledge_base", metadata=p.metadata,
-            )
-            for p in passages
-        ])
+        try:
+            passages = await self._retriever.retrieve(data.query, data.k, data.filters or None)
+        except (ConnectionError, OSError) as exc:
+            raise ToolTransientError(f"retriever '{self._retriever.name}' unavailable: {exc}") from exc
+        retrieved_at = self._clock()
+        scope.usage.record_service(service=f"retrieval:{self._retriever.name}", results=len(passages))
+        return RetrieveOutput(results=[self._result(p, rank, retrieved_at) for rank, p in enumerate(passages, 1)])
+
+    def _result(self, p: Passage, rank: int, retrieved_at: datetime) -> SearchResult:
+        url = kb_url(p.doc_id)
+        meta = p.metadata
+        source = Source(
+            source_id=source_id_for(url), url=url, canonical_url=canonical_url(url), title=p.title,
+            publisher=meta.get("publisher"), author=meta.get("author"), published_at=meta.get("published_at"),
+            retrieved_at=retrieved_at, language=meta.get("language"), source_type="knowledge_base",
+            retrieved_via="knowledge_base", provider=self._retriever.name,
+            metadata={k: v for k, v in meta.items()
+                      if k not in {"publisher", "author", "published_at", "language"}},
+        )
+        return SearchResult(source_id=source.source_id, title=p.title, url=url, snippet=p.text[:300],
+                            content=p.text, rank=rank, provider_score=p.score, source=source)
 
 
 class ConceptMapInput(Schema):
@@ -76,7 +98,7 @@ class ConceptMapTool(Tool[ConceptMapInput, ConceptMapOutput]):
             entries.append(ConceptEntry(
                 concept=ConceptRef.model_validate(raw),
                 probes=[ProbeSpec.model_validate(pr) for pr in p.metadata.get("probes", [])],
-                source_id=f"kb_{p.doc_id}",
+                source_id=source_id_for(kb_url(p.doc_id)),
             ))
         return ConceptMapOutput(concepts=_prerequisite_order(entries))
 

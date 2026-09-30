@@ -24,7 +24,7 @@ class TeacherAgent(Agent[TeacherInput, LessonContent]):
         stray = [s.section_id for s in output.sections if s.concept_id not in planned]
         if stray:
             raise OutputRejected(f"sections {stray} teach concepts that are not in the plan")
-        known_sources = {s.source_id for s in source.research.sources}
-        invented = sorted({c for s in output.sections for c in s.citations} - known_sources)
+        known = {c.citation_id for c in source.research.citations}
+        invented = sorted({c for s in output.sections for c in s.citations} - known)
         if invented:
             raise OutputRejected(f"citations {invented} do not exist in the research bundle")

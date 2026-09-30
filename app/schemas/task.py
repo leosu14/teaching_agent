@@ -77,6 +77,7 @@ class TaskResult(Schema):
     score: float | None = None
     remaining_gaps: list[str] = Field(default_factory=list)
     recommendation: LearningRecommendation | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TaskControl(Schema):

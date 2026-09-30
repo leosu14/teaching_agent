@@ -17,6 +17,11 @@ They are validated when the container is built; errors say what to fix.
 | `TA_REVISION_EXHAUSTED_POLICY` | `fail` | `fail` or `accept_with_warnings` when the budget is used |
 | `TA_DIAGNOSTIC_MAX_ROUNDS` | `2` | Adaptive diagnostic question rounds |
 | `TA_DIAGNOSTIC_MEMORY_CONFIDENCE` | `0.6` | Confidence above which the diagnostic trusts memory instead of asking |
+| `TA_RESEARCH_REQUIREMENT` | `mandatory` | `mandatory`: a failed research fails the lesson task; `optional`: continue with an empty bundle and a warning |
+| `TA_RESEARCH_MAX_RESULTS` | `5` | Results requested per search query |
+| `TA_RESEARCH_MAX_SOURCES` | `6` | Sources kept after ranking |
+| `TA_RESEARCH_MIN_RELIABILITY` | `0.5` | Sources rated below this are rejected (the reason is kept in the bundle) |
+| `TA_RESEARCH_CACHE` | `true` | Process-local cache of search results |
 | `TA_LOG_LEVEL` / `TA_LOG_JSON` | `INFO` / `true` | Structured logging |
 
 ## Model routing (`config/routing.toml`)

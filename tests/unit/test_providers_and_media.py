@@ -8,7 +8,8 @@ from app.artifacts.service import ArtifactService
 from app.config.settings import REPO_ROOT
 from app.providers.image.mock import MockImageProvider
 from app.providers.retrieval.local import LocalKnowledgeBase
-from app.providers.search.mock import CorpusSearchProvider
+from app.providers.search.base import ProviderSearchRequest
+from app.providers.search.mock import MockSearchProvider
 from app.providers.tts.mock import MockTTSProvider
 from app.providers.video.base import SceneSpec
 from app.providers.video.mock import MockVideoProvider
@@ -26,9 +27,11 @@ CORPUS = REPO_ROOT / "fixtures" / "demo"
 
 
 async def test_search_and_retrieval_are_deterministic() -> None:
-    search = CorpusSearchProvider(CORPUS / "web_corpus.json")
-    first = await search.search("football spanish", 3)
-    assert first == await search.search("football spanish", 3) and len(first) == 3
+    search = MockSearchProvider(CORPUS / "web_corpus.json")
+    request = ProviderSearchRequest(query="football spanish", max_results=3)
+    first = await search.search(request)
+    assert first == await search.search(request) and len(first.hits) == 3
+    assert first.usage.requests == 1 and first.usage.results == 3 and first.usage.cost_usd == 0.0
     kb = LocalKnowledgeBase(CORPUS / "knowledge_base.json")
     refs = await kb.retrieve("preterite", 5, {"kind": "reference"})
     assert refs[0].doc_id == "es-ref-preterite" and all(p.metadata["kind"] == "reference" for p in refs)
