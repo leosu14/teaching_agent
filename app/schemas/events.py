@@ -37,6 +37,13 @@ class EventType:
     REVIEW_COMPLETED = "review.completed"
     ARTIFACT_CREATED = "artifact.created"
     LEARNER_UPDATED = "learner.updated"
+    LEARNER_MASTERY_UPDATED = "learner.mastery_updated"
+    ASSESSMENT_CREATED = "assessment.created"
+    ASSESSMENT_WAITING = "assessment.waiting"
+    ASSESSMENT_SUBMITTED = "assessment.submitted"
+    EVALUATION_STARTED = "evaluation.started"
+    EVALUATION_COMPLETED = "evaluation.completed"
+    RECOMMENDATION_CREATED = "recommendation.created"
 
 
 class Event(Schema):

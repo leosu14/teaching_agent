@@ -55,3 +55,22 @@ async def run_lesson(container: Container, request: str = LEARNER["request"]) ->
     while task.status == TaskStatus.WAITING:
         task = await container.task_service.submit_assessment(task.task_id, answers_for(task))
     return task
+
+
+EVALUATION_ANSWERS = json.loads((FIXTURES / "evaluation_answers.json").read_text(encoding="utf-8"))
+
+
+def evaluation_answers_for(task: Task, key: dict | None = None) -> dict:
+    """The fixture learner's answers to a WAITING evaluation task, as the POST /tasks/{id}/answers body."""
+    assert task.waiting is not None and task.waiting.kind == "assessment_answers"
+    by_concept = (key or EVALUATION_ANSWERS)["answers"]
+    return {"answers": [{"question_id": q["question_id"], "answer": by_concept[q["concept_id"]][q["kind"]]}
+                        for q in task.waiting.prompt["questions"]]}
+
+
+async def start_evaluation(container: Container) -> tuple[Task, Task]:
+    """Complete a lesson, then start its evaluation. Returns (lesson task, evaluation task WAITING for answers)."""
+    lesson = await run_lesson(container)
+    assert lesson.status == TaskStatus.COMPLETED, lesson.errors
+    evaluation = await container.task_service.start_evaluation(lesson.task_id, user_id="u1")
+    return lesson, evaluation

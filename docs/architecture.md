@@ -40,7 +40,22 @@ passes the issues and the previous candidate to the generator, stops at `max_rev
 accepts with warnings according to `RevisionPolicy`.
 
 `HumanApprovalNode` puts the task in `WAITING` with a prompt (for the diagnostic: questions without answer
-keys) and continues when valid input is submitted.
+keys) and continues when valid input is submitted. A node can also validate input against earlier outputs
+(`validate_input`, e.g. every assessment question answered) and name events to emit when it starts waiting
+and when input arrives. Answers may arrive in a later request or another process: the WAITING checkpoint is
+all that is needed.
+
+## Workflows
+
+- `lesson_generation`: the lesson slice above. It stores `sources`, `lesson_plan`, `lesson`,
+  `narration_script`, `slide_plan` and `review_report` artifacts.
+- `lesson_evaluation`: started for a completed lesson task (`TaskService.start_evaluation`), with the lesson
+  task id in `plan.inputs`. It reads the lesson and lesson plan artifacts (`artifact.read`), takes a learner
+  snapshot, asks `LearnerEvaluationAgent` for an assessment sized by objectives, taught concepts, level and
+  mastery, WAITS for answers, asks the agent to grade them and recommend what's next, records the evidence
+  through `learner.record_evaluation` (idempotent per task), and stores a `LEARNER_EVALUATION` artifact whose
+  parent is the lesson. Events: `assessment.created`, `assessment.waiting`, `assessment.submitted`,
+  `evaluation.started`, `evaluation.completed`, `recommendation.created`, `learner.mastery_updated`.
 
 ## Agents
 
@@ -54,7 +69,8 @@ through the same path.
 
 Subjects carry a pluggable `LevelFramework` (`cefr`, `mastery`, more can be registered). Concepts carry
 mastery, confidence, evidence and exposure counts and a review date. The snapshot answers what the learner
-knows, probably does not know, should learn next and should review. Recording a lesson is idempotent per task.
+knows, probably does not know, should learn next and should review. Recording a lesson or an evaluation is
+idempotent per task, so a resumed task never applies the same evidence twice.
 
 ## Cost and observability
 

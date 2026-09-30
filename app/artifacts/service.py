@@ -117,6 +117,10 @@ class ArtifactService:
     def list_for_task(self, task_id: str) -> list[Artifact]:
         return self._repo.list_for_task(task_id)
 
+    def find(self, task_id: str, name: str) -> Artifact | None:
+        """Latest version of a named artifact of a task."""
+        return self._repo.latest(task_id, name)
+
     def graph(self, task_id: str) -> dict[str, list[str]]:
         """artifact_id -> parent artifact ids."""
         return {a.artifact_id: a.parent_ids for a in self._repo.list_for_task(task_id)}

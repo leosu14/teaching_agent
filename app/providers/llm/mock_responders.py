@@ -14,6 +14,15 @@ from collections import defaultdict
 
 from app.providers.llm.base import LLMRequest
 from app.providers.llm.mock import Responder
+from app.schemas.evaluation import (
+    AssessmentPlan,
+    AssessmentQuestion,
+    ConceptOutcome,
+    EvaluationInput,
+    EvaluationStep,
+    LearnerEvaluationResult,
+    LearningRecommendation,
+)
 from app.schemas.learner import AnswerEvaluation
 from app.schemas.lesson import (
     ConceptEstimate,
@@ -506,6 +515,108 @@ def slides(request: LLMRequest) -> dict:
     return SlideDeckPlan(title=lesson.title, slides=deck).model_dump(mode="json")
 
 
+# --- learner evaluation --------------------------------------------------------------------
+
+WEAK_MASTERY = 0.6
+
+
+def evaluate_learner(request: LLMRequest) -> dict:
+    p = EvaluationInput.model_validate(request.input_payload)
+    step = _assess(p) if p.stage == "assess" else _grade(p)
+    return step.model_dump(mode="json")
+
+
+def _assess(p: EvaluationInput) -> EvaluationStep:
+    mastery = {c.concept_id: c.mastery for c in p.snapshot.concept_mastery}
+    exercises: dict[str, Exercise] = {}
+    for ex in p.lesson.exercises:
+        exercises.setdefault(ex.concept_id, ex)
+    questions: list[AssessmentQuestion] = []
+    for section in p.lesson.sections:
+        cid = section.concept_id
+        objective = next((o for o in p.plan.objectives if section.heading.lower() in o.lower()), p.plan.objectives[0])
+        weak = mastery.get(cid, 0.0) < WEAK_MASTERY
+        ex = exercises.get(cid)
+        if ex is not None and ex.answer:
+            questions.append(AssessmentQuestion(
+                question_id=f"sa_{cid}", concept_id=cid, objective=objective, kind="short_answer",
+                prompt=ex.prompt, difficulty=0.5, expected_answer=ex.answer,
+            ))
+        distractors = [s.examples[0] for s in p.lesson.sections if s.concept_id != cid and s.examples]
+        if (weak or ex is None) and section.examples and distractors:
+            # Weaker concepts get a second, recognition-level question built from the lesson's own examples.
+            correct = section.examples[0]
+            questions.append(AssessmentQuestion(
+                question_id=f"mc_{cid}", concept_id=cid, objective=objective, kind="multiple_choice",
+                prompt=f"Which of these is an example of: {section.heading}?",
+                choices=sorted({correct, *distractors[:2]}), difficulty=0.3, expected_answer=correct,
+            ))
+    plan = AssessmentPlan(
+        title=f"Check: {p.lesson.title}", level=p.lesson.level,
+        objectives=sorted({q.objective for q in questions}), questions=questions,
+        total_points=float(len(questions)),
+        rationale="One application question per taught concept; weaker concepts also get a recognition question.",
+    )
+    return EvaluationStep(stage="assess", assessment=plan)
+
+
+def _grade(p: EvaluationInput) -> EvaluationStep:
+    assert p.assessment is not None and p.response is not None
+    answers = {a.question_id: a.answer for a in p.response.answers}
+    names = {s.concept_id: s.heading for s in p.lesson.sections}
+    evaluations = []
+    for q in p.assessment.questions:
+        given = answers.get(q.question_id, "")
+        accepted = {normalize(q.expected_answer), *(normalize(a) for a in q.accepted_answers)}
+        correct = bool(given) and normalize(given) in accepted
+        evaluations.append(AnswerEvaluation(
+            question_id=q.question_id, concept_id=q.concept_id, answer=given, expected=q.expected_answer,
+            correct=correct, difficulty=q.difficulty,
+            feedback="Correct." if correct else f"Expected: {q.expected_answer}",
+        ))
+    points = {q.question_id: q.points for q in p.assessment.questions}
+    concepts: list[ConceptOutcome] = []
+    for cid in dict.fromkeys(q.concept_id for q in p.assessment.questions):
+        mine = [e for e in evaluations if e.concept_id == cid]
+        possible = sum(points[e.question_id] for e in mine)
+        earned = sum(points[e.question_id] for e in mine if e.correct)
+        score = earned / possible
+        status = "mastered" if score == 1 else "partial" if score >= 0.5 else "gap"
+        concepts.append(ConceptOutcome(concept_id=cid, name=names.get(cid, cid), questions=len(mine),
+                                       points_earned=earned, points_possible=possible, score=round(score, 4),
+                                       status=status))
+    mastered = [c.concept_id for c in concepts if c.status == "mastered"]
+    partial = [c.concept_id for c in concepts if c.status == "partial"]
+    gaps = [c.concept_id for c in concepts if c.status == "gap"]
+    level = p.request.target_level or p.lesson.level
+    label = lambda ids: ", ".join(names.get(i, i) for i in ids)  # noqa: E731
+    if gaps:
+        rec = LearningRecommendation(
+            action="reteach", focus_concepts=gaps, review_concepts=partial,
+            rationale=f"{len(gaps)} concept(s) are still gaps after the lesson.",
+            suggested_request=f"Create a new {level} lesson that reteaches {label(gaps)} in {p.request.topic}.")
+    elif partial:
+        rec = LearningRecommendation(
+            action="review", focus_concepts=partial,
+            rationale="Some concepts are only partly secure; a short review should consolidate them.",
+            suggested_request=f"Create a short {level} review of {label(partial)} in {p.request.topic}.")
+    else:
+        assessed = {c.concept_id for c in concepts}
+        upcoming = [cid for cid in p.snapshot.recommended_next if cid not in assessed][:3]
+        rec = LearningRecommendation(
+            action="advance", focus_concepts=upcoming,
+            rationale="Every assessed concept is mastered.",
+            suggested_request=f"Create a new {level} lesson that builds on {p.request.topic}.")
+    earned = sum(c.points_earned for c in concepts)
+    possible = sum(c.points_possible for c in concepts)
+    result = LearnerEvaluationResult(
+        score=round(earned / possible, 4), points_earned=earned, points_possible=possible,
+        evaluations=evaluations, concepts=concepts, mastered=mastered, partial=partial, gaps=gaps,
+        recommendation=rec,
+    )
+    return EvaluationStep(stage="evaluate", result=result)
+
+
 def default_responders(*, first_draft_defects: bool = True) -> dict[str, Responder]:
     return {
         "request_interpreter": interpret,
@@ -515,4 +626,5 @@ def default_responders(*, first_draft_defects: bool = True) -> dict[str, Respond
         "teacher": make_teacher(first_draft_defects),
         "content_reviewer": review,
         "slide_generation": slides,
+        "learner_evaluation": evaluate_learner,
     }

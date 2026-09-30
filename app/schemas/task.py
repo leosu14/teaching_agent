@@ -9,6 +9,7 @@ from pydantic import Field
 
 from app.schemas.artifact import ArtifactType
 from app.schemas.common import CostSummary, Schema, utcnow
+from app.schemas.evaluation import LearningRecommendation
 from app.schemas.learner import MasteryChange
 from app.schemas.lesson import LessonRequest
 from app.schemas.workflow import NodeStatus, WorkflowState
@@ -41,6 +42,7 @@ class TaskPlan(Schema):
     workflow_id: str
     steps: list[str]
     estimated_cost_usd: float
+    inputs: dict[str, str] = Field(default_factory=dict)  # e.g. the lesson task an evaluation refers to
 
 
 class WaitRequest(Schema):
@@ -69,9 +71,12 @@ class TaskResult(Schema):
     title: str
     artifacts: list[ArtifactSummary]
     mastery_changes: list[MasteryChange]
-    review_verdict: str
-    revisions: int
-    estimated_level: str | None
+    review_verdict: str = ""
+    revisions: int = 0
+    estimated_level: str | None = None
+    score: float | None = None
+    remaining_gaps: list[str] = Field(default_factory=list)
+    recommendation: LearningRecommendation | None = None
 
 
 class TaskControl(Schema):

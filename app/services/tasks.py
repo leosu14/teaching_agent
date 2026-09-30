@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from app.artifacts.service import ArtifactService
 from app.runtime.orchestrator.orchestrator import Orchestrator
+from app.runtime.workflows.lesson_evaluation import LESSON_TASK
+from app.runtime.workflows.lesson_evaluation import WORKFLOW_ID as EVALUATION_WORKFLOW
+from app.runtime.workflows.lesson_generation import WORKFLOW_ID as LESSON_WORKFLOW
 from app.schemas.artifact import Artifact
 from app.schemas.events import Event
 from app.schemas.lesson import DiagnosticAnswers
@@ -31,10 +34,28 @@ class TaskService:
         return await self.submit_assessment(task_id, answers)
 
     async def submit_assessment(self, task_id: str, answers: DiagnosticAnswers) -> Task:
+        return await self.submit_answers(task_id, answers.model_dump(mode="json"))
+
+    async def submit_answers(self, task_id: str, payload: dict) -> Task:
+        """Attach the learner's answers to whatever the task is waiting on, then resume it.
+
+        The waiting node validates the payload (diagnostic answers or assessment answers)."""
         task = self._tasks.get(task_id)
         if task.status != TaskStatus.WAITING or task.waiting is None:
-            raise InvalidTransition(f"task {task_id} is not waiting for an assessment")
-        return await self._orchestrator.submit_input(task_id, task.waiting.node_id, answers.model_dump(mode="json"))
+            raise InvalidTransition(f"task {task_id} is not waiting for answers")
+        return await self._orchestrator.submit_input(task_id, task.waiting.node_id, payload)
+
+    async def start_evaluation(self, lesson_task_id: str, *, user_id: str) -> Task:
+        """Start the post-lesson evaluation of a completed lesson task. Runs until it waits for answers."""
+        lesson = self._tasks.get(lesson_task_id)
+        if lesson.status != TaskStatus.COMPLETED or lesson.plan is None or lesson.plan.workflow_id != LESSON_WORKFLOW:
+            raise InvalidTransition(f"task {lesson_task_id} is not a completed lesson")
+        task = self._orchestrator.create_planned_task(
+            request=f"Evaluate lesson {lesson_task_id}", learner_id=lesson.learner_id, user_id=user_id,
+            workflow_id=EVALUATION_WORKFLOW, lesson_request=lesson.plan.lesson_request,
+            inputs={LESSON_TASK: lesson_task_id},
+        )
+        return await self._orchestrator.run(task.task_id)
 
     async def resume(self, task_id: str) -> Task:
         return await self._orchestrator.resume(task_id)

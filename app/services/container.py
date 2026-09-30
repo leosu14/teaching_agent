@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.agents.diagnostic.agent import KnowledgeDiagnosticAgent
+from app.agents.evaluator.agent import LearnerEvaluationAgent
 from app.agents.interpreter.agent import RequestInterpreterAgent
 from app.agents.planner.agent import CurriculumPlannerAgent
 from app.agents.registry import AgentRegistry
@@ -36,6 +37,7 @@ from app.providers.video.mock import MockVideoProvider
 from app.runtime.orchestrator.orchestrator import NodeObserver, Orchestrator
 from app.runtime.orchestrator.planner import WorkflowPlanner
 from app.runtime.workflow.engine import WorkflowEngine
+from app.runtime.workflows.lesson_evaluation import evaluation_template
 from app.runtime.workflows.lesson_generation import LessonWorkflowOptions, lesson_template
 from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
@@ -49,8 +51,8 @@ from app.storage.repositories import (
     SqlLearnerRepository,
     SqlTaskRepository,
 )
-from app.tools.artifacts.tools import StoreArtifactsTool
-from app.tools.learner.tools import LearnerSnapshotTool, LearnerSummaryTool, RecordLessonTool
+from app.tools.artifacts.tools import ReadArtifactsTool, StoreArtifactsTool
+from app.tools.learner.tools import LearnerSnapshotTool, LearnerSummaryTool, RecordEvaluationTool, RecordLessonTool
 from app.tools.manager import ToolManager
 from app.tools.media.tools import ImageGenerationTool, SpeechSynthesisTool, VideoRenderTool
 from app.tools.rag.retrieve import ConceptMapTool, RetrievalTool
@@ -125,7 +127,9 @@ def build_container(
         LearnerSummaryTool(memory),
         LearnerSnapshotTool(memory),
         RecordLessonTool(memory),
+        RecordEvaluationTool(memory),
         StoreArtifactsTool(artifacts),
+        ReadArtifactsTool(artifacts),
         ImageGenerationTool(MockImageProvider(), artifacts),
         SpeechSynthesisTool(MockTTSProvider(), artifacts),
         VideoRenderTool(MockVideoProvider(), artifacts),
@@ -135,7 +139,8 @@ def build_container(
 
     agents = AgentRegistry()
     for agent in (RequestInterpreterAgent(), KnowledgeDiagnosticAgent(), KnowledgeResearchAgent(),
-                  CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), SlideGenerationAgent()):
+                  CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), SlideGenerationAgent(),
+                  LearnerEvaluationAgent()):
         agents.register(agent)
     for agent_id in routing.agent_tiers:
         agents.get(agent_id)  # overrides must name real agents
@@ -146,7 +151,7 @@ def build_container(
         revision_policy=RevisionPolicy(max_revisions=settings.max_revisions,
                                        on_exhausted=settings.revision_exhausted_policy),
     )
-    planner = WorkflowPlanner([lesson_template(options)], router, agents)
+    planner = WorkflowPlanner([lesson_template(options), evaluation_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,
                                 agents=agents, tools=tools, router=router, events=events, observers=observers)
     return Container(
