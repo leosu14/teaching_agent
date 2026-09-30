@@ -59,7 +59,7 @@ async def test_kill_after_planner_then_resume(settings) -> None:
 
     # Final artifacts are correct, and the cost includes both processes' work.
     arts = {a.name: a for a in second.task_service.artifacts(task.task_id)}
-    assert set(arts) == {"sources", "lesson", "narration_script", "slide_plan", "review_report"}
+    assert set(arts) == {"sources", "lesson_plan", "lesson", "narration_script", "slide_plan", "review_report"}
     assert arts["lesson"].type == ArtifactType.LESSON and arts["lesson"].version == 1
     assert arts["slide_plan"].parent_ids == [arts["lesson"].artifact_id]
     assert resumed.cost.actual_cost_usd > cost_before

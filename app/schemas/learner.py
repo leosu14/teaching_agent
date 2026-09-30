@@ -39,12 +39,21 @@ class SubjectState(Schema):
     objectives: list[str] = Field(default_factory=list)
 
 
+class MasteryChange(Schema):
+    concept_id: str
+    before: float
+    after: float
+    reason: str
+
+
 class AssessmentRecord(Schema):
     task_id: str
     subject: str
     at: datetime = Field(default_factory=utcnow)
     estimated_level: str | None = None
+    kind: str = "diagnostic"
     evaluations: list[AnswerEvaluation] = Field(default_factory=list)
+    mastery_changes: list[MasteryChange] = Field(default_factory=list)
 
 
 class MistakeRecord(Schema):
@@ -54,13 +63,6 @@ class MistakeRecord(Schema):
     answer: str
     expected: str
     at: datetime = Field(default_factory=utcnow)
-
-
-class MasteryChange(Schema):
-    concept_id: str
-    before: float
-    after: float
-    reason: str
 
 
 class LessonRecord(Schema):

@@ -1,0 +1,13 @@
+{
+  "description": "The demo learner's answers to the post-lesson check, keyed by concept and question kind.",
+  "answers": {
+    "es.football.opinions": {
+      "short_answer": "gusta",
+      "multiple_choice": "El equipo ganó el partido tres a uno."
+    },
+    "es.football.preterite_match": {
+      "short_answer": "ganamos el partido",
+      "multiple_choice": "El equipo ganó el partido tres a uno."
+    }
+  }
+}

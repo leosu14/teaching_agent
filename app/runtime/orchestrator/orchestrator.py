@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from pydantic import ValidationError
-
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
 from app.observability.events import EventBus
@@ -68,6 +66,23 @@ class Orchestrator:
         self._events.emit(EventType.TASK_CREATED, task_id=task.task_id, learner_id=learner_id, request=request)
         return task
 
+    def create_planned_task(self, *, request: str, learner_id: str, user_id: str, workflow_id: str,
+                            lesson_request: LessonRequest, inputs: dict[str, str]) -> Task:
+        """Create a task whose workflow is already known (no request interpretation needed)."""
+        template = self._planner.template(workflow_id)
+        definition = template.build(lesson_request)
+        estimate = self._planner.estimate(template)
+        task = Task(task_id=new_id("task"), user_id=user_id, learner_id=learner_id, request=request)
+        task.plan = TaskPlan(lesson_request=lesson_request, workflow_id=workflow_id, steps=list(definition.all_nodes),
+                             estimated_cost_usd=estimate, inputs=inputs)
+        task.cost.estimated_cost_usd = estimate
+        task.workflow = definition.initial_state()
+        self._tasks.save(task)
+        self._events.emit(EventType.TASK_CREATED, task_id=task.task_id, learner_id=learner_id, request=request)
+        self._events.emit(EventType.TASK_PLANNED, task_id=task.task_id, workflow_id=workflow_id,
+                          estimated_cost_usd=estimate, **inputs)
+        return task
+
     async def run(self, task_id: str) -> Task:
         """Plan (if needed) and execute until the task completes, waits, pauses, or fails."""
         task = self._tasks.get(task_id)
@@ -76,6 +91,8 @@ class Orchestrator:
         if task.plan is None:
             if not await self._plan(task, scope, ledger):
                 return task
+        elif task.status in (TaskStatus.CREATED, TaskStatus.PAUSED) and not task.metadata.get("started"):
+            transition(task, TaskStatus.PLANNING)  # pre-planned task: planning already happened at creation
         return await self._execute(task, scope, ledger)
 
     async def submit_input(self, task_id: str, node_id: str, payload: dict) -> Task:
@@ -85,13 +102,17 @@ class Orchestrator:
         definition = self._definition(task)
         node = definition.all_nodes[node_id]
         assert isinstance(node, HumanApprovalNode)
-        try:
-            node.response_model.model_validate(payload)
-        except ValidationError as exc:
-            raise InvalidInput(str(exc)) from exc
         assert task.workflow is not None
-        task.workflow.node_states[node_id].human_input = payload
+        try:
+            data = node.response_model.model_validate(payload)
+            if node.validate_input is not None:
+                node.validate_input(StateView(task.workflow, task), data)
+        except ValueError as exc:  # includes pydantic ValidationError
+            raise InvalidInput(str(exc)) from exc
+        task.workflow.node_states[node_id].human_input = data.model_dump(mode="json")
         task.waiting = None
+        if node.submitted_event:
+            self._events.emit(node.submitted_event, task_id=task_id, node_id=node_id)
         self._events.emit(EventType.TASK_RESUMED, task_id=task_id, node_id=node_id, reason="input received")
         self._save(task)
         return await self.run(task_id)

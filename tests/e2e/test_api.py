@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.app import create_app
-from tests.conftest import ANSWERS, LEARNER
+from tests.conftest import ANSWERS, EVALUATION_ANSWERS, LEARNER
 
 
 @pytest.fixture
@@ -48,7 +48,7 @@ def test_lesson_task_over_http(client: TestClient) -> None:
     assert fetched["cost"]["actual_cost_usd"] > 0 and fetched["cost"]["estimated_cost_usd"] > 0
 
     artifacts = client.get(f"/tasks/{task['task_id']}/artifacts").json()
-    assert {a["type"] for a in artifacts} == {"LESSON", "SCRIPT", "SLIDE_PLAN", "REPORT"}
+    assert {a["type"] for a in artifacts} == {"LESSON_PLAN", "LESSON", "SCRIPT", "SLIDE_PLAN", "REPORT"}
 
     events = client.get(f"/tasks/{task['task_id']}/events").json()
     types = [e["type"] for e in events]
@@ -76,3 +76,47 @@ def test_errors_map_to_http_status(client: TestClient) -> None:
     assert client.post("/tasks", json={"request": "", "learner_id": "x"}).status_code == 422
     bad = client.put("/learners/l1", json={"subjects": [{"subject": "chess", "framework_id": "elo"}]})
     assert bad.status_code == 422
+
+
+def test_lesson_evaluation_over_http(client: TestClient) -> None:
+    learner_id = LEARNER["learner_id"]
+    client.put(f"/learners/{learner_id}", json=LEARNER["profile"])
+    lesson = client.post("/tasks", json={"request": LEARNER["request"], "learner_id": learner_id}).json()
+    while lesson["status"] == "WAITING":
+        lesson = client.post(f"/tasks/{lesson['task_id']}/answers", json={"answers": answer(lesson)}).json()
+    assert lesson["status"] == "COMPLETED"  # POST /tasks/{id}/answers also serves the diagnostic
+
+    created = client.post(f"/tasks/{lesson['task_id']}/evaluation", json={"user_id": "u1"})
+    assert created.status_code == 201, created.text
+    task = created.json()
+    assert task["status"] == "WAITING" and task["waiting"]["kind"] == "assessment_answers"
+    questions = task["waiting"]["prompt"]["questions"]
+    assert questions and all("expected_answer" not in q for q in questions)
+
+    bad = client.post(f"/tasks/{task['task_id']}/answers", json={"answers": [{"question_id": "x", "answer": "y"}]})
+    assert bad.status_code == 422
+    assert client.get(f"/tasks/{task['task_id']}").json()["status"] == "WAITING"
+
+    key = EVALUATION_ANSWERS["answers"]
+    body = {"answers": [{"question_id": q["question_id"], "answer": key[q["concept_id"]][q["kind"]]}
+                        for q in questions]}
+    done = client.post(f"/tasks/{task['task_id']}/answers", json=body)
+    assert done.status_code == 200, done.text
+    result = done.json()["result"]
+    assert done.json()["status"] == "COMPLETED"
+    assert result["remaining_gaps"] == ["es.football.opinions"]
+    assert result["recommendation"]["action"] == "reteach"
+
+    [artifact] = client.get(f"/tasks/{task['task_id']}/artifacts").json()
+    assert artifact["type"] == "LEARNER_EVALUATION"
+    assert artifact["metadata"]["score"] == 0.5
+    assert artifact["metadata"]["remaining_gaps"] == ["es.football.opinions"]
+
+    types = [e["type"] for e in client.get(f"/tasks/{task['task_id']}/events").json()]
+    for expected in ("assessment.created", "assessment.waiting", "assessment.submitted", "evaluation.started",
+                     "evaluation.completed", "learner.mastery_updated", "recommendation.created"):
+        assert expected in types, expected
+
+    assert client.post(f"/tasks/{task['task_id']}/answers", json=body).status_code == 409
+    assert client.post(f"/tasks/{task['task_id']}/evaluation").status_code == 409
+    assert client.post("/tasks/task_missing/evaluation").status_code == 404

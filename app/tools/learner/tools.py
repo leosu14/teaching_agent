@@ -6,6 +6,7 @@ from app.learner.memory import LearnerMemoryService
 from app.observability.scope import ExecutionScope
 from app.schemas.common import Schema
 from app.schemas.learner import LearnerSnapshot, LearnerSummary, MasteryUpdate
+from app.schemas.evaluation import EvaluationOutcome
 from app.schemas.lesson import LessonOutcome
 from app.tools.base import Tool
 
@@ -61,3 +62,17 @@ class RecordLessonTool(Tool[LessonOutcome, MasteryUpdate]):
 
     async def run(self, data: LessonOutcome, scope: ExecutionScope) -> MasteryUpdate:
         return self._memory.record_lesson(data, scope)
+
+
+class RecordEvaluationTool(Tool[EvaluationOutcome, MasteryUpdate]):
+    name = "learner.record_evaluation"
+    description = "Record post-lesson assessment evidence in long-term memory and return the mastery changes."
+    input_model = EvaluationOutcome
+    output_model = MasteryUpdate
+    permissions = frozenset({"learner:write"})
+
+    def __init__(self, memory: LearnerMemoryService) -> None:
+        self._memory = memory
+
+    async def run(self, data: EvaluationOutcome, scope: ExecutionScope) -> MasteryUpdate:
+        return self._memory.record_evaluation(data, scope)

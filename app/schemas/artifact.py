@@ -23,6 +23,8 @@ class ArtifactType(str, Enum):
     EXERCISE = "EXERCISE"
     REPORT = "REPORT"
     SUBTITLE = "SUBTITLE"
+    LESSON_PLAN = "LESSON_PLAN"
+    LEARNER_EVALUATION = "LEARNER_EVALUATION"
 
 
 class Artifact(Schema):

@@ -177,6 +177,8 @@ class WorkflowEngine:
         if result.wait is not None:
             ns.status = NodeStatus.WAITING
             hooks.checkpoint(state, node.id)
+            if isinstance(node, HumanApprovalNode) and node.wait_event:
+                node_scope.emit(node.wait_event, kind=node.wait_kind)
             return EngineOutcome(status="waiting", wait=result.wait)
         for target in result.skip:
             target_state = state.node_states[target]

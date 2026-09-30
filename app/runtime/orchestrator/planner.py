@@ -45,8 +45,14 @@ class WorkflowPlanner:
                 return template
         raise NoWorkflowForRequest(f"no workflow provides capabilities {sorted(needed)}")
 
+    def template(self, workflow_id: str) -> WorkflowTemplate:
+        try:
+            return self._templates[workflow_id]
+        except KeyError:
+            raise NoWorkflowForRequest(f"unknown workflow '{workflow_id}'") from None
+
     def build(self, workflow_id: str, request: LessonRequest) -> WorkflowDefinition:
-        return self._templates[workflow_id].build(request)
+        return self.template(workflow_id).build(request)
 
     def estimate(self, template: WorkflowTemplate) -> float:
         total = 0.0

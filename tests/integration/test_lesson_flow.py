@@ -46,7 +46,8 @@ async def test_request_to_completed_lesson(container, mock_llm) -> None:
     # Artifacts and their dependency graph.
     arts = {a.name: a for a in container.task_service.artifacts(task.task_id)}
     assert arts["lesson"].type == ArtifactType.LESSON
-    assert arts["lesson"].parent_ids == [arts["sources"].artifact_id]
+    assert arts["lesson_plan"].type == ArtifactType.LESSON_PLAN
+    assert arts["lesson"].parent_ids == [arts["sources"].artifact_id, arts["lesson_plan"].artifact_id]
     for child in ("narration_script", "slide_plan", "review_report"):
         assert arts[child].parent_ids == [arts["lesson"].artifact_id]
     lesson = LessonContent.model_validate_json(container.artifacts.read(arts["lesson"].artifact_id))

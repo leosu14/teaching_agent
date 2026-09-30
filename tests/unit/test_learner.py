@@ -1,43 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import pytest
 
 from app.learner.frameworks import CEFR, MASTERY_SCALE, UnknownFramework, default_frameworks
 from app.learner.mastery import apply_evidence, apply_exposure
-from app.learner.memory import LearnerMemoryService, UnknownLearner
-from app.schemas.learner import AnswerEvaluation, ConceptMastery, LearnerProfile, LearnerProfileInput, SubjectState
+from app.learner.memory import UnknownLearner
+from app.schemas.learner import AnswerEvaluation, ConceptMastery, LearnerProfileInput, SubjectState
 from app.schemas.lesson import ConceptEstimate, ConceptRef, DiagnosticResult, LessonOutcome, LessonRequest
-from tests.unit.helpers import scope
-
-NOW = datetime(2026, 9, 29, tzinfo=timezone.utc)
-
-
-class MemoryRepo:
-    def __init__(self) -> None:
-        self.rows: dict[str, LearnerProfile] = {}
-
-    def get(self, learner_id):
-        row = self.rows.get(learner_id)
-        return row.model_copy(deep=True) if row else None
-
-    def save(self, profile):
-        self.rows[profile.learner_id] = profile.model_copy(deep=True)
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = NOW
-
-    def __call__(self):
-        return self.now
-
-
-def service():
-    clock = Clock()
-    return LearnerMemoryService(MemoryRepo(), default_frameworks(), clock), clock
-
+from tests.unit.helpers import NOW, scope, service
 
 def test_level_frameworks_are_pluggable_and_generic() -> None:
     assert CEFR.level_for(CEFR.score_for("B1")) == "B1"

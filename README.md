@@ -12,23 +12,35 @@ Request → Task → Request Interpreter → Learner Snapshot → Diagnostic (ad
 → Learner Memory → COMPLETED
 ```
 
+A completed lesson can then be evaluated (the post-lesson learning loop):
+
+```
+Completed lesson → Learner Evaluation (assessment) → WAITING for answers → Learner Evaluation (grading)
+→ Learner Memory (mastery) → remaining gaps + next-learning recommendation → LEARNER_EVALUATION artifact → COMPLETED
+```
+
 ## Run it
 
 ```bash
 pip install -e ".[dev]"
 python scripts/run_demo.py          # one command that proves the slice works
+python scripts/run_evaluation_demo.py  # lesson, then its evaluation, mastery before/after, recommendation
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
 uvicorn app.api.main:app --reload   # the same services over HTTP
 ```
 
 `run_demo.py` prints the task id, final status, every workflow step, the generated artifacts and their
-parents, the learner's mastery changes, token usage, and estimated vs actual cost.
+parents, the learner's mastery changes, token usage, and estimated vs actual cost. `run_evaluation_demo.py`
+runs that lesson, generates the assessment, shows the task WAITING, submits the fixture learner's answers and
+prints the evaluation, mastery before and after, remaining gaps and the next recommendation.
 
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/tasks` | Create and run a task (`{"request", "learner_id"}`); returns WAITING if the diagnostic needs answers |
+| POST | `/tasks/{id}/answers` | Submit answers (`{"answers": [{"question_id", "answer"}]}`) for whatever a WAITING task is waiting on |
+| POST | `/tasks/{id}/evaluation` | Start the post-lesson evaluation of a COMPLETED lesson task; returns the new task, WAITING for answers |
 | GET | `/tasks/{id}` | Task state, plan, workflow checkpoint, cost, result |
 | POST | `/tasks/{id}/pause` · `/resume` · `/cancel` | Task control; resume also recovers crashed or failed tasks |
 | GET | `/tasks/{id}/artifacts` · `/events` | Artifacts with parent links; the persisted event log |

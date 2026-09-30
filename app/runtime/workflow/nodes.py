@@ -6,6 +6,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import ClassVar, TypeVar
 
 from pydantic import BaseModel
@@ -66,6 +67,10 @@ class StateView:
 
     def maybe(self, node_id: str, model: type[M]) -> M | None:
         return self.output(node_id, model) if self.status(node_id) == NodeStatus.COMPLETED else None
+
+    def finished_at(self, node_id: str) -> datetime | None:
+        ns = self._state.node_states.get(node_id)
+        return ns.finished_at if ns else None
 
 
 @dataclass
@@ -168,11 +173,18 @@ class ParallelNode(Node):
 
 @dataclass(frozen=True, kw_only=True)
 class HumanApprovalNode(Node):
-    """Pauses the task in WAITING until a person supplies input matching `response_model`."""
+    """Pauses the task in WAITING until a person supplies input matching `response_model`.
+
+    `validate_input` adds checks that need workflow state (raise ValueError to reject). `wait_event` is
+    emitted when the task starts waiting here and `submitted_event` when valid input is accepted.
+    """
 
     wait_kind: str
     build_request: Callable[[StateView], BaseModel]
     response_model: type[BaseModel]
+    validate_input: Callable[[StateView, BaseModel], None] | None = None
+    wait_event: str | None = None
+    submitted_event: str | None = None
     kind: ClassVar[str] = "human"
 
     async def execute(self, rt: NodeRuntime) -> NodeResult:
