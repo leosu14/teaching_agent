@@ -1,0 +1,53 @@
+[
+  {
+    "url": "https://grammar-reference.example.org/verbs/jugar",
+    "title": "Jugar: present tense conjugation",
+    "snippet": "Jugar changes u to ue in stressed syllables: juego, juegas, juega.",
+    "publisher": "Open Grammar Reference",
+    "publisher_type": "reference",
+    "text": "Spanish verb jugar present tense. Football: jugar al fútbol. A2.",
+    "facts": [
+      {"concept_id": "es.football.jugar_present", "statement": "Jugar changes its stem from u to ue in all present forms except nosotros and vosotros.",
+       "example": "Juego al fútbol con mis amigos.", "practice_prompt": "Complete: Nosotros ___ al fútbol. (jugar)", "practice_answer": "jugamos"},
+      {"concept_id": "es.football.jugar_present", "statement": "To say you play a sport, use jugar a plus the article: jugar al fútbol.",
+       "example": "¿Juegas al fútbol los domingos?"}
+    ]
+  },
+  {
+    "url": "https://language-school.example.com/blog/football-vocabulary",
+    "title": "Football vocabulary in Spanish for A2 learners",
+    "snippet": "Positions, actions and match vocabulary: el portero, el delantero, marcar un gol.",
+    "publisher": "Language School Blog",
+    "publisher_type": "educational",
+    "text": "Spanish football vocabulary A2: players, positions, goals, match.",
+    "facts": [
+      {"concept_id": "es.football.positions", "statement": "The goalkeeper is el portero; the striker is el delantero; a defender is el defensa.",
+       "example": "El portero para el penalti.", "practice_prompt": "How do you say 'the defender' in Spanish?", "practice_answer": "el defensa"},
+      {"concept_id": "es.football.positions", "statement": "Position nouns take el for a male player and la for a female player: la portera.",
+       "example": "La delantera marca muchos goles."}
+    ]
+  },
+  {
+    "url": "https://sports-news.example.net/match-report",
+    "title": "Match report: Spanish football weekend",
+    "snippet": "El delantero marcó dos goles y el equipo ganó el partido.",
+    "publisher": "Sports News",
+    "publisher_type": "news",
+    "text": "Football match report in Spanish. marcó, ganó, perdió.",
+    "facts": [
+      {"concept_id": "es.football.preterite_match", "statement": "Match reports use the preterite for events: marcó (scored), ganó (won), perdió (lost).",
+       "example": "El equipo ganó el partido tres a uno."}
+    ]
+  },
+  {
+    "url": "https://fan-forum.example.com/thread/1234",
+    "title": "anyone know spanish football words?",
+    "snippet": "pretty sure 'gol' is feminine, la gol",
+    "publisher": "Fan Forum",
+    "publisher_type": "forum",
+    "text": "Spanish football forum chat. gol is feminine (wrong).",
+    "facts": [
+      {"concept_id": "es.football.positions", "statement": "Gol is a feminine noun: la gol.", "example": "La gol fue increíble."}
+    ]
+  }
+]

@@ -1,0 +1,15 @@
+{
+  "_comment": "Simulated learner answers keyed by concept id, one object per diagnostic round.",
+  "rounds": [
+    {
+      "es.football.positions": "el portero",
+      "es.football.jugar_present": "juego",
+      "es.football.preterite_match": "marca un gol",
+      "es.football.opinions": "me gusta el fútbol"
+    },
+    {
+      "es.football.preterite_match": "marcó",
+      "es.football.opinions": "gusta"
+    }
+  ]
+}
