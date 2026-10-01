@@ -133,8 +133,11 @@ class Agent(ABC, Generic[I, O]):
     async def use_tool(self, name: str, payload: BaseModel | dict, ctx: AgentContext) -> BaseModel:
         return await ctx.tools.call(self.caller, name, payload, ctx.scope)
 
-    async def generate(self, payload: BaseModel, ctx: AgentContext, *, source: BaseModel) -> O:
-        output_model = self.spec.output_model
+    async def generate(self, payload: BaseModel, ctx: AgentContext, *, source: BaseModel,
+                       output_model: type[BaseModel] | None = None) -> O:
+        """One structured model call. `output_model` defaults to the agent's output; an agent that builds its
+        output from several steps can ask for an intermediate schema instead."""
+        output_model = output_model or self.spec.output_model
         body = payload.model_dump(mode="json")
         schema = output_model.model_json_schema()
         messages = [LLMMessage(role="user", content=self._render(body, schema))]

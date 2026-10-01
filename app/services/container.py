@@ -14,7 +14,7 @@ from app.agents.evaluator.agent import LearnerEvaluationAgent
 from app.agents.interpreter.agent import RequestInterpreterAgent
 from app.agents.planner.agent import CurriculumPlannerAgent
 from app.agents.registry import AgentRegistry
-from app.agents.research.agent import KnowledgeResearchAgent
+from app.agents.research.agent import ResearchAgent
 from app.agents.reviewer.agent import ContentReviewAgent
 from app.agents.slides.agent import SlideGenerationAgent
 from app.agents.teacher.agent import TeacherAgent
@@ -30,8 +30,11 @@ from app.providers.llm.base import LLMProvider
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
 from app.providers.llm.router import ModelRouter
+from app.providers.retrieval.base import Retriever
 from app.providers.retrieval.local import LocalKnowledgeBase
-from app.providers.search.mock import CorpusSearchProvider
+from app.providers.ranking.heuristic import HeuristicRanker
+from app.providers.search.base import SearchProvider
+from app.providers.search.mock import MockSearchProvider
 from app.providers.tts.mock import MockTTSProvider
 from app.providers.video.mock import MockVideoProvider
 from app.runtime.orchestrator.orchestrator import NodeObserver, Orchestrator
@@ -57,7 +60,9 @@ from app.tools.manager import ToolManager
 from app.tools.media.tools import ImageGenerationTool, SpeechSynthesisTool, VideoRenderTool
 from app.tools.rag.retrieve import ConceptMapTool, RetrievalTool
 from app.tools.registry import ToolRegistry
-from app.tools.web.search import WebSearchTool
+from app.tools.research.cache import InMemoryResearchCache
+from app.tools.research.rank import RankSourcesTool
+from app.tools.web.search import SearchTool
 
 LLM_PROVIDER_FACTORIES = {
     "mock": lambda settings: MockLLMProvider(default_responders()),
@@ -100,6 +105,8 @@ def build_container(
     *,
     llm_providers: dict[str, LLMProvider] | None = None,
     observers: Sequence[NodeObserver] = (),
+    search_provider: SearchProvider | None = None,
+    retriever: Retriever | None = None,
 ) -> Container:
     settings = settings or Settings()
     settings.validate_runtime()
@@ -118,10 +125,12 @@ def build_container(
     memory = LearnerMemoryService(SqlLearnerRepository(sessions), frameworks)
     artifacts = ArtifactService(SqlArtifactRepository(sessions), FilesystemObjectStore(settings.resolved_object_store_dir))
 
-    retriever = LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json")
+    retriever = retriever or LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json")
+    search_provider = search_provider or MockSearchProvider(settings.corpus_dir / "web_corpus.json")
     registry = ToolRegistry()
     for tool in (
-        WebSearchTool(CorpusSearchProvider(settings.corpus_dir / "web_corpus.json")),
+        SearchTool(search_provider, cache=InMemoryResearchCache() if settings.research_cache else None),
+        RankSourcesTool(HeuristicRanker()),
         RetrievalTool(retriever),
         ConceptMapTool(retriever),
         LearnerSummaryTool(memory),
@@ -138,7 +147,7 @@ def build_container(
     tools = ToolManager(registry)
 
     agents = AgentRegistry()
-    for agent in (RequestInterpreterAgent(), KnowledgeDiagnosticAgent(), KnowledgeResearchAgent(),
+    for agent in (RequestInterpreterAgent(), KnowledgeDiagnosticAgent(), ResearchAgent(),
                   CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), SlideGenerationAgent(),
                   LearnerEvaluationAgent()):
         agents.register(agent)
@@ -150,6 +159,10 @@ def build_container(
         memory_confidence=settings.diagnostic_memory_confidence,
         revision_policy=RevisionPolicy(max_revisions=settings.max_revisions,
                                        on_exhausted=settings.revision_exhausted_policy),
+        research_requirement=settings.research_requirement,
+        research_max_results=settings.research_max_results,
+        research_max_sources=settings.research_max_sources,
+        research_min_reliability=settings.research_min_reliability,
     )
     planner = WorkflowPlanner([lesson_template(options), evaluation_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,

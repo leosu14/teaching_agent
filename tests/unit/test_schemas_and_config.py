@@ -9,7 +9,6 @@ from app.runtime.tasks.state_machine import InvalidTransition, transition
 from app.schemas.lesson import (
     DiagnosticStep,
     LessonPlan,
-    ResearchBundle,
     ReviewResult,
     Slide,
 )
@@ -37,14 +36,6 @@ def test_review_verdict_must_match_issues() -> None:
         ReviewResult(verdict="REVISION_REQUIRED", scores={}, issues=[], summary="")
     with pytest.raises(ValidationError):
         ReviewResult(verdict="APPROVED", scores={"structure": 1.5}, summary="")
-
-
-def test_research_facts_must_cite_reliable_sources() -> None:
-    source = {"source_id": "s1", "url": "u", "title": "t", "publisher": "p", "retrieved_via": "web",
-              "reliability": 0.2, "reliable": False}
-    fact = {"fact_id": "f", "concept_id": "c", "statement": "x", "source_ids": ["s1"]}
-    with pytest.raises(ValidationError, match="unreliable"):
-        ResearchBundle(query="q", sources=[source], facts=[fact], context_summary="")
 
 
 def test_slides_limit_density_and_diagnostic_steps_are_consistent() -> None:

@@ -59,27 +59,13 @@
   {
     "doc_id": "es-ref-gustar",
     "title": "Reference: gustar and encantar",
-    "text": "Gustar and encantar agree with the thing liked, not the person: me gusta el partido, me gustan los partidos. Encantar expresses a stronger liking.",
-    "metadata": {
-      "kind": "reference", "subject": "spanish", "publisher": "Course knowledge base",
-      "facts": [
-        {"concept_id": "es.football.opinions", "statement": "Gustar and encantar agree with the thing that is liked, not with the person.",
-         "example": "Me gustan los partidos de fútbol.", "practice_prompt": "Complete: Me ___ los partidos. (gustar)", "practice_answer": "gustan"},
-        {"concept_id": "es.football.opinions", "statement": "Encantar expresses a stronger liking than gustar.",
-         "example": "Me encanta el fútbol."}
-      ]
-    }
+    "text": "Gustar and encantar agree with the thing that is liked, not with the person. Example: Me gustan los partidos de fútbol. Practice: Complete: Me ___ los partidos. (gustar) Answer: gustan.\n\nEncantar expresses a stronger liking than gustar. Example: Me encanta el fútbol.",
+    "metadata": {"kind": "reference", "subject": "spanish", "publisher": "Course knowledge base", "language": "en"}
   },
   {
     "doc_id": "es-ref-preterite",
     "title": "Reference: regular preterite endings",
-    "text": "Regular -ar verbs in the preterite: -é, -aste, -ó, -amos, -asteis, -aron. The written accent on marcó distinguishes it from the present marco.",
-    "metadata": {
-      "kind": "reference", "subject": "spanish", "publisher": "Course knowledge base",
-      "facts": [
-        {"concept_id": "es.football.preterite_match", "statement": "Regular -ar verbs take -é, -aste, -ó, -amos, -asteis, -aron in the preterite.",
-         "example": "Marcó un gol en el último minuto.", "practice_prompt": "Translate: 'We won the match.'", "practice_answer": "ganamos el partido"}
-      ]
-    }
+    "text": "Regular -ar verbs take -é, -aste, -ó, -amos, -asteis, -aron in the preterite. Example: Marcó un gol en el último minuto. Practice: Translate: 'We won the match.' Answer: ganamos el partido.",
+    "metadata": {"kind": "reference", "subject": "spanish", "publisher": "Course knowledge base", "language": "en"}
   }
 ]

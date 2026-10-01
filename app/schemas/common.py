@@ -64,6 +64,15 @@ class CostLine(Schema):
     cost_usd: float = 0.0
 
 
+class ServiceUsageLine(Schema):
+    """Usage of a non-LLM service (search, retrieval). `cost_usd` stays None unless the provider reports a cost."""
+
+    calls: int = 0
+    cache_hits: int = 0
+    results: int = 0
+    cost_usd: float | None = None
+
+
 class CostSummary(Schema):
     estimated_cost_usd: float = 0.0
     actual_cost_usd: float = 0.0
@@ -71,6 +80,7 @@ class CostSummary(Schema):
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     by_agent: dict[str, CostLine] = Field(default_factory=dict)
     by_model: dict[str, CostLine] = Field(default_factory=dict)
+    by_service: dict[str, ServiceUsageLine] = Field(default_factory=dict)
 
     def record(self, *, agent_id: str, model: str, usage: TokenUsage, cost_usd: float) -> None:
         self.llm_calls += 1
@@ -81,3 +91,15 @@ class CostSummary(Schema):
             line.calls += 1
             line.usage = line.usage.plus(usage)
             line.cost_usd = round(line.cost_usd + cost_usd, 8)
+
+    def record_service(self, *, service: str, results: int, cache_hit: bool = False,
+                       cost_usd: float | None = None) -> None:
+        line = self.by_service.setdefault(service, ServiceUsageLine())
+        if cache_hit:
+            line.cache_hits += 1
+        else:
+            line.calls += 1
+        line.results += results
+        if cost_usd is not None:
+            line.cost_usd = round((line.cost_usd or 0.0) + cost_usd, 8)
+            self.actual_cost_usd = round(self.actual_cost_usd + cost_usd, 8)

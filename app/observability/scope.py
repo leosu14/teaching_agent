@@ -18,6 +18,10 @@ class UsageLedger:
     def record(self, *, agent_id: str, model: str, usage: TokenUsage, cost_usd: float) -> None:
         self.summary.record(agent_id=agent_id, model=model, usage=usage, cost_usd=cost_usd)
 
+    def record_service(self, *, service: str, results: int, cache_hit: bool = False,
+                       cost_usd: float | None = None) -> None:
+        self.summary.record_service(service=service, results=results, cache_hit=cache_hit, cost_usd=cost_usd)
+
 
 @dataclass(frozen=True)
 class ExecutionScope:

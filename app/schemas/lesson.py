@@ -9,6 +9,7 @@ from pydantic import Field, field_validator, model_validator
 
 from app.schemas.common import Schema
 from app.schemas.learner import AnswerEvaluation, LearnerSnapshot, LearnerSummary
+from app.schemas.research import Citation, ResearchBundle
 
 # --- Request interpretation -------------------------------------------------------------
 
@@ -142,65 +143,15 @@ class DiagnosticQuestionSheet(Schema):
 # --- Research ----------------------------------------------------------------------------
 
 
-class SourceCandidate(Schema):
-    source_id: str
-    url: str
-    title: str
-    publisher: str
-    snippet: str
-    retrieved_via: Literal["web", "knowledge_base"]
-    metadata: dict = Field(default_factory=dict)
-
-
-class Source(Schema):
-    source_id: str
-    url: str
-    title: str
-    publisher: str
-    retrieved_via: Literal["web", "knowledge_base"]
-    reliability: float = Field(ge=0, le=1)
-    reliable: bool
-    reason: str = ""
-
-
-class Fact(Schema):
-    fact_id: str
-    concept_id: str
-    statement: str
-    example: str | None = None
-    practice_prompt: str | None = None
-    practice_answer: str | None = None
-    source_ids: list[str] = Field(min_length=1)
-
-
 class ResearchRequest(Schema):
+    """What the lesson needs researched. The research schemas themselves are domain-independent."""
+
     request: LessonRequest
     diagnostic: DiagnosticResult
     concepts: list[ConceptRef] = Field(min_length=1)
-
-
-class ResearchInput(Schema):
-    query: str
-    request: LessonRequest
-    diagnostic: DiagnosticResult
-    concepts: list[ConceptRef]
-    candidates: list[SourceCandidate] = Field(default_factory=list)
-
-
-class ResearchBundle(Schema):
-    query: str
-    sources: list[Source]
-    facts: list[Fact]
-    context_summary: str
-
-    @model_validator(mode="after")
-    def _facts_cite_reliable_sources(self) -> ResearchBundle:
-        reliable = {s.source_id for s in self.sources if s.reliable}
-        for fact in self.facts:
-            missing = [sid for sid in fact.source_ids if sid not in reliable]
-            if missing:
-                raise ValueError(f"fact {fact.fact_id} cites unknown or unreliable sources {missing}")
-        return self
+    max_results_per_query: int = Field(default=5, ge=1, le=50)
+    max_sources: int = Field(default=6, ge=1)
+    min_reliability: float = Field(default=0.5, ge=0, le=1)
 
 
 # --- Curriculum plan ---------------------------------------------------------------------
@@ -276,7 +227,7 @@ class LessonSection(Schema):
     examples: list[str] = Field(default_factory=list)
     analogy: str | None = None
     narration: str = Field(min_length=1)
-    citations: list[str] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)  # citation ids from the research bundle
 
 
 class Exercise(Schema):
@@ -303,6 +254,8 @@ class LessonContent(Schema):
     exercises: list[Exercise] = Field(default_factory=list)
     check_questions: list[CheckQuestion] = Field(default_factory=list)
     summary: str
+    # Resolved from the research bundle by the workflow for every citation id the sections use.
+    references: list[Citation] = Field(default_factory=list)
 
     @field_validator("sections")
     @classmethod

@@ -25,6 +25,7 @@ class ArtifactType(str, Enum):
     SUBTITLE = "SUBTITLE"
     LESSON_PLAN = "LESSON_PLAN"
     LEARNER_EVALUATION = "LEARNER_EVALUATION"
+    RESEARCH_BUNDLE = "RESEARCH_BUNDLE"
 
 
 class Artifact(Schema):

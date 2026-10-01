@@ -48,7 +48,7 @@ def test_lesson_task_over_http(client: TestClient) -> None:
     assert fetched["cost"]["actual_cost_usd"] > 0 and fetched["cost"]["estimated_cost_usd"] > 0
 
     artifacts = client.get(f"/tasks/{task['task_id']}/artifacts").json()
-    assert {a["type"] for a in artifacts} == {"LESSON_PLAN", "LESSON", "SCRIPT", "SLIDE_PLAN", "REPORT"}
+    assert {a["type"] for a in artifacts} == {"RESEARCH_BUNDLE", "LESSON_PLAN", "LESSON", "SCRIPT", "SLIDE_PLAN", "REPORT"}
 
     events = client.get(f"/tasks/{task['task_id']}/events").json()
     types = [e["type"] for e in events]
@@ -62,7 +62,7 @@ def test_lesson_task_over_http(client: TestClient) -> None:
 
 def test_catalog_endpoints(client: TestClient) -> None:
     agents = {a["id"] for a in client.get("/agents").json()}
-    assert {"request_interpreter", "knowledge_diagnostic", "knowledge_research", "curriculum_planner",
+    assert {"request_interpreter", "knowledge_diagnostic", "research", "curriculum_planner",
             "teacher", "content_reviewer", "slide_generation"} <= agents
     tools = {t["name"] for t in client.get("/tools").json()}
     assert {"search.web", "rag.retrieve", "learner.snapshot", "artifact.store", "video.render"} <= tools

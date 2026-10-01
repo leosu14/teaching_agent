@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     revision_exhausted_policy: Literal["fail", "accept_with_warnings"] = "fail"
     diagnostic_max_rounds: int = Field(default=2, ge=1, le=5)
     diagnostic_memory_confidence: float = Field(default=0.6, ge=0, le=1)
+    research_requirement: Literal["mandatory", "optional"] = "mandatory"
+    research_max_results: int = Field(default=5, ge=1, le=50)
+    research_max_sources: int = Field(default=6, ge=1, le=50)
+    research_min_reliability: float = Field(default=0.5, ge=0, le=1)
+    research_cache: bool = True
 
     log_level: str = "INFO"
     log_json: bool = True

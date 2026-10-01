@@ -23,3 +23,5 @@ jobs:
         run: python scripts/run_demo.py
       - name: Evaluation demo
         run: python scripts/run_evaluation_demo.py
+      - name: Research demo
+        run: python scripts/run_research_demo.py

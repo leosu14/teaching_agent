@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
-
 from app.config.settings import Settings
 from app.schemas.artifact import ArtifactType
 from app.schemas.lesson import LessonContent, SlideDeckPlan
+from app.schemas.research import ResearchBundle
 from app.schemas.task import TaskStatus
 from app.services.container import build_container
 from tests.conftest import add_demo_learner, answers_for, run_lesson
@@ -40,24 +39,30 @@ async def test_request_to_completed_lesson(container, mock_llm) -> None:
 
     order = task.workflow.execution_order
     expected = ["learner_snapshot", "diagnose_1", "answers_1", "diagnose_2", "answers_2", "diagnose_3", "diagnostic",
-                "research", "plan", "teach_review", "slides", "package_artifacts", "store_artifacts", "update_learner"]
+                "research", "research_policy", "store_research", "plan", "teach_review", "slides", "package_artifacts", "store_artifacts", "update_learner"]
     assert [n for n in order if not n.startswith("diagnostic_gate")] == expected
 
     # Artifacts and their dependency graph.
     arts = {a.name: a for a in container.task_service.artifacts(task.task_id)}
     assert arts["lesson"].type == ArtifactType.LESSON
     assert arts["lesson_plan"].type == ArtifactType.LESSON_PLAN
-    assert arts["lesson"].parent_ids == [arts["sources"].artifact_id, arts["lesson_plan"].artifact_id]
+    assert arts["research_bundle"].type == ArtifactType.RESEARCH_BUNDLE and arts["research_bundle"].parent_ids == []
+    assert arts["lesson_plan"].parent_ids == [arts["research_bundle"].artifact_id]
+    assert arts["lesson"].parent_ids == [arts["lesson_plan"].artifact_id, arts["research_bundle"].artifact_id]
     for child in ("narration_script", "slide_plan", "review_report"):
         assert arts[child].parent_ids == [arts["lesson"].artifact_id]
     lesson = LessonContent.model_validate_json(container.artifacts.read(arts["lesson"].artifact_id))
     slides = SlideDeckPlan.model_validate_json(container.artifacts.read(arts["slide_plan"].artifact_id))
     assert {s.narration_section_id for s in slides.slides if s.narration_section_id} == {s.section_id for s in lesson.sections}
-    # Every section is traceable to reliable sources; the unreliable forum source was excluded.
-    sources = json.loads(container.artifacts.read(arts["sources"].artifact_id))
-    reliable = {s["source_id"] for s in sources["sources"] if s["reliable"]}
-    assert any(not s["reliable"] and s["publisher"] == "Fan Forum" for s in sources["sources"])
-    assert all(s.citations and set(s.citations) <= reliable for s in lesson.sections)
+    # Every section is traceable to selected sources; the unreliable forum source was rejected.
+    research = ResearchBundle.model_validate_json(container.artifacts.read(arts["research_bundle"].artifact_id))
+    assert any(r.source.publisher == "Fan Forum" and "reliability" in r.reason for r in research.rejected_sources)
+    assert all(s.citations for s in lesson.sections)
+    for section in lesson.sections:
+        for cid in section.citations:
+            _, evidence, source = research.resolve(cid)
+            assert evidence.target_id == section.concept_id and source.publisher != "Fan Forum"
+    assert {c.citation_id for c in lesson.references} == {c for s in lesson.sections for c in s.citations}
     # Gaps are taught; the concept the learner already knew is not.
     taught = {s.concept_id for s in lesson.sections}
     assert taught == {"es.football.preterite_match", "es.football.opinions"}

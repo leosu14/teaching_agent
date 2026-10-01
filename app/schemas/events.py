@@ -44,6 +44,12 @@ class EventType:
     EVALUATION_STARTED = "evaluation.started"
     EVALUATION_COMPLETED = "evaluation.completed"
     RECOMMENDATION_CREATED = "recommendation.created"
+    RESEARCH_STARTED = "research.started"
+    RESEARCH_QUERY_CREATED = "research.query_created"
+    RESEARCH_SEARCH_COMPLETED = "research.search_completed"
+    RESEARCH_SOURCE_SELECTED = "research.source_selected"
+    RESEARCH_COMPLETED = "research.completed"
+    RESEARCH_FAILED = "research.failed"
 
 
 class Event(Schema):

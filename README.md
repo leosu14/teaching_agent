@@ -4,11 +4,11 @@ An agentic, personalised education platform. It assesses what a learner knows, r
 with traceable sources, plans a lesson for that learner, writes and reviews the lesson, plans slides,
 stores versioned artifacts, and updates long-term learner memory, so the next lesson adapts.
 
-This first release is the **text-lesson vertical slice**, fully deterministic on mock providers:
+This release is the **text-lesson vertical slice** with research, fully deterministic on mock providers:
 
 ```
 Request → Task → Request Interpreter → Learner Snapshot → Diagnostic (adaptive, can WAIT for answers)
-→ Research → Curriculum Plan → Teacher ⇄ Reviewer (revision loop) → Slide Plan → Artifact Storage
+→ Research (queries → search → dedup/rank → evidence → cited ResearchBundle) → Curriculum Plan → Teacher ⇄ Reviewer (revision loop) → Slide Plan → Artifact Storage
 → Learner Memory → COMPLETED
 ```
 
@@ -25,6 +25,7 @@ Completed lesson → Learner Evaluation (assessment) → WAITING for answers →
 pip install -e ".[dev]"
 python scripts/run_demo.py          # one command that proves the slice works
 python scripts/run_evaluation_demo.py  # lesson, then its evaluation, mastery before/after, recommendation
+python scripts/run_research_demo.py    # the lesson's research: queries, results, sources, evidence, citations
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
 uvicorn app.api.main:app --reload   # the same services over HTTP
 ```
@@ -33,6 +34,9 @@ uvicorn app.api.main:app --reload   # the same services over HTTP
 parents, the learner's mastery changes, token usage, and estimated vs actual cost. `run_evaluation_demo.py`
 runs that lesson, generates the assessment, shows the task WAITING, submits the fixture learner's answers and
 prints the evaluation, mastery before and after, remaining gaps and the next recommendation.
+`run_research_demo.py` runs the lesson and shows its research: the request, generated queries, mock search
+results (with duplicates), selected and rejected sources, extracted evidence, citations, the stored
+ResearchBundle, and how each lesson section's citations resolve to evidence and sources.
 
 ## API
 

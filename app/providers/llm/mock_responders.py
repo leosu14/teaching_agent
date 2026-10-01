@@ -24,6 +24,13 @@ from app.schemas.evaluation import (
     LearningRecommendation,
 )
 from app.schemas.learner import AnswerEvaluation
+from app.schemas.research import (
+    EvidenceExtraction,
+    EvidenceExtractionInput,
+    ExtractedEvidence,
+    KeyFinding,
+    ProposedFinding,
+)
 from app.schemas.lesson import (
     ConceptEstimate,
     ConceptRef,
@@ -34,7 +41,6 @@ from app.schemas.lesson import (
     DiagnosticStep,
     Exercise,
     CheckQuestion,
-    Fact,
     InterpreterInput,
     LessonContent,
     LessonPlan,
@@ -44,8 +50,6 @@ from app.schemas.lesson import (
     PlannedConcept,
     PlannedExercise,
     PlannerInput,
-    ResearchBundle,
-    ResearchInput,
     ReviewCriterion,
     ReviewerInput,
     ReviewIssue,
@@ -53,7 +57,6 @@ from app.schemas.lesson import (
     Slide,
     SlideDeckPlan,
     SlideInput,
-    Source,
     TeacherInput,
     Verdict,
     VisualSpec,
@@ -63,7 +66,6 @@ from app.schemas.lesson import (
 
 LEVEL_RE = re.compile(r"\b(A1|A2|B1|B2|C1|C2)\b", re.IGNORECASE)
 TOPIC_RE = re.compile(r"\b(?:about|on|regarding)\s+(.+?)[\s.!?]*$", re.IGNORECASE)
-PUBLISHER_RELIABILITY = {"reference": 0.95, "educational": 0.85, "news": 0.7, "forum": 0.3}
 KNOWN_THRESHOLD = 0.7
 GAP_THRESHOLD = 0.5
 
@@ -261,50 +263,70 @@ def _item(round_number: int, concept_id: str, probe) -> DiagnosticItem:
     )
 
 
-# --- research ----------------------------------------------------------------------------
+# --- research (evidence extraction) ---------------------------------------------------------
+
+STOPWORDS = frozenset(
+    "a an and are as at be by for from how in is it its of on or that the this to with what when which who "
+    "about talk using use you your not than into".split()
+)
+PARAGRAPH_RE = re.compile(r"\S(?:.|\n(?!\s*\n))*")
+MARKER_RE = re.compile(r"\s*\b(Example|Practice|Answer):\s*")
+
+
+def _terms(text: str) -> set[str]:
+    words = re.findall(r"\w+", text.lower())
+    return {w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words if len(w) > 2 and w not in STOPWORDS}
+
+
+def _parse_paragraph(text: str) -> dict[str, str | None]:
+    """'Claim. Example: ... Practice: ... Answer: ...' -> parts. Only the claim is required."""
+    parts = MARKER_RE.split(text)
+    out: dict[str, str | None] = {"claim": parts[0].strip(), "Example": None, "Practice": None, "Answer": None}
+    for label, value in zip(parts[1::2], parts[2::2]):
+        out[label] = value.strip() or None
+    return out
 
 
 def research(request: LLMRequest) -> dict:
-    p = ResearchInput.model_validate(request.input_payload)
-    wanted = {c.concept_id for c in p.concepts}
-    sources: list[Source] = []
-    facts: list[Fact] = []
-    for cand in p.candidates:
-        if cand.retrieved_via == "knowledge_base":
-            reliability = 0.9
-        else:
-            reliability = PUBLISHER_RELIABILITY.get(cand.metadata.get("publisher_type", ""), 0.4)
-        reliable = reliability >= 0.5
-        sources.append(Source(
-            source_id=cand.source_id, url=cand.url, title=cand.title, publisher=cand.publisher,
-            retrieved_via=cand.retrieved_via, reliability=reliability, reliable=reliable,
-            reason="" if reliable else "Low-reliability publisher; claims not used.",
-        ))
-        if not reliable:
-            continue
-        for raw in cand.metadata.get("facts", []):
-            if raw.get("concept_id") not in wanted:
+    """Quote each source paragraph under the research target it is most clearly about (ties are skipped)."""
+    p = EvidenceExtractionInput.model_validate(request.input_payload)
+    background = _terms(f"{p.objective.subject} {p.objective.topic}")
+    targets = {
+        t.target_id: _terms(f"{t.name} {t.description} {t.target_id.replace('.', ' ').replace('_', ' ')}") - background
+        for t in p.objective.targets
+    }
+    evidence: list[ExtractedEvidence] = []
+    findings: list[ProposedFinding] = []
+    per_target: dict[str, int] = defaultdict(int)
+    for src in p.sources:
+        field, text = ("content", src.content) if src.content else ("snippet", src.snippet)
+        for match in PARAGRAPH_RE.finditer(text):
+            paragraph = match.group(0).rstrip()
+            words = _terms(paragraph)
+            scores = sorted(((len(words & terms), tid) for tid, terms in targets.items()), reverse=True)
+            best, target_id = scores[0]
+            if best == 0 or (len(scores) > 1 and scores[1][0] == best):
                 continue
-            facts.append(Fact(
-                fact_id=f"f{len(facts) + 1}",
-                concept_id=raw["concept_id"],
-                statement=raw["statement"],
-                example=raw.get("example"),
-                practice_prompt=raw.get("practice_prompt"),
-                practice_answer=raw.get("practice_answer"),
-                source_ids=[cand.source_id],
+            if per_target[target_id] >= p.max_findings_per_target:
+                continue
+            per_target[target_id] += 1
+            ref = f"e{len(evidence) + 1}"
+            evidence.append(ExtractedEvidence(
+                ref=ref, source_id=src.source_id, target_id=target_id, text=paragraph, field=field,
+                start=match.start(), end=match.start() + len(paragraph),
+                relevance=round(min(1.0, best / max(1, len(targets[target_id]))), 3),
             ))
-    covered = {f.concept_id for f in facts}
-    bundle = ResearchBundle(
-        query=p.query,
-        sources=sources,
-        facts=facts,
-        context_summary=(
-            f"{sum(s.reliable for s in sources)} reliable of {len(sources)} sources; "
-            f"{len(facts)} facts covering {len(covered & wanted)}/{len(wanted)} concepts."
-        ),
-    )
-    return bundle.model_dump(mode="json")
+            parts = _parse_paragraph(paragraph)
+            findings.append(ProposedFinding(
+                target_id=target_id, statement=parts["claim"], example=parts["Example"],
+                practice_prompt=parts["Practice"], practice_answer=parts["Answer"], evidence_refs=[ref],
+            ))
+    covered = sum(1 for t in targets if per_target[t])
+    return EvidenceExtraction(
+        evidence=evidence, findings=findings,
+        summary=f"{len(evidence)} quoted passages from {len({e.source_id for e in evidence})} sources "
+                f"covering {covered}/{len(targets)} targets.",
+    ).model_dump(mode="json")
 
 
 # --- curriculum planner ----------------------------------------------------------------------
@@ -318,9 +340,9 @@ def plan(request: LLMRequest) -> dict:
     if not order:
         order = [c.concept_id for c in p.concepts]
     names = {c.concept_id: c.name for c in p.concepts}
-    facts_by_concept: dict[str, list[Fact]] = defaultdict(list)
-    for fact in p.research.facts:
-        facts_by_concept[fact.concept_id].append(fact)
+    facts_by_concept: dict[str, list[KeyFinding]] = defaultdict(list)
+    for fact in p.research.key_findings:
+        facts_by_concept[fact.target_id].append(fact)
 
     planned = [
         PlannedConcept(
@@ -374,13 +396,11 @@ def plan(request: LLMRequest) -> dict:
 def make_teacher(first_draft_defects: bool) -> Responder:
     def teach(request: LLMRequest) -> dict:
         p = TeacherInput.model_validate(request.input_payload)
-        facts_by_concept: dict[str, list[Fact]] = defaultdict(list)
-        for fact in p.research.facts:
-            facts_by_concept[fact.concept_id].append(fact)
+        research = p.research
 
         sections = []
         for concept in p.plan.concepts:
-            facts = facts_by_concept[concept.concept_id][:3]
+            facts = research.findings_for(concept.concept_id)[:3]
             explanation = " ".join(f.statement for f in facts) or concept.rationale
             examples = [f.example for f in facts if f.example]
             narration = f"{concept.name}. {explanation}"
@@ -393,13 +413,13 @@ def make_teacher(first_draft_defects: bool) -> Responder:
                 explanation=explanation,
                 examples=examples,
                 narration=narration,
-                citations=sorted({sid for f in facts for sid in f.source_ids}),
+                citations=list(dict.fromkeys(c for f in facts for c in research.citation_ids_for(f))),
             ))
         if first_draft_defects and p.revision is None and sections:
             # Simulates a common model failure (dropped citations) so the review loop is exercised.
             sections[-1] = sections[-1].model_copy(update={"citations": []})
 
-        answers = {f.practice_prompt: f.practice_answer for f in p.research.facts if f.practice_prompt}
+        answers = {f.practice_prompt: f.practice_answer for f in research.key_findings if f.practice_prompt}
         exercises = [
             Exercise(exercise_id=ex.exercise_id, concept_id=ex.concept_id, kind=ex.kind, prompt=ex.prompt,
                      answer=answers.get(ex.prompt) or "", explanation="Compare with the lesson examples.")
@@ -430,7 +450,8 @@ def make_teacher(first_draft_defects: bool) -> Responder:
 
 def review(request: LLMRequest) -> dict:
     p = ReviewerInput.model_validate(request.input_payload)
-    reliable = {s.source_id for s in p.research.sources if s.reliable}
+    resolvable = {c.citation_id for c in p.research.citations}
+    researched = {f.target_id for f in p.research.key_findings}
     sections = {s.concept_id: s for s in p.content.sections}
     issues: list[ReviewIssue] = []
 
@@ -443,10 +464,14 @@ def review(request: LLMRequest) -> dict:
             add(ReviewCriterion.COMPLETENESS, "major", concept.concept_id,
                 f"Planned concept '{concept.name}' has no section.", "Add a section for it.")
     for section in p.content.sections:
-        if not section.citations:
+        if not section.citations and section.concept_id not in researched:
+            add(ReviewCriterion.SOURCE_QUALITY, "minor", section.section_id,
+                "Unverified: research found no evidence for this concept, so the section cites no source.",
+                "Verify the section once research evidence is available.")
+        elif not section.citations:
             add(ReviewCriterion.SOURCE_QUALITY, "major", section.section_id,
-                "Section makes factual claims without citing a source.", "Cite the research facts it uses.")
-        elif not set(section.citations) <= reliable:
+                "Section makes factual claims without citing a source.", "Cite the research findings it uses.")
+        elif not set(section.citations) <= resolvable:
             add(ReviewCriterion.HALLUCINATION_RISK, "critical", section.section_id,
                 "Section cites a source that is unknown or unreliable.", "Cite only reliable research sources.")
         if not section.examples:
@@ -621,7 +646,7 @@ def default_responders(*, first_draft_defects: bool = True) -> dict[str, Respond
     return {
         "request_interpreter": interpret,
         "knowledge_diagnostic": diagnose,
-        "knowledge_research": research,
+        "research": research,
         "curriculum_planner": plan,
         "teacher": make_teacher(first_draft_defects),
         "content_reviewer": review,

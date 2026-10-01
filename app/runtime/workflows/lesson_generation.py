@@ -1,12 +1,12 @@
 """Lesson-generation workflow template (the first vertical slice).
 
-snapshot -> adaptive diagnostic (ask / wait for answers / re-assess, up to N rounds) -> research -> plan
--> teach/review/revise loop -> slide plan -> artifacts -> learner memory.
+snapshot -> adaptive diagnostic (ask / wait for answers / re-assess, up to N rounds) -> research
+-> research policy -> research artifact -> plan -> teach/review/revise loop -> slide plan -> artifacts
+-> learner memory.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 
 from app.runtime.orchestrator.planner import ExpectedCall, WorkflowTemplate
@@ -21,6 +21,7 @@ from app.runtime.workflow.nodes import (
     ToolNode,
     TransformNode,
 )
+from app.runtime.workflows.research_policy import ResearchRequirement, apply_research_policy
 from app.schemas.artifact import ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
 from app.schemas.learner import LearnerSnapshot, MasteryUpdate
 from app.schemas.lesson import (
@@ -34,7 +35,6 @@ from app.schemas.lesson import (
     LessonPlan,
     LessonRequest,
     PlannerInput,
-    ResearchBundle,
     ResearchRequest,
     ReviewerInput,
     RevisionContext,
@@ -42,6 +42,7 @@ from app.schemas.lesson import (
     SlideInput,
     TeacherInput,
 )
+from app.schemas.research import ResearchBundle
 from app.schemas.task import ArtifactSummary, TaskResult
 from app.schemas.workflow import ReviewOutcome, RevisionPolicy, RevisionRequest
 
@@ -53,6 +54,10 @@ class LessonWorkflowOptions:
     diagnostic_rounds: int = 2
     memory_confidence: float = 0.6
     revision_policy: RevisionPolicy = field(default_factory=RevisionPolicy)
+    research_requirement: ResearchRequirement = "mandatory"
+    research_max_results: int = 5
+    research_max_sources: int = 6
+    research_min_reliability: float = 0.5
 
 
 def _request(v: StateView) -> LessonRequest:
@@ -64,8 +69,20 @@ def _review(v: StateView) -> ReviewOutcome:
     return v.output("teach_review", ReviewOutcome)
 
 
+def _research(v: StateView) -> ResearchBundle:
+    return v.output("research_policy", ResearchBundle)
+
+
+def _research_artifact_id(v: StateView) -> str:
+    return v.output("store_research", StoredArtifacts).by_key["research_bundle"]
+
+
 def _lesson(v: StateView) -> LessonContent:
-    return LessonContent.model_validate(_review(v).candidate)
+    """The approved lesson with its references resolved from the research bundle (never model-written)."""
+    lesson = LessonContent.model_validate(_review(v).candidate)
+    research = _research(v)
+    cited = {c for s in lesson.sections for c in s.citations}
+    return lesson.model_copy(update={"references": [c for c in research.citations if c.citation_id in cited]})
 
 
 def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions) -> WorkflowDefinition:
@@ -128,8 +145,10 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
         return v.output("diagnostic", DiagnosticStep)
 
     def teacher_input(v: StateView, revision: RevisionRequest | None) -> TeacherInput:
+        plan = v.output("plan", LessonPlan)
+        focus = [c.concept_id for c in plan.concepts] + plan.review_concepts
         return TeacherInput(
-            request=_request(v), plan=v.output("plan", LessonPlan), research=v.output("research", ResearchBundle),
+            request=_request(v), plan=plan, research=_research(v).focused(focus),
             snapshot=v.output("learner_snapshot", LearnerSnapshot),
             revision=None if revision is None else RevisionContext(
                 revision_number=revision.revision_number, issues=revision.issues,
@@ -139,20 +158,26 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
 
     def reviewer_input(v: StateView, candidate, revision_number: int) -> ReviewerInput:
         return ReviewerInput(request=_request(v), plan=v.output("plan", LessonPlan),
-                             research=v.output("research", ResearchBundle), content=candidate,
+                             research=_research(v), content=candidate,
                              revision_number=revision_number)
 
     nodes += [
         TransformNode(id="diagnostic", fn=final_diagnostic, depends_on=("diagnose_1",),
                       after=tuple(diagnose_ids[1:]) + tuple(f"answers_{r}" for r in range(1, rounds + 1))),
-        AgentNode(id="research", agent="knowledge_research", depends_on=("diagnostic",),
-                  build_input=lambda v: ResearchRequest(request=_request(v), diagnostic=diagnostic(v).result,
-                                                        concepts=diagnostic(v).concepts)),
-        AgentNode(id="plan", agent="curriculum_planner", depends_on=("research",),
+        AgentNode(id="research", agent="research", depends_on=("diagnostic",),
+                  build_input=lambda v: ResearchRequest(
+                      request=_request(v), diagnostic=diagnostic(v).result, concepts=diagnostic(v).concepts,
+                      max_results_per_query=options.research_max_results, max_sources=options.research_max_sources,
+                      min_reliability=options.research_min_reliability)),
+        TransformNode(id="research_policy", depends_on=("research",),
+                      fn=lambda v: apply_research_policy(v.output("research", ResearchBundle),
+                                                         options.research_requirement)),
+        ToolNode(id="store_research", tool="artifact.store", permissions=frozenset({"artifact:write"}),
+                 depends_on=("research_policy",), build_input=_research_batch),
+        AgentNode(id="plan", agent="curriculum_planner", depends_on=("store_research",),
                   build_input=lambda v: PlannerInput(
                       request=_request(v), snapshot=v.output("learner_snapshot", LearnerSnapshot),
-                      diagnostic=diagnostic(v).result, research=v.output("research", ResearchBundle),
-                      concepts=diagnostic(v).concepts)),
+                      diagnostic=diagnostic(v).result, research=_research(v), concepts=diagnostic(v).concepts)),
         ReviewNode(id="teach_review", depends_on=("plan",), generator="teacher", reviewer="content_reviewer",
                    candidate_model=LessonContent, build_generator_input=teacher_input,
                    build_reviewer_input=reviewer_input, policy=options.revision_policy),
@@ -166,6 +191,17 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
     ]
     return WorkflowDefinition(id=WORKFLOW_ID, nodes=tuple(nodes), summarize=_summarize,
                               description="Diagnose, research, plan, teach with review, plan slides, store, remember.")
+
+
+def _research_batch(v: StateView) -> ArtifactBatch:
+    research = _research(v)
+    return ArtifactBatch(drafts=[ArtifactDraft(
+        key="research_bundle", name="research_bundle", type=ArtifactType.RESEARCH_BUNDLE,
+        media_type="application/json", content=_json(research),
+        metadata={"research_id": research.research_id, "status": research.status, "sources": len(research.sources),
+                  "evidence": len(research.evidence), "citations": len(research.citations),
+                  "warnings": len(research.warnings)},
+    )])
 
 
 def _json(model) -> str:
@@ -183,20 +219,18 @@ def _script(lesson: LessonContent) -> str:
 def _package(v: StateView) -> ArtifactBatch:
     lesson = _lesson(v)
     review = _review(v)
-    research = v.output("research", ResearchBundle)
+    research = _research(v)
+    research_artifact = _research_artifact_id(v)
     slides = v.output("slides", SlideDeckPlan)
-    sources = {"sources": [s.model_dump(mode="json") for s in research.sources],
-               "facts": [f.model_dump(mode="json") for f in research.facts]}
     return ArtifactBatch(drafts=[
-        ArtifactDraft(key="sources", name="sources", type=ArtifactType.REPORT, media_type="application/json",
-                      content=json.dumps(sources, ensure_ascii=False, indent=2),
-                      metadata={"kind": "research_sources", "reliable": sum(s.reliable for s in research.sources)}),
         ArtifactDraft(key="lesson_plan", name="lesson_plan", type=ArtifactType.LESSON_PLAN,
                       media_type="application/json", content=_json(v.output("plan", LessonPlan)),
-                      parent_keys=["sources"], metadata={"objectives": len(v.output("plan", LessonPlan).objectives)}),
+                      parent_ids=[research_artifact], metadata={"objectives": len(v.output("plan", LessonPlan).objectives)}),
         ArtifactDraft(key="lesson", name="lesson", type=ArtifactType.LESSON, media_type="application/json",
-                      content=_json(lesson), parent_keys=["sources", "lesson_plan"],
-                      metadata={"title": lesson.title, "level": lesson.level, "sections": len(lesson.sections)}),
+                      content=_json(lesson), parent_keys=["lesson_plan"], parent_ids=[research_artifact],
+                      metadata={"title": lesson.title, "level": lesson.level, "sections": len(lesson.sections),
+                                "research_id": research.research_id, "research_status": research.status,
+                                "references": len(lesson.references)}),
         ArtifactDraft(key="script", name="narration_script", type=ArtifactType.SCRIPT, media_type="text/markdown",
                       content=_script(lesson), parent_keys=["lesson"]),
         ArtifactDraft(key="slide_plan", name="slide_plan", type=ArtifactType.SLIDE_PLAN,
@@ -217,22 +251,25 @@ def _lesson_outcome(v: StateView) -> LessonOutcome:
         task_id=v.task.task_id, learner_id=v.task.learner_id, request=_request(v), diagnostic=step.result,
         concepts=step.concepts, lesson_title=_lesson(v).title,
         taught_concept_ids=[c.concept_id for c in plan.concepts],
-        artifact_ids=[a.artifact_id for a in stored.artifacts],
+        artifact_ids=[_research_artifact_id(v), *(a.artifact_id for a in stored.artifacts)],
     )
 
 
 def _summarize(v: StateView) -> TaskResult:
+    research = v.output("store_research", StoredArtifacts)
     stored = v.output("store_artifacts", StoredArtifacts)
     update = v.output("update_learner", MasteryUpdate)
     review = _review(v)
     return TaskResult(
         title=_lesson(v).title,
         artifacts=[ArtifactSummary(artifact_id=a.artifact_id, type=a.type, name=a.name, version=a.version,
-                                   uri=a.uri, parent_ids=a.parent_ids) for a in stored.artifacts],
+                                   uri=a.uri, parent_ids=a.parent_ids)
+                   for a in [*research.artifacts, *stored.artifacts]],
         mastery_changes=update.changes,
         review_verdict=review.final_review.verdict.value if review.status == "approved" else review.status,
         revisions=review.revisions,
         estimated_level=update.estimated_level,
+        warnings=_research(v).warnings,
     )
 
 
@@ -246,7 +283,7 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
         expected_calls=(
             ExpectedCall("request_interpreter", 700, 200),
             ExpectedCall("knowledge_diagnostic", 3000, 1200, calls=rounds),
-            ExpectedCall("knowledge_research", 5000, 2500),
+            ExpectedCall("research", 5000, 2500),
             ExpectedCall("curriculum_planner", 7000, 1800),
             ExpectedCall("teacher", 8000, 3500, calls=2),
             ExpectedCall("content_reviewer", 10000, 900, calls=2),
