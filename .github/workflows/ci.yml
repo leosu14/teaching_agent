@@ -25,3 +25,5 @@ jobs:
         run: python scripts/run_evaluation_demo.py
       - name: Research demo
         run: python scripts/run_research_demo.py
+      - name: Visual demo
+        run: python scripts/run_visual_demo.py

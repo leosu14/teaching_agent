@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     llm_providers: list[str] = Field(default_factory=lambda: ["mock"])
     search_provider: Literal["mock"] = "mock"
     retrieval_provider: Literal["local"] = "local"
-    image_provider: Literal["mock"] = "mock"
+    image_provider: Literal["mock"] = "mock"  # image generation
+    image_search_provider: Literal["mock"] = "mock"
     tts_provider: Literal["mock"] = "mock"
     video_provider: Literal["mock"] = "mock"
     corpus_dir: Path = REPO_ROOT / "fixtures" / "demo"
@@ -38,6 +39,9 @@ class Settings(BaseSettings):
     research_max_sources: int = Field(default=6, ge=1, le=50)
     research_min_reliability: float = Field(default=0.5, ge=0, le=1)
     research_cache: bool = True
+    visual_failure_policy: Literal["fail", "continue"] = "fail"
+    visual_max_per_lesson: int = Field(default=6, ge=0, le=20)
+    visual_max_candidates: int = Field(default=3, ge=1, le=10)
 
     log_level: str = "INFO"
     log_json: bool = True
@@ -54,6 +58,6 @@ class Settings(BaseSettings):
         if not self.llm_providers:
             raise ConfigError("TA_LLM_PROVIDERS must name at least one LLM provider")
         if self.search_provider == "mock" or self.retrieval_provider == "local":
-            for name in ("web_corpus.json", "knowledge_base.json"):
+            for name in ("web_corpus.json", "knowledge_base.json", "image_catalog.json"):
                 if not (self.corpus_dir / name).exists():
                     raise ConfigError(f"TA_CORPUS_DIR={self.corpus_dir} is missing {name}")

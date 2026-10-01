@@ -39,7 +39,8 @@ async def test_request_to_completed_lesson(container, mock_llm) -> None:
 
     order = task.workflow.execution_order
     expected = ["learner_snapshot", "diagnose_1", "answers_1", "diagnose_2", "answers_2", "diagnose_3", "diagnostic",
-                "research", "research_policy", "store_research", "plan", "teach_review", "slides", "package_artifacts", "store_artifacts", "update_learner"]
+                "research", "research_policy", "store_research", "plan", "teach_review", "visual_gate", "visual", "visual_policy", "slides", "package_artifacts",
+                "store_artifacts", "update_learner"]
     assert [n for n in order if not n.startswith("diagnostic_gate")] == expected
 
     # Artifacts and their dependency graph.
@@ -48,7 +49,10 @@ async def test_request_to_completed_lesson(container, mock_llm) -> None:
     assert arts["lesson_plan"].type == ArtifactType.LESSON_PLAN
     assert arts["research_bundle"].type == ArtifactType.RESEARCH_BUNDLE and arts["research_bundle"].parent_ids == []
     assert arts["lesson_plan"].parent_ids == [arts["research_bundle"].artifact_id]
-    assert arts["lesson"].parent_ids == [arts["lesson_plan"].artifact_id, arts["research_bundle"].artifact_id]
+    images = sorted(a.artifact_id for a in arts.values() if a.type == ArtifactType.IMAGE_ASSET)
+    assert len(images) == 4
+    assert arts["lesson"].parent_ids[:2] == [arts["lesson_plan"].artifact_id, arts["research_bundle"].artifact_id]
+    assert sorted(arts["lesson"].parent_ids[2:]) == images  # the lesson uses its image assets
     for child in ("narration_script", "slide_plan", "review_report"):
         assert arts[child].parent_ids == [arts["lesson"].artifact_id]
     lesson = LessonContent.model_validate_json(container.artifacts.read(arts["lesson"].artifact_id))

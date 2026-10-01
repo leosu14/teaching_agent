@@ -1,23 +1,32 @@
-"""Deterministic placeholder images rendered as SVG."""
+"""Deterministic image generation: a PNG whose colour bands derive from the request. No network, no model."""
 
 from __future__ import annotations
 
 import hashlib
-from html import escape
+import json
 
-from app.providers.image.base import GeneratedImage, ImageProvider
+from app.providers.image.base import GeneratedImage, ImageGenerationProvider, ProviderImageRequest
+from app.schemas.visual import ImageUsage
+from app.utils.images import colors_from, encode_png
 
 
-class MockImageProvider(ImageProvider):
+class MockImageGenerationProvider(ImageGenerationProvider):
+    """Same request, same bytes. Usage is one image with zero cost, since no paid API is called."""
+
     name = "mock"
+    model = "mock-image-1"
+    supports_negative_prompt = True
+    supports_seed = True
+    supports_style = True
 
-    async def generate(self, prompt: str, width: int, height: int) -> GeneratedImage:
-        hue = int(hashlib.sha256(prompt.encode()).hexdigest()[:2], 16) * 360 // 256
-        svg = (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">'
-            f'<rect width="100%" height="100%" fill="hsl({hue},45%,85%)"/>'
-            f'<text x="50%" y="50%" text-anchor="middle" font-family="sans-serif" font-size="20">'
-            f"{escape(prompt[:60])}</text></svg>"
+    async def generate(self, request: ProviderImageRequest) -> GeneratedImage:
+        seed = request.seed if request.seed is not None else 0
+        key = json.dumps({**request.model_dump(), "seed": seed}, sort_keys=True).encode("utf-8")
+        digest = hashlib.sha256(key).digest()
+        content = encode_png(request.width, request.height, colors_from(digest, 4))
+        megapixels = round(request.width * request.height / 1_000_000, 4)
+        return GeneratedImage(
+            content=content, media_type="image/png", width=request.width, height=request.height, model=self.model,
+            seed=seed, usage=ImageUsage(requests=1, images=1, megapixels=megapixels, cost_usd=0.0),
+            metadata={"steps": 20, "sampler": "mock-bands"},
         )
-        return GeneratedImage(content=svg.encode(), media_type="image/svg+xml", provider=self.name,
-                              metadata={"prompt": prompt, "width": width, "height": height})

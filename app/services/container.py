@@ -18,6 +18,7 @@ from app.agents.research.agent import ResearchAgent
 from app.agents.reviewer.agent import ContentReviewAgent
 from app.agents.slides.agent import SlideGenerationAgent
 from app.agents.teacher.agent import TeacherAgent
+from app.agents.visual.agent import VisualAgent
 from app.artifacts.service import ArtifactService
 from app.config.routing import ConfigError, load_routing
 from app.config.settings import Settings
@@ -25,7 +26,10 @@ from app.learner.frameworks import FrameworkRegistry, default_frameworks
 from app.learner.memory import LearnerMemoryService
 from app.observability.events import EventBus
 from app.observability.logging import log_event
-from app.providers.image.mock import MockImageProvider
+from app.providers.image.base import ImageGenerationProvider
+from app.providers.image.mock import MockImageGenerationProvider
+from app.providers.image_search.base import ImageSearchProvider
+from app.providers.image_search.mock import MockImageSearchProvider
 from app.providers.llm.base import LLMProvider
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
@@ -57,11 +61,16 @@ from app.storage.repositories import (
 from app.tools.artifacts.tools import ReadArtifactsTool, StoreArtifactsTool
 from app.tools.learner.tools import LearnerSnapshotTool, LearnerSummaryTool, RecordEvaluationTool, RecordLessonTool
 from app.tools.manager import ToolManager
-from app.tools.media.tools import ImageGenerationTool, SpeechSynthesisTool, VideoRenderTool
+from app.tools.media.tools import SpeechSynthesisTool, VideoRenderTool
 from app.tools.rag.retrieve import ConceptMapTool, RetrievalTool
 from app.tools.registry import ToolRegistry
 from app.tools.research.cache import InMemoryResearchCache
 from app.tools.research.rank import RankSourcesTool
+from app.tools.visual.assets import ImageAssetTool
+from app.tools.visual.generate import ImageGenerationTool
+from app.tools.visual.search import ImageFetchTool, ImageSearchTool
+from app.tools.visual.selection import ImageSelectionTool
+from app.tools.visual.validation import ImageValidationTool
 from app.tools.web.search import SearchTool
 
 LLM_PROVIDER_FACTORIES = {
@@ -107,6 +116,8 @@ def build_container(
     observers: Sequence[NodeObserver] = (),
     search_provider: SearchProvider | None = None,
     retriever: Retriever | None = None,
+    image_search_provider: ImageSearchProvider | None = None,
+    image_generation_provider: ImageGenerationProvider | None = None,
 ) -> Container:
     settings = settings or Settings()
     settings.validate_runtime()
@@ -127,6 +138,8 @@ def build_container(
 
     retriever = retriever or LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json")
     search_provider = search_provider or MockSearchProvider(settings.corpus_dir / "web_corpus.json")
+    image_search = image_search_provider or MockImageSearchProvider(settings.corpus_dir / "image_catalog.json")
+    image_generation = image_generation_provider or MockImageGenerationProvider()
     registry = ToolRegistry()
     for tool in (
         SearchTool(search_provider, cache=InMemoryResearchCache() if settings.research_cache else None),
@@ -139,7 +152,12 @@ def build_container(
         RecordEvaluationTool(memory),
         StoreArtifactsTool(artifacts),
         ReadArtifactsTool(artifacts),
-        ImageGenerationTool(MockImageProvider(), artifacts),
+        ImageSearchTool(image_search),
+        ImageFetchTool(image_search, artifacts),
+        ImageSelectionTool(),
+        ImageGenerationTool(image_generation, artifacts),
+        ImageValidationTool(artifacts),
+        ImageAssetTool(artifacts),
         SpeechSynthesisTool(MockTTSProvider(), artifacts),
         VideoRenderTool(MockVideoProvider(), artifacts),
     ):
@@ -148,8 +166,8 @@ def build_container(
 
     agents = AgentRegistry()
     for agent in (RequestInterpreterAgent(), KnowledgeDiagnosticAgent(), ResearchAgent(),
-                  CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), SlideGenerationAgent(),
-                  LearnerEvaluationAgent()):
+                  CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), VisualAgent(),
+                  SlideGenerationAgent(), LearnerEvaluationAgent()):
         agents.register(agent)
     for agent_id in routing.agent_tiers:
         agents.get(agent_id)  # overrides must name real agents
@@ -163,6 +181,9 @@ def build_container(
         research_max_results=settings.research_max_results,
         research_max_sources=settings.research_max_sources,
         research_min_reliability=settings.research_min_reliability,
+        visual_failure_policy=settings.visual_failure_policy,
+        visual_max_per_lesson=settings.visual_max_per_lesson,
+        visual_max_candidates=settings.visual_max_candidates,
     )
     planner = WorkflowPlanner([lesson_template(options), evaluation_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,

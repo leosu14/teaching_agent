@@ -6,7 +6,6 @@ import wave
 
 from app.artifacts.service import ArtifactService
 from app.config.settings import REPO_ROOT
-from app.providers.image.mock import MockImageProvider
 from app.providers.retrieval.local import LocalKnowledgeBase
 from app.providers.search.base import ProviderSearchRequest
 from app.providers.search.mock import MockSearchProvider
@@ -18,7 +17,7 @@ from app.storage.object_store import FilesystemObjectStore
 from app.storage.repositories import SqlArtifactRepository
 from app.tools.base import ToolCaller
 from app.tools.manager import ToolManager
-from app.tools.media.tools import ImageGenerationTool, SpeechSynthesisTool, VideoRenderTool
+from app.tools.media.tools import SpeechSynthesisTool, VideoRenderTool
 from app.tools.rag.retrieve import ConceptMapTool
 from app.tools.registry import ToolRegistry
 from tests.unit.helpers import scope
@@ -49,21 +48,16 @@ async def test_media_tools_store_artifacts_through_the_tool_manager(tmp_path) ->
     sessions = create_db(f"sqlite:///{tmp_path / 'db.sqlite'}")
     artifacts = ArtifactService(SqlArtifactRepository(sessions), FilesystemObjectStore(tmp_path / "o"))
     registry = ToolRegistry()
-    for tool in (ImageGenerationTool(MockImageProvider(), artifacts), SpeechSynthesisTool(MockTTSProvider(), artifacts),
-                 VideoRenderTool(MockVideoProvider(), artifacts)):
+    for tool in (SpeechSynthesisTool(MockTTSProvider(), artifacts), VideoRenderTool(MockVideoProvider(), artifacts)):
         registry.register(tool)
     manager = ToolManager(registry)
     caller = ToolCaller(caller_id="t", allowed_tools=frozenset(registry.names()),
                         permissions=frozenset({"media:generate", "artifact:write"}))
     sc, _ = scope("task1")
 
-    image = await manager.call(caller, "image.generate", {"name": "diagram", "prompt": "a goal"}, sc)
-    again = await manager.call(caller, "image.generate", {"name": "diagram", "prompt": "a goal"}, sc)
-    assert image.artifact_id == again.artifact_id  # identical generation is reused
-    assert artifacts.read(image.artifact_id).startswith(b"<svg")
-
-    audio = await manager.call(caller, "audio.synthesize", {"name": "narration", "text": "uno dos tres",
-                                                            "parent_ids": [image.artifact_id]}, sc)
+    audio = await manager.call(caller, "audio.synthesize", {"name": "narration", "text": "uno dos tres"}, sc)
+    again = await manager.call(caller, "audio.synthesize", {"name": "narration", "text": "uno dos tres"}, sc)
+    assert audio.artifact_id == again.artifact_id  # identical content is reused
     assert audio.metadata["duration_ms"] == 1050 and len(audio.metadata["timings"]) == 3
     with wave.open(io.BytesIO(artifacts.read(audio.artifact_id))) as wav:
         assert wav.getnframes() > 0

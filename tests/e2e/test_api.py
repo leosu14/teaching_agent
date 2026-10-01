@@ -48,7 +48,8 @@ def test_lesson_task_over_http(client: TestClient) -> None:
     assert fetched["cost"]["actual_cost_usd"] > 0 and fetched["cost"]["estimated_cost_usd"] > 0
 
     artifacts = client.get(f"/tasks/{task['task_id']}/artifacts").json()
-    assert {a["type"] for a in artifacts} == {"RESEARCH_BUNDLE", "LESSON_PLAN", "LESSON", "SCRIPT", "SLIDE_PLAN", "REPORT"}
+    assert {a["type"] for a in artifacts} == {"RESEARCH_BUNDLE", "VISUAL_PLAN", "IMAGE_ASSET",
+                                                "LESSON_PLAN", "LESSON", "SCRIPT", "SLIDE_PLAN", "REPORT"}
 
     events = client.get(f"/tasks/{task['task_id']}/events").json()
     types = [e["type"] for e in events]

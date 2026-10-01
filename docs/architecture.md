@@ -9,11 +9,13 @@ api          FastAPI routes: validate input, call a service, return the result
 services     application services + the composition root (container.py); the CLI uses the same services
 runtime      orchestrator (task lifecycle), workflow engine + node types, task state machine, workflow templates
 agents       decide WHAT to do; reach models only via ModelRouter and tools only via ToolManager
-tools        do the HOW (search, retrieval, dedup + ranking, research cache, learner memory, artifacts, media);
+tools        do the HOW (search, retrieval, dedup + ranking, research cache, image search / fetch / generation /
+             selection / validation / assets, learner memory, artifacts, media);
              no educational strategy
-providers    replaceable adapters: LLM, search, retrieval, ranking, image, TTS, video (mock/local in this release)
+providers    replaceable adapters: LLM, search, retrieval, ranking, image generation, image search, TTS, video
+             (mock/local in this release)
 learner      level frameworks, mastery rules, LearnerMemoryService (long-term memory)
-artifacts    ArtifactService: versioning, content-hash dedup, dependency graph
+artifacts    ArtifactService: versioning, content-hash dedup, dependency graph, content-addressed media objects
 storage      SQLAlchemy/SQLite metadata repositories + filesystem object store (no business rules)
 schemas / config / observability / utils   shared foundation
 ```
@@ -49,9 +51,11 @@ all that is needed.
 ## Workflows
 
 - `lesson_generation`: the lesson slice above. Research runs between the diagnostic and the planner
-  (`research` → `research_policy` → `store_research` → `plan`). It stores `research_bundle` first, then
-  `lesson_plan` (parent: research_bundle), `lesson` (parents: lesson_plan, research_bundle),
-  `narration_script`, `slide_plan` and `review_report`.
+  (`research` → `research_policy` → `store_research` → `plan`); visuals run after review
+  (`teach_review` → `visual_gate` → `visual` → `visual_policy` → `slides`). It stores `research_bundle` first,
+  then `visual_plan` (parent: research_bundle) and one `image_<visual_id>` IMAGE_ASSET per visual (parent:
+  visual_plan), then `lesson_plan` (parent: research_bundle), `lesson` (parents: lesson_plan, research_bundle and
+  its image assets), `narration_script`, `slide_plan` and `review_report`.
 - `lesson_evaluation`: started for a completed lesson task (`TaskService.start_evaluation`), with the lesson
   task id in `plan.inputs`. It reads the lesson and lesson plan artifacts (`artifact.read`), takes a learner
   snapshot, asks `LearnerEvaluationAgent` for an assessment sized by objectives, taught concepts, level and
@@ -97,6 +101,58 @@ claim traces Lesson → ResearchBundle → Evidence → Source. Events: `researc
 `research.failed`. Search and retrieval usage is tracked per service in the task cost (`by_service`); a cost
 is recorded only when the provider reports one.
 
+## Visuals
+
+`VisualAgent` (`app/agents/visual/`) runs only for a lesson the reviewer approved: the `visual_gate` node skips it
+for a lesson accepted with warnings (with a warning saying so), and a rejected draft never reaches it, so no image
+is made for a lesson that did not pass review. It asks the model for a `VisualPlan` from the lesson plan, the
+approved lesson and the research bundle: one `VisualRequirement` per visual (visual id, purpose, lesson section,
+concept, description, `VisualType`, preferred source, search query and/or generation prompt, aspect ratio, required,
+attribution required). The schema rejects URLs anywhere in a requirement, a photo or map that is not searched, and
+a generated visual that is not generated; the agent's `check` rejects unknown sections and too many visuals. The
+plan id is a hash of the plan, so re-planning the same lesson the same way reuses the stored plan and images.
+`VisualType` (photo, illustration, diagram, chart, map, icon, generated_visual) carries no subject logic.
+
+For each requirement the agent tries the preferred source, then the other one when the visual allows it (a photo
+or map is never replaced by a generated image). All of it goes through tools on the ToolManager:
+
+- `image.search` (`ImageSearchTool`): `ImageSearchRequest` → `ImageSearchResult`s with a stable `image_id`, URLs,
+  title, source page, publisher, creator, size, format, licence and credit line exactly as the provider reported
+  them (unknown fields stay None; provider-only fields go to `metadata`). `ImageSearchProvider` is the adapter
+  interface (Unsplash, Wikimedia Commons, Pexels, ... later); `MockImageSearchProvider` is deterministic over
+  `fixtures/demo/image_catalog.json` and renders its downloads locally.
+- `image.select` (`ImageSelector`): a deterministic score over relevance, aspect ratio, visual type, licence and
+  credit availability, source quality and resolution; unlicensed candidates are ineligible when attribution is
+  required. Candidates are passed through untouched, so the selected image keeps all its source metadata.
+- `image.fetch`: downloads a candidate through its provider into the object store.
+- `image.generate` (`ImageGenerationTool`): `ImageGenerationRequest` (prompt, negative prompt, aspect ratio, size,
+  style, seed) → `ImageGenerationResult` (asset id, provider, model, generation metadata with timestamp and prompt
+  hash, storage reference, usage). Parameters the provider does not support are recorded as ignored.
+  `ImageGenerationProvider` is the adapter interface; `MockImageGenerationProvider` renders a deterministic PNG.
+- `image.validate` (`ImageValidator`): reads format and size from the bytes, recomputes the checksum, and checks
+  declared vs actual size and format, the expected aspect ratio, a non-empty source, licence and credit when
+  attribution is required, and generation metadata (provider, model, timestamp, prompt hash). Failures are
+  structured `ImageValidationError`s and an `image.validation_failed` event; the next candidate is tried.
+- `image.create_asset` (`ImageAssetTool`): re-validates the bytes itself and only then stores an `IMAGE_ASSET`
+  artifact whose metadata is the `ImageAsset`: visual id, plan id, section, type, origin, size, format, checksum,
+  attribution, selection record (rank, score, signals, rejected candidates) and validation report.
+
+Image bytes are content-addressed in the existing filesystem object store (`ArtifactService.put_object`,
+`objects/sha256/<xx>/<sha256>.<ext>`): identical bytes are written once and every artifact using them points at
+the same object; SQLite holds metadata only. Attribution is a separate chain from the lesson's textual citations:
+lesson sections reference their image assets in `LessonSection.visuals` (attached by the workflow, never by a
+model), while `citations` and `references` still trace Lesson → Citation → Evidence → Source. A generated image's
+attribution has no source URL: it is never treated as evidence.
+
+Failures are recorded per visual with every attempt (`VisualResult.failures`). An optional visual that fails
+leaves a warning on the task result and the lesson artifact metadata. A required visual that fails follows
+`TA_VISUAL_FAILURE_POLICY` in the `visual_policy` node: `fail` (default) fails the task with the visual and reason
+named, `continue` completes with a warning. Events: `visual.started`, `visual.plan_created`,
+`image.search_started`, `image.search_completed`, `image.selected`, `image.generation_started`,
+`image.generation_completed`, `image.validation_failed`, `image.asset_created`, `visual.completed`,
+`visual.failed`. Image search, fetch and generation usage is tracked per service in the task cost, with units
+(requests, images, megapixels, bytes); a cost is recorded only when the provider reports one.
+
 ## Agents
 
 Each agent declares id, name, description, input/output schemas, a system prompt (`prompt.md`), a tool
@@ -121,5 +177,6 @@ persisted and logged as JSON, so a task can be reconstructed from its event log.
 
 ## Not in this release
 
-Real LLM/search/media providers, web scraping, vector retrieval and embeddings, PPTX rendering, video rendering, coding exercises and
+Real LLM/search/image/media providers, web scraping, vector retrieval and embeddings, slide rendering, PPTX, TTS
+narration, video rendering, coding exercises and
 VS Code integration, UI. The provider and tool interfaces they plug into already exist.

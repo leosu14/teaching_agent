@@ -1,8 +1,8 @@
 """Lesson-generation workflow template (the first vertical slice).
 
 snapshot -> adaptive diagnostic (ask / wait for answers / re-assess, up to N rounds) -> research
--> research policy -> research artifact -> plan -> teach/review/revise loop -> slide plan -> artifacts
--> learner memory.
+-> research policy -> research artifact -> plan -> teach/review/revise loop -> visuals (only for an approved
+lesson) -> visual policy -> slide plan -> artifacts -> learner memory.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from app.runtime.workflow.nodes import (
     TransformNode,
 )
 from app.runtime.workflows.research_policy import ResearchRequirement, apply_research_policy
+from app.runtime.workflows.visual_policy import VisualFailurePolicy, apply_visual_policy
 from app.schemas.artifact import ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
 from app.schemas.learner import LearnerSnapshot, MasteryUpdate
 from app.schemas.lesson import (
@@ -38,13 +39,16 @@ from app.schemas.lesson import (
     ResearchRequest,
     ReviewerInput,
     RevisionContext,
+    SectionVisual,
     SlideDeckPlan,
     SlideInput,
     TeacherInput,
+    VisualRequest,
 )
 from app.schemas.research import ResearchBundle
 from app.schemas.task import ArtifactSummary, TaskResult
-from app.schemas.workflow import ReviewOutcome, RevisionPolicy, RevisionRequest
+from app.schemas.visual import VisualResult
+from app.schemas.workflow import NodeStatus, ReviewOutcome, RevisionPolicy, RevisionRequest
 
 WORKFLOW_ID = "lesson_generation"
 
@@ -58,6 +62,9 @@ class LessonWorkflowOptions:
     research_max_results: int = 5
     research_max_sources: int = 6
     research_min_reliability: float = 0.5
+    visual_failure_policy: VisualFailurePolicy = "fail"
+    visual_max_per_lesson: int = 6
+    visual_max_candidates: int = 3
 
 
 def _request(v: StateView) -> LessonRequest:
@@ -77,12 +84,33 @@ def _research_artifact_id(v: StateView) -> str:
     return v.output("store_research", StoredArtifacts).by_key["research_bundle"]
 
 
+def _visuals(v: StateView) -> VisualResult | None:
+    """The visuals after the visual policy; None before they exist or when they were skipped."""
+    return v.maybe("visual_policy", VisualResult)
+
+
 def _lesson(v: StateView) -> LessonContent:
-    """The approved lesson with its references resolved from the research bundle (never model-written)."""
+    """The approved lesson with its references resolved from the research bundle and its sections' visuals
+    attached from the visual result. Neither is ever model-written."""
     lesson = LessonContent.model_validate(_review(v).candidate)
     research = _research(v)
+    visuals = _visuals(v)
+    sections = [s.model_copy(update={"visuals": [
+        SectionVisual(visual_id=a.visual_id, artifact_id=a.artifact_id, asset_id=a.asset_id,
+                      visual_type=a.visual_type, origin=a.origin, purpose=a.purpose, description=a.description)
+        for a in (visuals.for_section(s.section_id) if visuals else [])
+    ]}) for s in lesson.sections]
     cited = {c for s in lesson.sections for c in s.citations}
-    return lesson.model_copy(update={"references": [c for c in research.citations if c.citation_id in cited]})
+    return lesson.model_copy(update={"sections": sections,
+                                     "references": [c for c in research.citations if c.citation_id in cited]})
+
+
+def _visual_warnings(v: StateView) -> list[str]:
+    if v.status("visual") == NodeStatus.SKIPPED:
+        return [f"No visuals were generated: the lesson was {_review(v).status.replace('_', ' ')}, "
+                "and visuals are only generated for an approved lesson."]
+    visuals = _visuals(v)
+    return visuals.warnings if visuals else []
 
 
 def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions) -> WorkflowDefinition:
@@ -181,7 +209,18 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
         ReviewNode(id="teach_review", depends_on=("plan",), generator="teacher", reviewer="content_reviewer",
                    candidate_model=LessonContent, build_generator_input=teacher_input,
                    build_reviewer_input=reviewer_input, policy=options.revision_policy),
-        AgentNode(id="slides", agent="slide_generation", depends_on=("teach_review",),
+        # Visuals only for a lesson that passed review: never for a rejected draft, nor for one accepted with warnings.
+        ConditionalNode(id="visual_gate", depends_on=("teach_review",),
+                        predicate=lambda v: _review(v).status == "approved", when_true=("visual",)),
+        AgentNode(id="visual", agent="visual", depends_on=("visual_gate",),
+                  build_input=lambda v: VisualRequest(
+                      plan=v.output("plan", LessonPlan), lesson=_lesson(v), research=_research(v),
+                      language=_request(v).language_of_instruction, max_visuals=options.visual_max_per_lesson,
+                      max_candidates=options.visual_max_candidates, parent_artifact_ids=[_research_artifact_id(v)])),
+        TransformNode(id="visual_policy", depends_on=("visual",),
+                      fn=lambda v: apply_visual_policy(v.output("visual", VisualResult),
+                                                       options.visual_failure_policy)),
+        AgentNode(id="slides", agent="slide_generation", depends_on=("teach_review",), after=("visual_policy",),
                   build_input=lambda v: SlideInput(lesson=_lesson(v), plan=v.output("plan", LessonPlan))),
         TransformNode(id="package_artifacts", depends_on=("slides",), fn=_package),
         ToolNode(id="store_artifacts", tool="artifact.store", permissions=frozenset({"artifact:write"}),
@@ -190,7 +229,8 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                  depends_on=("store_artifacts",), build_input=_lesson_outcome),
     ]
     return WorkflowDefinition(id=WORKFLOW_ID, nodes=tuple(nodes), summarize=_summarize,
-                              description="Diagnose, research, plan, teach with review, plan slides, store, remember.")
+                              description="Diagnose, research, plan, teach with review, illustrate, plan slides, "
+                                          "store, remember.")
 
 
 def _research_batch(v: StateView) -> ArtifactBatch:
@@ -222,15 +262,19 @@ def _package(v: StateView) -> ArtifactBatch:
     research = _research(v)
     research_artifact = _research_artifact_id(v)
     slides = v.output("slides", SlideDeckPlan)
+    visuals = _visuals(v)
+    image_ids = [a.artifact_id for a in visuals.assets] if visuals else []
     return ArtifactBatch(drafts=[
         ArtifactDraft(key="lesson_plan", name="lesson_plan", type=ArtifactType.LESSON_PLAN,
                       media_type="application/json", content=_json(v.output("plan", LessonPlan)),
                       parent_ids=[research_artifact], metadata={"objectives": len(v.output("plan", LessonPlan).objectives)}),
         ArtifactDraft(key="lesson", name="lesson", type=ArtifactType.LESSON, media_type="application/json",
-                      content=_json(lesson), parent_keys=["lesson_plan"], parent_ids=[research_artifact],
+                      content=_json(lesson), parent_keys=["lesson_plan"], parent_ids=[research_artifact, *image_ids],
                       metadata={"title": lesson.title, "level": lesson.level, "sections": len(lesson.sections),
                                 "research_id": research.research_id, "research_status": research.status,
-                                "references": len(lesson.references)}),
+                                "references": len(lesson.references), "visuals": len(image_ids),
+                                "visual_status": visuals.status if visuals else "skipped",
+                                "visual_warnings": _visual_warnings(v)}),
         ArtifactDraft(key="script", name="narration_script", type=ArtifactType.SCRIPT, media_type="text/markdown",
                       content=_script(lesson), parent_keys=["lesson"]),
         ArtifactDraft(key="slide_plan", name="slide_plan", type=ArtifactType.SLIDE_PLAN,
@@ -251,12 +295,19 @@ def _lesson_outcome(v: StateView) -> LessonOutcome:
         task_id=v.task.task_id, learner_id=v.task.learner_id, request=_request(v), diagnostic=step.result,
         concepts=step.concepts, lesson_title=_lesson(v).title,
         taught_concept_ids=[c.concept_id for c in plan.concepts],
-        artifact_ids=[_research_artifact_id(v), *(a.artifact_id for a in stored.artifacts)],
+        artifact_ids=[_research_artifact_id(v), *_visual_artifact_ids(v),
+                      *(a.artifact_id for a in stored.artifacts)],
     )
+
+
+def _visual_artifact_ids(v: StateView) -> list[str]:
+    visuals = _visuals(v)
+    return [a.artifact_id for a in visuals.artifacts] if visuals else []
 
 
 def _summarize(v: StateView) -> TaskResult:
     research = v.output("store_research", StoredArtifacts)
+    visuals = _visuals(v)
     stored = v.output("store_artifacts", StoredArtifacts)
     update = v.output("update_learner", MasteryUpdate)
     review = _review(v)
@@ -264,12 +315,12 @@ def _summarize(v: StateView) -> TaskResult:
         title=_lesson(v).title,
         artifacts=[ArtifactSummary(artifact_id=a.artifact_id, type=a.type, name=a.name, version=a.version,
                                    uri=a.uri, parent_ids=a.parent_ids)
-                   for a in [*research.artifacts, *stored.artifacts]],
+                   for a in [*research.artifacts, *(visuals.artifacts if visuals else []), *stored.artifacts]],
         mastery_changes=update.changes,
         review_verdict=review.final_review.verdict.value if review.status == "approved" else review.status,
         revisions=review.revisions,
         estimated_level=update.estimated_level,
-        warnings=_research(v).warnings,
+        warnings=[*_research(v).warnings, *_visual_warnings(v)],
     )
 
 
@@ -277,8 +328,8 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
     rounds = options.diagnostic_rounds
     return WorkflowTemplate(
         id=WORKFLOW_ID,
-        description="Personalised text lesson with diagnostic, research, review loop and slide plan.",
-        provides=frozenset({"lesson.text", "lesson.review", "slides.plan"}),
+        description="Personalised text lesson with diagnostic, research, review loop, visuals and slide plan.",
+        provides=frozenset({"lesson.text", "lesson.review", "lesson.visuals", "slides.plan"}),
         build=lambda request: build_lesson_workflow(request, options),
         expected_calls=(
             ExpectedCall("request_interpreter", 700, 200),
@@ -287,6 +338,7 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
             ExpectedCall("curriculum_planner", 7000, 1800),
             ExpectedCall("teacher", 8000, 3500, calls=2),
             ExpectedCall("content_reviewer", 10000, 900, calls=2),
+            ExpectedCall("visual", 9000, 1500),
             ExpectedCall("slide_generation", 4000, 2000),
         ),
     )

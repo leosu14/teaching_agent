@@ -1,4 +1,8 @@
-"""Artifact service: versioning, content-hash deduplication and the artifact dependency graph."""
+"""Artifact service: versioning, content-hash deduplication and the artifact dependency graph.
+
+Media objects (images) are content-addressed: `put_object` stores identical bytes once, and any number of
+artifacts can point at the same object.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,7 @@ import mimetypes
 from typing import Protocol
 
 from app.observability.scope import ExecutionScope
-from app.schemas.artifact import Artifact, ArtifactDraft, ArtifactType, StoredArtifacts
+from app.schemas.artifact import Artifact, ArtifactDraft, ArtifactType, StoredArtifacts, StoredObject
 from app.schemas.common import new_id
 from app.schemas.events import EventType
 
@@ -17,6 +21,10 @@ EXTENSIONS = {
     "text/plain": ".txt",
     "image/svg+xml": ".svg",
     "audio/wav": ".wav",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
 }
 
 
@@ -32,6 +40,8 @@ class ArtifactRepository(Protocol):
 
 class ObjectStore(Protocol):
     def put(self, key: str, data: bytes) -> str: ...
+
+    def put_if_absent(self, key: str, data: bytes) -> tuple[str, bool]: ...
 
     def get(self, uri: str) -> bytes: ...
 
@@ -58,23 +68,66 @@ class ArtifactService:
         metadata: dict,
         scope: ExecutionScope,
     ) -> Artifact:
-        for pid in parent_ids:
-            self._repo.get(pid)  # every parent must exist
         digest = hashlib.sha256(content).hexdigest()
+        reused = self._reusable(task_id, name, digest, parent_ids)
+        if reused is not None:
+            return reused
         latest = self._repo.latest(task_id, name)
-        if latest is not None and latest.content_hash == digest and sorted(latest.parent_ids) == sorted(parent_ids):
-            return latest  # identical content: reuse instead of creating a new version
         version = latest.version + 1 if latest else 1
-        ext = EXTENSIONS.get(media_type) or mimetypes.guess_extension(media_type) or ".bin"
-        uri = self._store.put(f"{task_id}/{name}/v{version}{ext}", content)
-        artifact = Artifact(
+        uri = self._store.put(f"{task_id}/{name}/v{version}{_extension(media_type)}", content)
+        return self._add(Artifact(
             artifact_id=new_id("art"), task_id=task_id, type=type, name=name, uri=uri, media_type=media_type,
             content_hash=digest, size_bytes=len(content), version=version, provider=provider,
             parent_ids=parent_ids, metadata=metadata,
-        )
+        ), scope)
+
+    def put_object(self, content: bytes, media_type: str) -> StoredObject:
+        """Store bytes content-addressed by their sha256. Identical content is written once and reused."""
+        digest = hashlib.sha256(content).hexdigest()
+        uri, created = self._store.put_if_absent(f"objects/sha256/{digest[:2]}/{digest}{_extension(media_type)}",
+                                                 content)
+        return StoredObject(uri=uri, checksum=digest, media_type=media_type, size_bytes=len(content),
+                            reused=not created)
+
+    def read_object(self, uri: str) -> bytes:
+        return self._store.get(uri)
+
+    def store_object(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        type: ArtifactType,
+        obj: StoredObject,
+        provider: str,
+        parent_ids: list[str],
+        metadata: dict,
+        scope: ExecutionScope,
+    ) -> Artifact:
+        """An artifact that points at an object already in the store (see `put_object`); nothing is copied."""
+        reused = self._reusable(task_id, name, obj.checksum, parent_ids)
+        if reused is not None:
+            return reused
+        latest = self._repo.latest(task_id, name)
+        return self._add(Artifact(
+            artifact_id=new_id("art"), task_id=task_id, type=type, name=name, uri=obj.uri,
+            media_type=obj.media_type, content_hash=obj.checksum, size_bytes=obj.size_bytes,
+            version=latest.version + 1 if latest else 1, provider=provider, parent_ids=parent_ids,
+            metadata=metadata,
+        ), scope)
+
+    def _reusable(self, task_id: str, name: str, digest: str, parent_ids: list[str]) -> Artifact | None:
+        for pid in parent_ids:
+            self._repo.get(pid)  # every parent must exist
+        latest = self._repo.latest(task_id, name)
+        if latest is not None and latest.content_hash == digest and sorted(latest.parent_ids) == sorted(parent_ids):
+            return latest  # identical content: reuse instead of creating a new version
+        return None
+
+    def _add(self, artifact: Artifact, scope: ExecutionScope) -> Artifact:
         self._repo.add(artifact)
-        scope.emit(EventType.ARTIFACT_CREATED, artifact_id=artifact.artifact_id, artifact_type=type.value,
-                   name=name, version=version, parent_ids=parent_ids, uri=uri)
+        scope.emit(EventType.ARTIFACT_CREATED, artifact_id=artifact.artifact_id, artifact_type=artifact.type.value,
+                   name=artifact.name, version=artifact.version, parent_ids=artifact.parent_ids, uri=artifact.uri)
         return artifact
 
     def store_batch(self, task_id: str, drafts: list[ArtifactDraft], scope: ExecutionScope) -> StoredArtifacts:
@@ -136,3 +189,7 @@ class ArtifactService:
             seen[pid] = self._repo.get(pid)
             frontier.extend(seen[pid].parent_ids)
         return list(seen.values())
+
+
+def _extension(media_type: str) -> str:
+    return EXTENSIONS.get(media_type) or mimetypes.guess_extension(media_type) or ".bin"

@@ -1,0 +1,210 @@
+[
+  {
+    "provider_image_id": "commons-fans-opinions",
+    "url": "https://images.example.org/commons/fans-opinions.png",
+    "thumbnail_url": "https://images.example.org/commons/thumbs/fans-opinions.png",
+    "title": "Football fans sharing opinions in the stands",
+    "description": "Supporters cheering and debating their team before kick-off.",
+    "source_url": "https://commons.example.org/wiki/File:Fans_opinions.png",
+    "publisher": "Example Commons",
+    "creator": "Ana Ruiz",
+    "license_name": "CC BY 4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "attribution_text": "Photo by Ana Ruiz, CC BY 4.0, via Example Commons",
+    "kind": "photo",
+    "source_type": "media_archive",
+    "width": 1600,
+    "height": 900,
+    "format": "image/png",
+    "tags": [
+      "football",
+      "fans",
+      "opinions",
+      "stadium",
+      "encantar"
+    ],
+    "mock_actual_size": [
+      1200,
+      900
+    ]
+  },
+  {
+    "provider_image_id": "commons-supporters-scarves",
+    "url": "https://images.example.org/commons/supporters-scarves.png",
+    "thumbnail_url": "https://images.example.org/commons/thumbs/supporters-scarves.png",
+    "title": "Supporters holding scarves before a football match",
+    "description": "Fans show what they love about their club: me encanta el fútbol.",
+    "source_url": "https://commons.example.org/wiki/File:Supporters_scarves.png",
+    "publisher": "Example Commons",
+    "creator": "Luis Gómez",
+    "license_name": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+    "attribution_text": "Photo by Luis Gómez, CC BY-SA 4.0, via Example Commons",
+    "kind": "photo",
+    "source_type": "media_archive",
+    "width": 1600,
+    "height": 900,
+    "format": "image/png",
+    "tags": [
+      "football",
+      "fans",
+      "supporters",
+      "opinions",
+      "gustar"
+    ]
+  },
+  {
+    "provider_image_id": "archive-last-minute-goal",
+    "url": "https://images.example.org/archive/last-minute-goal.png",
+    "title": "Player celebrating a last-minute goal in a football match",
+    "description": "A forward scored in the final minute; a photograph of a past match.",
+    "source_url": "https://sports-archive.example.org/photos/last-minute-goal",
+    "publisher": "Example Sports Archive",
+    "creator": "Marta Torres",
+    "license_name": "CC BY 4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "attribution_text": "Photo by Marta Torres, CC BY 4.0, Example Sports Archive",
+    "kind": "photo",
+    "source_type": "media_archive",
+    "width": 1920,
+    "height": 1080,
+    "format": "image/png",
+    "tags": [
+      "football",
+      "match",
+      "goal",
+      "past",
+      "describing"
+    ]
+  },
+  {
+    "provider_image_id": "stock-scoreboard",
+    "url": "https://images.example.org/stock/scoreboard.png",
+    "title": "Stadium scoreboard after a football match",
+    "description": "The final result of the match on a stadium screen.",
+    "source_url": "https://stock.example.org/photos/scoreboard",
+    "publisher": "Example Stock",
+    "license_name": "Example Stock License",
+    "license_url": "https://stock.example.org/license",
+    "kind": "photo",
+    "source_type": "stock",
+    "width": 1600,
+    "height": 900,
+    "format": "image/png",
+    "tags": [
+      "football",
+      "match",
+      "scoreboard",
+      "result"
+    ]
+  },
+  {
+    "provider_image_id": "upload-old-match",
+    "url": "https://images.example.org/uploads/old-match.png",
+    "title": "Describing a football match from the past",
+    "description": "Scanned photograph of a match, uploaded without licence information.",
+    "source_url": "https://uploads.example.org/old-match",
+    "publisher": "Example Uploads",
+    "kind": "photo",
+    "source_type": "user_upload",
+    "width": 1600,
+    "height": 900,
+    "format": "image/png",
+    "tags": [
+      "football",
+      "match",
+      "past",
+      "describing",
+      "archive"
+    ]
+  },
+  {
+    "provider_image_id": "icons-football",
+    "url": "https://images.example.org/icons/football.png",
+    "title": "Football icon",
+    "description": "A simple ball icon.",
+    "source_url": "https://icons.example.org/football",
+    "publisher": "Example Icons",
+    "creator": "Example Icons team",
+    "license_name": "CC0 1.0",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "kind": "icon",
+    "source_type": "icon_library",
+    "width": 512,
+    "height": 512,
+    "format": "image/png",
+    "tags": [
+      "football",
+      "ball",
+      "icon"
+    ]
+  },
+  {
+    "provider_image_id": "illustrations-match-timeline",
+    "url": "https://images.example.org/illustrations/match-timeline.png",
+    "title": "Timeline of a football match",
+    "description": "Illustration describing what happened in a past match, minute by minute.",
+    "source_url": "https://illustrations.example.org/match-timeline",
+    "publisher": "Example Illustrations",
+    "creator": "Sam Lee",
+    "license_name": "CC BY 4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "attribution_text": "Illustration by Sam Lee, CC BY 4.0",
+    "kind": "illustration",
+    "source_type": "illustration_library",
+    "width": 1600,
+    "height": 900,
+    "format": "image/png",
+    "tags": [
+      "football",
+      "match",
+      "past",
+      "timeline",
+      "describing"
+    ]
+  },
+  {
+    "provider_image_id": "illustrations-speech-bubbles",
+    "url": "https://images.example.org/illustrations/speech-bubbles.png",
+    "title": "Speech bubbles for giving opinions",
+    "description": "Two people exchanging likes and dislikes.",
+    "source_url": "https://illustrations.example.org/speech-bubbles",
+    "publisher": "Example Illustrations",
+    "creator": "Sam Lee",
+    "license_name": "CC BY 4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "attribution_text": "Illustration by Sam Lee, CC BY 4.0",
+    "kind": "illustration",
+    "source_type": "illustration_library",
+    "width": 1600,
+    "height": 900,
+    "format": "image/png",
+    "tags": [
+      "opinions",
+      "speech",
+      "conversation",
+      "likes"
+    ]
+  },
+  {
+    "provider_image_id": "commons-mountain-lake",
+    "url": "https://images.example.org/commons/mountain-lake.png",
+    "title": "Mountain lake at sunrise",
+    "description": "A landscape photograph.",
+    "source_url": "https://commons.example.org/wiki/File:Mountain_lake.png",
+    "publisher": "Example Commons",
+    "creator": "Kim Park",
+    "license_name": "CC BY 4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "kind": "photo",
+    "source_type": "media_archive",
+    "width": 1600,
+    "height": 900,
+    "format": "image/png",
+    "tags": [
+      "landscape",
+      "mountain",
+      "lake"
+    ]
+  }
+]

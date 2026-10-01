@@ -10,6 +10,7 @@ from pydantic import Field, field_validator, model_validator
 from app.schemas.common import Schema
 from app.schemas.learner import AnswerEvaluation, LearnerSnapshot, LearnerSummary
 from app.schemas.research import Citation, ResearchBundle
+from app.schemas.visual import ImageOrigin, VisualType
 
 # --- Request interpretation -------------------------------------------------------------
 
@@ -219,6 +220,19 @@ class LessonPlan(Schema):
 # --- Teaching content --------------------------------------------------------------------
 
 
+class SectionVisual(Schema):
+    """A section's reference to an IMAGE_ASSET artifact. Visual attribution lives on the artifact, separate
+    from the section's textual citations."""
+
+    visual_id: str
+    artifact_id: str
+    asset_id: str
+    visual_type: VisualType
+    origin: ImageOrigin
+    purpose: str
+    description: str
+
+
 class LessonSection(Schema):
     section_id: str
     concept_id: str
@@ -228,6 +242,8 @@ class LessonSection(Schema):
     analogy: str | None = None
     narration: str = Field(min_length=1)
     citations: list[str] = Field(default_factory=list)  # citation ids from the research bundle
+    # IMAGE_ASSET artifacts illustrating this section. Attached by the workflow after review, never model-written.
+    visuals: list[SectionVisual] = Field(default_factory=list)
 
 
 class Exercise(Schema):
@@ -334,6 +350,34 @@ class ReviewerInput(Schema):
     research: ResearchBundle
     content: LessonContent
     revision_number: int = 0
+
+
+# --- Visuals -----------------------------------------------------------------------------
+
+
+class VisualPlanningInput(Schema):
+    """What the model sees when planning visuals for an approved lesson."""
+
+    plan: LessonPlan
+    lesson: LessonContent
+    research: ResearchBundle
+    max_visuals: int = Field(default=6, ge=0)
+
+
+class VisualRequest(Schema):
+    """Input of the VisualAgent: an approved lesson and where its artifacts hang in the artifact graph."""
+
+    plan: LessonPlan
+    lesson: LessonContent
+    research: ResearchBundle
+    language: str | None = None
+    max_visuals: int = Field(default=6, ge=0)
+    max_candidates: int = Field(default=3, ge=1)  # searched candidates tried per visual before giving up
+    parent_artifact_ids: list[str] = Field(default_factory=list)  # parents of the VISUAL_PLAN artifact
+
+    def planning_input(self) -> VisualPlanningInput:
+        return VisualPlanningInput(plan=self.plan, lesson=self.lesson, research=self.research,
+                                   max_visuals=self.max_visuals)
 
 
 # --- Slides ------------------------------------------------------------------------------

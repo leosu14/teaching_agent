@@ -50,6 +50,17 @@ class EventType:
     RESEARCH_SOURCE_SELECTED = "research.source_selected"
     RESEARCH_COMPLETED = "research.completed"
     RESEARCH_FAILED = "research.failed"
+    VISUAL_STARTED = "visual.started"
+    VISUAL_PLAN_CREATED = "visual.plan_created"
+    IMAGE_SEARCH_STARTED = "image.search_started"
+    IMAGE_SEARCH_COMPLETED = "image.search_completed"
+    IMAGE_SELECTED = "image.selected"
+    IMAGE_GENERATION_STARTED = "image.generation_started"
+    IMAGE_GENERATION_COMPLETED = "image.generation_completed"
+    IMAGE_VALIDATION_FAILED = "image.validation_failed"
+    IMAGE_ASSET_CREATED = "image.asset_created"
+    VISUAL_COMPLETED = "visual.completed"
+    VISUAL_FAILED = "visual.failed"
 
 
 class Event(Schema):
