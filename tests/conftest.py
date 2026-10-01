@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,11 @@ from app.schemas.learner import LearnerProfileInput
 from app.schemas.lesson import DiagnosticAnswers, DiagnosticQuestionSheet, LearnerAnswer
 from app.schemas.task import Task, TaskStatus
 from app.services.container import Container, build_container
+
+# Lesson-flow tests run the whole workflow, video included; they use the mock composer so the suite does not encode
+# a full-HD MP4 per test. The real FFmpeg composer is exercised by tests/integration/test_video_ffmpeg.py and the
+# video demo, which select it explicitly.
+os.environ.setdefault("TA_VIDEO_COMPOSER", "mock")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "fixtures" / "demo"

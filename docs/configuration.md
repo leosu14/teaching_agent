@@ -11,7 +11,8 @@ They are validated when the container is built; errors say what to fix.
 | `TA_ROUTING_FILE` | `config/routing.toml` | Model tiers, fallback chains, pricing, output limits |
 | `TA_LLM_PROVIDERS` | `["mock"]` | Enabled LLM providers (only `mock` has an adapter now) |
 | `TA_SEARCH_PROVIDER` / `TA_RETRIEVAL_PROVIDER` | `mock` / `local` | Web search and knowledge-base retrieval |
-| `TA_IMAGE_PROVIDER` / `TA_TTS_PROVIDER` / `TA_VIDEO_PROVIDER` | `mock` | Media providers (`TA_IMAGE_PROVIDER` is image generation) |
+| `TA_IMAGE_PROVIDER` / `TA_TTS_PROVIDER` | `mock` | Media providers (`TA_IMAGE_PROVIDER` is image generation) |
+| `TA_VIDEO_COMPOSER` | `ffmpeg` | `ffmpeg` composes a real MP4 (needs `ffmpeg` and `ffprobe`); `mock` writes a manifest-only file for tests |
 | `TA_IMAGE_SEARCH_PROVIDER` | `mock` | Image search |
 | `TA_CORPUS_DIR` | `fixtures/demo` | Corpus for the mock search, mock image search (`image_catalog.json`) and local knowledge base |
 | `TA_MAX_REVISIONS` | `2` | Revision budget of the review loop |
@@ -37,6 +38,20 @@ They are validated when the container is built; errors say what to fix.
 | `TA_AUDIO_SAMPLE_RATE` | provider default | Requested sample rate in Hz; the validator checks the audio has it |
 | `TA_AUDIO_MAX_WORDS_PER_SEGMENT` | `80` | Longest narration segment the planner may propose |
 | `TA_AUDIO_SILENT_SLIDE_SECONDS` | `3.0` | How long the timeline shows a slide that has no narration |
+| `TA_VIDEO_FAILURE_POLICY` | `fail` | Video is required by default: a composition or validation failure fails the task. `continue` makes it optional (the task completes with a warning and no VIDEO artifact) |
+| `TA_VIDEO_WIDTH` / `TA_VIDEO_HEIGHT` / `TA_VIDEO_FPS` | `1920` / `1080` / `30` | Output resolution (even numbers) and frame rate |
+| `TA_VIDEO_BITRATE_KBPS` | constant quality | Target video bitrate; unset uses constant-quality encoding |
+| `TA_VIDEO_BACKGROUND` | `F4F6F8` | Slide card background colour (hex) |
+| `TA_VIDEO_TRANSITION` / `TA_VIDEO_FADE_SECONDS` | `cut` / `0.5` | Slide transition (`cut` or `fade` through the background) |
+| `TA_VIDEO_DURATION_TOLERANCE` | `0.1` | Allowed difference in seconds between the MP4 and the PresentationTimeline |
+| `TA_VIDEO_SUBTITLES` / `TA_VIDEO_SUBTITLE_MAX_CHARS` | `true` / `42` | Burn in subtitles from the narration text; characters per line |
+| `TA_VIDEO_FONT_PATH` | first of DejaVu Sans, Liberation Sans, Noto Sans, Arial | TrueType font for slide text and subtitles |
+| `TA_FFMPEG_PATH` / `TA_FFPROBE_PATH` | `ffmpeg` / `ffprobe` | The FFmpeg binaries |
+| `TA_VIDEO_TIMEOUT_SECONDS` | `1200` | Longest an FFmpeg run may take |
+| `TA_VIDEO_WORK_DIR` / `TA_VIDEO_KEEP_FAILED_WORK` | `$TA_DATA_DIR/work` / `true` | Scratch space for composition; a failed job's directory is kept under `failed/` for diagnosis |
+
+Defaults for the video format live only in `VideoConfig` (`app/schemas/video.py`); an unset `TA_VIDEO_*` variable keeps
+the default. FFmpeg: `apt-get install ffmpeg` (Debian/Ubuntu; CI does this), `brew install ffmpeg` (macOS).
 | `TA_LOG_LEVEL` / `TA_LOG_JSON` | `INFO` / `true` | Structured logging |
 
 ## Model routing (`config/routing.toml`)

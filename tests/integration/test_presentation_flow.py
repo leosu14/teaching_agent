@@ -302,7 +302,7 @@ async def test_crash_after_slide_planning_resumes_without_rerunning_earlier_work
     after = {a.artifact_id: a for a in second.task_service.artifacts(task.task_id)}
     assert before <= set(after)
     new = {a.name for a in after.values() if a.artifact_id not in before}
-    assert {"slide_plan", "presentation"} <= new and all(n.startswith(("audio_", "presentation")) or n == "slide_plan"
+    assert {"slide_plan", "presentation"} <= new and all(n.startswith(("audio_", "presentation", "video")) or n in {"slide_plan", "subtitles"}
                                                          for n in new)
 
 

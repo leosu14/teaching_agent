@@ -80,6 +80,15 @@ class EventType:
     TIMELINE_CREATED = "timeline.created"
     AUDIO_COMPLETED = "audio.completed"
     AUDIO_FAILED = "audio.failed"
+    VIDEO_PLANNING_STARTED = "video_planning.started"
+    VIDEO_PLAN_CREATED = "video_plan.created"
+    VIDEO_PLAN_VALIDATED = "video_plan.validated"
+    VIDEO_COMPOSITION_STARTED = "video_composition.started"
+    VIDEO_COMPOSITION_COMPLETED = "video_composition.completed"
+    VIDEO_VALIDATION_STARTED = "video.validation_started"
+    VIDEO_VALIDATION_COMPLETED = "video.validation_completed"
+    VIDEO_ARTIFACT_CREATED = "video.artifact_created"
+    VIDEO_FAILED = "video.failed"
 
 
 class Event(Schema):

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+from typing import BinaryIO
 
 
 class FilesystemObjectStore:
@@ -27,13 +29,31 @@ class FilesystemObjectStore:
             return path.as_uri(), False
         return self.put(key, data), True
 
+    def put_file_if_absent(self, key: str, source: Path) -> tuple[str, bool]:
+        """Copy a file into the store unless `key` exists, streaming it (large media never sits in memory)."""
+        path = self._path(key)
+        if path.exists():
+            return path.as_uri(), False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        shutil.copyfile(source, tmp)
+        tmp.replace(path)
+        return path.as_uri(), True
+
     def get(self, uri: str) -> bytes:
+        return self._resolve(uri).read_bytes()
+
+    def open(self, uri: str) -> BinaryIO:
+        """A binary reader for an object, for streaming large media."""
+        return self._resolve(uri).open("rb")
+
+    def _resolve(self, uri: str) -> Path:
         if not uri.startswith("file://"):
             raise ValueError(f"unsupported uri {uri}")
         path = Path(uri.removeprefix("file://")).resolve()
         if self._root not in path.parents:
             raise ValueError("uri outside object store root")
-        return path.read_bytes()
+        return path
 
     def _path(self, key: str) -> Path:
         path = (self._root / key).resolve()

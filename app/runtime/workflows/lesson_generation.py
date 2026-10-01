@@ -4,7 +4,9 @@ snapshot -> adaptive diagnostic (ask / wait for answers / re-assess, up to N rou
 -> research policy -> research artifact -> plan -> teach/review/revise loop -> visuals (only for an approved
 lesson) -> visual policy -> lesson artifacts -> slide planning -> slide plan validation -> presentation build ->
 presentation render (only for an approved lesson) -> audio planning -> audio plan validation -> TTS, audio validation
-and AUDIO_ASSETs -> audio policy -> presentation timeline (only after the presentation is rendered) -> learner memory.
+and AUDIO_ASSETs -> audio policy -> presentation timeline (only after the presentation is rendered) -> video planning
+-> video plan validation -> video composition, MP4 validation and the VIDEO artifact (only after the timeline) ->
+learner memory.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from app.runtime.workflow.nodes import (
 )
 from app.runtime.workflows.audio import AudioFailurePolicy, NarrationNode, apply_audio_policy
 from app.runtime.workflows.research_policy import ResearchRequirement, apply_research_policy
+from app.runtime.workflows.video import VideoFailurePolicy, VideoNode
 from app.runtime.workflows.visual_policy import VisualFailurePolicy, apply_visual_policy
 from app.schemas.artifact import Artifact, ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
 from app.schemas.audio import (
@@ -66,6 +69,16 @@ from app.schemas.presentation import (
 )
 from app.schemas.research import ResearchBundle
 from app.schemas.task import ArtifactSummary, TaskResult
+from app.schemas.video import (
+    AudioAssetInput,
+    ImageAssetInput,
+    VideoConfig,
+    VideoPlan,
+    VideoPlanningRequest,
+    VideoPlanValidationReport,
+    VideoResult,
+    VideoStageRequest,
+)
 from app.schemas.visual import VisualResult
 from app.schemas.workflow import NodeStatus, ReviewOutcome, RevisionPolicy, RevisionRequest
 
@@ -94,6 +107,8 @@ class LessonWorkflowOptions:
     audio_sample_rate: int | None = None  # None: the provider's default
     audio_max_words_per_segment: int = 80
     audio_silent_slide_seconds: float = 3.0
+    video_failure_policy: VideoFailurePolicy = "fail"  # fail: video is required; continue: optional, warn
+    video_config: VideoConfig = field(default_factory=VideoConfig)
 
 
 def _request(v: StateView) -> LessonRequest:
@@ -195,6 +210,50 @@ def _narration(v: StateView) -> NarrationResult | None:
 
 def _timeline(v: StateView) -> TimelineResult | None:
     return v.maybe("audio_timeline", TimelineResult)
+
+
+def _video_planning(v: StateView, options: LessonWorkflowOptions) -> VideoPlanningRequest:
+    """The presentation, its timeline and the IMAGE_ASSET and AUDIO_ASSET references; never file paths."""
+    timeline = _timeline(v)
+    narration = _narration(v)
+    assert timeline is not None and narration is not None
+    visuals = _visuals(v)
+    meta = {a.artifact_id: a.metadata for a in narration.artifacts}
+    return VideoPlanningRequest(
+        task_id=v.task.task_id, presentation=v.output("build_presentation", Presentation),
+        presentation_artifact_id=_presentation_artifact_id(v), timeline=timeline.timeline,
+        timeline_artifact_id=timeline.artifact.artifact_id, timeline_checksum=timeline.artifact.content_hash,
+        image_assets=[ImageAssetInput(artifact_id=a.artifact_id, asset_id=a.asset_id, uri=a.uri, checksum=a.checksum,
+                                      media_type=a.media_type, width=a.width, height=a.height,
+                                      alt_text=a.description) for a in (visuals.assets if visuals else [])],
+        audio_assets=[AudioAssetInput(artifact_id=a.artifact_id, segment_id=a.segment_id, slide_id=a.slide_id,
+                                      uri=a.uri, checksum=a.checksum, media_type=a.media_type, duration=a.duration,
+                                      text=meta[a.artifact_id]["text"], language=meta[a.artifact_id]["language"])
+                      for a in narration.assets],
+        config=options.video_config,
+    )
+
+
+def _video_plan(v: StateView) -> VideoPlan:
+    """The video plan as validated by the gate; nothing downstream sees an unvalidated plan."""
+    plan = v.output("validate_video_plan", VideoPlanValidationReport).plan
+    assert plan is not None
+    return plan
+
+
+def _video_plan_artifact_id(v: StateView) -> str:
+    return v.output("store_video_plan", StoredArtifacts).by_key["video_plan"]
+
+
+def _video(v: StateView) -> VideoResult | None:
+    return v.maybe("compose_video", VideoResult)
+
+
+def _video_warnings(v: StateView) -> list[str]:
+    if v.status("video_plan") == NodeStatus.SKIPPED:
+        return ["No video was generated: video is only composed from a narrated presentation timeline."]
+    video = _video(v)
+    return video.warnings if video else []
 
 
 def _audio_warnings(v: StateView) -> list[str]:
@@ -372,13 +431,26 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                      presentation_artifact_id=_presentation_artifact_id(v),
                      audio_plan_artifact_id=_audio_plan_artifact_id(v),
                      silent_slide_seconds=options.audio_silent_slide_seconds)),
+        # Video only once the timeline exists (so only for an approved, rendered, narrated presentation).
+        AgentNode(id="video_plan", agent="video", depends_on=("audio_timeline",),
+                  build_input=lambda v: _video_planning(v, options)),
+        ToolNode(id="validate_video_plan", tool="video_plan.validate", depends_on=("video_plan",),
+                 build_input=lambda v: _video_planning(v, options).validation_request(
+                     v.output("video_plan", VideoPlan), enforce=True)),
+        ToolNode(id="store_video_plan", tool="artifact.store", permissions=frozenset({"artifact:write"}),
+                 depends_on=("validate_video_plan",), build_input=_video_plan_batch),
+        VideoNode(id="compose_video", depends_on=("store_video_plan",), policy=options.video_failure_policy,
+                  build_input=lambda v: VideoStageRequest(
+                      plan=_video_plan(v), parent_ids=[_video_plan_artifact_id(v), _video_plan(v).timeline_ref,
+                                                       _video_plan(v).presentation_ref])),
         ToolNode(id="update_learner", tool="learner.record_lesson", permissions=frozenset({"learner:write"}),
-                 depends_on=("store_artifacts",), after=("render_presentation", "audio_timeline"),
+                 depends_on=("store_artifacts",), after=("render_presentation", "audio_timeline", "compose_video"),
                  build_input=_lesson_outcome),
     ]
     return WorkflowDefinition(id=WORKFLOW_ID, nodes=tuple(nodes), summarize=_summarize,
                               description="Diagnose, research, plan, teach with review, illustrate, store, plan, "
-                                          "build and render the presentation, narrate it, time it, remember.")
+                                          "build and render the presentation, narrate it, time it, compose the "
+                                          "video, remember.")
 
 
 def _research_batch(v: StateView) -> ArtifactBatch:
@@ -413,6 +485,28 @@ def _audio_plan_batch(v: StateView) -> ArtifactBatch:
                   "voice": plan.voice, "segments": len(plan.segments),
                   "required": sum(s.required for s in plan.segments), "expected_duration": plan.expected_duration()},
     )])
+
+
+def _video_plan_batch(v: StateView) -> ArtifactBatch:
+    plan = _video_plan(v)
+    drafts = [ArtifactDraft(
+        key="video_plan", name="video_plan", type=ArtifactType.VIDEO_PLAN, media_type="application/json",
+        content=_json(plan), parent_ids=[plan.timeline_ref, plan.presentation_ref, *plan.image_artifact_ids()],
+        metadata={"video_plan_id": plan.video_plan_id, "segments": len(plan.slides),
+                  "audio_tracks": len(plan.audio_tracks), "duration": plan.duration,
+                  "width": plan.resolution.width, "height": plan.resolution.height, "fps": plan.fps,
+                  "transition": plan.config.transition.value, "timeline_ref": plan.timeline_ref,
+                  "presentation_ref": plan.presentation_ref,
+                  "subtitles": len(plan.subtitle_track.subtitles) if plan.subtitle_track else 0},
+    )]
+    if plan.subtitle_track is not None:
+        drafts.append(ArtifactDraft(
+            key="subtitles", name="subtitles", type=ArtifactType.SUBTITLE, media_type="text/vtt",
+            content=plan.subtitle_track.to_webvtt(), parent_keys=["video_plan"],
+            metadata={"format": "webvtt", "language": plan.subtitle_track.language,
+                      "cues": len(plan.subtitle_track.subtitles), "source": plan.subtitle_track.source,
+                      "burned_in": plan.subtitle_track.burned_in}))
+    return ArtifactBatch(drafts=drafts)
 
 
 def _render_request(v: StateView) -> PresentationRenderRequest:
@@ -472,7 +566,7 @@ def _lesson_outcome(v: StateView) -> LessonOutcome:
         taught_concept_ids=[c.concept_id for c in plan.concepts],
         artifact_ids=[_research_artifact_id(v), *_visual_artifact_ids(v),
                       *(a.artifact_id for a in stored.artifacts), *_presentation_artifact_ids(v),
-                      *(a.artifact_id for a in _audio_artifacts(v))],
+                      *(a.artifact_id for a in _audio_artifacts(v)), *(a.artifact_id for a in _video_artifacts(v))],
     )
 
 
@@ -499,6 +593,13 @@ def _audio_artifacts(v: StateView) -> list[Artifact]:
     return [*plan, *narration.artifacts, timeline.artifact]
 
 
+def _video_artifacts(v: StateView) -> list[Artifact]:
+    """The video plan, its subtitles and the VIDEO artifact, once they exist."""
+    plan = v.maybe("store_video_plan", StoredArtifacts)
+    video = _video(v)
+    return [*(plan.artifacts if plan else []), *([video.artifact] if video and video.artifact else [])]
+
+
 def _summarize(v: StateView) -> TaskResult:
     research = v.output("store_research", StoredArtifacts)
     visuals = _visuals(v)
@@ -513,12 +614,13 @@ def _summarize(v: StateView) -> TaskResult:
         artifacts=[ArtifactSummary(artifact_id=a.artifact_id, type=a.type, name=a.name, version=a.version,
                                    uri=a.uri, parent_ids=a.parent_ids)
                    for a in [*research.artifacts, *(visuals.artifacts if visuals else []), *stored.artifacts,
-                             *presentation_artifacts, *_audio_artifacts(v)]],
+                             *presentation_artifacts, *_audio_artifacts(v), *_video_artifacts(v)]],
         mastery_changes=update.changes,
         review_verdict=review.final_review.verdict.value if review.status == "approved" else review.status,
         revisions=review.revisions,
         estimated_level=update.estimated_level,
-        warnings=[*_research(v).warnings, *_visual_warnings(v), *_presentation_warnings(v), *_audio_warnings(v)],
+        warnings=[*_research(v).warnings, *_visual_warnings(v), *_presentation_warnings(v), *_audio_warnings(v),
+                  *_video_warnings(v)],
     )
 
 
@@ -527,9 +629,9 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
     return WorkflowTemplate(
         id=WORKFLOW_ID,
         description="Personalised text lesson with diagnostic, research, review loop, visuals, a presentation and "
-                    "its narration.",
+                    "its narration and the video.",
         provides=frozenset({"lesson.text", "lesson.review", "lesson.visuals", "slides.plan", "presentation.pptx",
-                            "audio.narration", "presentation.timeline"}),
+                            "audio.narration", "presentation.timeline", "video.mp4"}),
         build=lambda request: build_lesson_workflow(request, options),
         expected_calls=(
             ExpectedCall("request_interpreter", 700, 200),
