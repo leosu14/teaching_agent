@@ -27,3 +27,5 @@ jobs:
         run: python scripts/run_research_demo.py
       - name: Visual demo
         run: python scripts/run_visual_demo.py
+      - name: Presentation demo
+        run: python scripts/run_presentation_demo.py

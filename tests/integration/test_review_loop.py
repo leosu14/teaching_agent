@@ -56,7 +56,7 @@ async def test_exhausted_revisions_fail_the_task(tmp_path) -> None:
     assert task.errors[-1].node_id == "teach_review"
     assert "ReviewRejected" in task.errors[-1].message and "Too advanced" in task.errors[-1].message
     assert llm.calls["teacher"] == 3 and llm.calls["content_reviewer"] == 3  # draft + 2 revisions, no node retry
-    assert task.workflow.node_states["slides"].status.value == "PENDING"
+    assert task.workflow.node_states["slide_plan"].status.value == "PENDING"
 
 
 async def test_accept_with_warnings_policy_completes(tmp_path) -> None:

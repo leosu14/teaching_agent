@@ -26,7 +26,7 @@ ALLOWED: dict[str, set[str]] = {
 # Finer rules on top of the layer order.
 AGENT_PROVIDER_MODULES = {"app.providers.llm.base", "app.providers.llm.router"}
 SQL_PACKAGES = {"sqlalchemy"}
-VENDOR_SDKS = {"anthropic", "openai", "google", "requests", "httpx", "boto3", "elevenlabs", "minimax"}
+VENDOR_SDKS = {"anthropic", "openai", "google", "requests", "httpx", "boto3", "elevenlabs", "minimax", "pptx"}
 API_EXCEPTION_MODULES = {  # the API may import exception types from lower layers, nothing else
     "app.runtime.orchestrator.orchestrator": {"InvalidInput"},
     "app.runtime.tasks.state_machine": {"InvalidTransition"},
@@ -99,5 +99,7 @@ def test_checker_flags_upward_imports() -> None:
     assert violations_for("providers", "app.tools.base", [], "x")
     assert violations_for("api", "app.runtime.workflow.engine", ["WorkflowEngine"], "x")
     assert violations_for("tools", "openai", [], "x")
+    assert violations_for("agents", "pptx", [], "x") and violations_for("tools", "pptx.util", [], "x")
+    assert not violations_for("providers", "pptx", [], "x")
     assert not violations_for("agents", "app.providers.llm.router", [], "x")
     assert not violations_for("services", "app.storage.repositories", [], "x")

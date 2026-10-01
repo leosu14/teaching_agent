@@ -52,18 +52,18 @@ async def test_kill_after_planner_then_resume(settings) -> None:
     # Nothing before the Planner ran again, in the new process.
     for agent_id in ("request_interpreter", "knowledge_diagnostic", "research", "curriculum_planner"):
         assert second_llm.calls[agent_id] == 0, agent_id
-    assert second_llm.calls["teacher"] == 2 and second_llm.calls["slide_generation"] == 1
+    assert second_llm.calls["teacher"] == 2 and second_llm.calls["slide_planner"] == 1
     events = second.task_service.events(task.task_id)
     for node in ("learner_snapshot", "diagnose_1", "diagnose_2", "diagnose_3", "research", "store_research", "plan"):
         assert sum(1 for e in events if e.type == "node.started" and e.node_id == node) == 1, node
-    for node in ("teach_review", "slides", "store_artifacts", "update_learner"):
+    for node in ("teach_review", "slide_plan", "store_artifacts", "update_learner"):
         assert sum(1 for e in events if e.type == "node.started" and e.node_id == node) == 1, node
 
     # Final artifacts are correct, and the cost includes both processes' work.
     arts = {a.name: a for a in second.task_service.artifacts(task.task_id)}
     assert set(arts) == {"research_bundle", "lesson_plan", "lesson", "narration_script", "slide_plan",
                          "review_report", "visual_plan", "image_v1_photo", "image_v1_diagram",
-                         "image_v2_illustration", "image_v2_diagram"}
+                         "image_v2_illustration", "image_v2_diagram", "presentation"}
     assert arts["lesson"].type == ArtifactType.LESSON and arts["lesson"].version == 1
     assert arts["slide_plan"].parent_ids == [arts["lesson"].artifact_id]
     assert resumed.cost.actual_cost_usd > cost_before

@@ -61,6 +61,15 @@ class EventType:
     IMAGE_ASSET_CREATED = "image.asset_created"
     VISUAL_COMPLETED = "visual.completed"
     VISUAL_FAILED = "visual.failed"
+    SLIDE_PLANNING_STARTED = "slide_planning.started"
+    SLIDE_PLAN_CREATED = "slide_plan.created"
+    SLIDE_PLAN_VALIDATED = "slide_plan.validated"
+    PRESENTATION_BUILD_STARTED = "presentation.build_started"
+    PRESENTATION_BUILD_COMPLETED = "presentation.build_completed"
+    PRESENTATION_RENDER_STARTED = "presentation.render_started"
+    PRESENTATION_RENDER_COMPLETED = "presentation.render_completed"
+    PRESENTATION_ARTIFACT_CREATED = "presentation.artifact_created"
+    PRESENTATION_FAILED = "presentation.failed"
 
 
 class Event(Schema):

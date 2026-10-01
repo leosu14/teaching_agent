@@ -10,8 +10,8 @@ from app.schemas.lesson import (
     DiagnosticStep,
     LessonPlan,
     ReviewResult,
-    Slide,
 )
+from app.schemas.presentation import BulletBlock
 from app.schemas.task import Task, TaskStatus
 
 
@@ -40,9 +40,9 @@ def test_review_verdict_must_match_issues() -> None:
 
 def test_slides_limit_density_and_diagnostic_steps_are_consistent() -> None:
     with pytest.raises(ValidationError):
-        Slide(slide_id="s", kind="explanation", heading="h", bullets=["b"] * 6)
+        BulletBlock(items=["b"] * 7)
     with pytest.raises(ValidationError, match="20 words"):
-        Slide(slide_id="s", kind="explanation", heading="h", bullets=[" ".join(["w"] * 21)])
+        BulletBlock(items=[" ".join(["w"] * 21)])
     with pytest.raises(ValidationError, match="requires"):
         DiagnosticStep(status="ask", concepts=[])
     with pytest.raises(ValidationError):
