@@ -65,13 +65,16 @@ class CostLine(Schema):
 
 
 class ServiceUsageLine(Schema):
-    """Usage of a non-LLM service (search, retrieval). `cost_usd` stays None unless the provider reports a cost."""
+    """Usage of a non-LLM service (search, retrieval, images, speech). Costs stay None unless the provider reports
+    them: `cost_usd` is the actual cost, `estimated_cost_usd` a provider's estimate (it is not added to the task's
+    actual cost)."""
 
     calls: int = 0
     cache_hits: int = 0
     results: int = 0
     cost_usd: float | None = None
-    units: dict[str, float] = Field(default_factory=dict)  # provider-reported units, e.g. images, megapixels
+    estimated_cost_usd: float | None = None
+    units: dict[str, float] = Field(default_factory=dict)  # provider-reported units, e.g. images, characters, seconds
 
 
 class CostSummary(Schema):
@@ -94,7 +97,8 @@ class CostSummary(Schema):
             line.cost_usd = round(line.cost_usd + cost_usd, 8)
 
     def record_service(self, *, service: str, results: int, cache_hit: bool = False,
-                       cost_usd: float | None = None, units: dict[str, float] | None = None) -> None:
+                       cost_usd: float | None = None, units: dict[str, float] | None = None,
+                       estimated_cost_usd: float | None = None) -> None:
         line = self.by_service.setdefault(service, ServiceUsageLine())
         for unit, amount in (units or {}).items():
             line.units[unit] = round(line.units.get(unit, 0.0) + amount, 6)
@@ -106,3 +110,5 @@ class CostSummary(Schema):
         if cost_usd is not None:
             line.cost_usd = round((line.cost_usd or 0.0) + cost_usd, 8)
             self.actual_cost_usd = round(self.actual_cost_usd + cost_usd, 8)
+        if estimated_cost_usd is not None:
+            line.estimated_cost_usd = round((line.estimated_cost_usd or 0.0) + estimated_cost_usd, 8)

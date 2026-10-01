@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+import wave
 
 from tests.conftest import REPO_ROOT
 
@@ -64,3 +66,25 @@ def test_presentation_demo_script_writes_a_real_pptx(tmp_path) -> None:
 
     assert len(Presentation(str(out_file)).slides) >= 5
     assert any((tmp_path / "data" / "objects").rglob("*.pptx"))
+
+
+def test_audio_demo_script_writes_real_wav_files_and_a_timeline(tmp_path) -> None:
+    out_dir = tmp_path / "narration"
+    proc = subprocess.run([sys.executable, "scripts/run_audio_demo.py", "--data-dir", str(tmp_path / "data"),
+                           "--out-dir", str(out_dir)], cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    for expected in ("1. Approved lesson", "2. Presentation", "3. AudioPlan", "4. Validation", "valid=True",
+                     "5. Mock TTS", "6. Audio validation", "rejected: 0", "7. AUDIO_ASSET artifacts",
+                     "bytes match: True", "8. PresentationTimeline", "9. Slide timings", "Slide  1 s01",
+                     "10. Audio duration", "11. Artifact references", "PRESENTATION_TIMELINE",
+                     "narration status: complete"):
+        assert expected in out, expected
+    wavs = sorted(out_dir.glob("*.wav"))
+    assert wavs
+    for path in wavs:
+        with wave.open(str(path)) as wav:
+            assert wav.getnframes() > 0 and wav.getframerate() == 16000
+    timeline = json.loads((out_dir / "presentation_timeline.json").read_text(encoding="utf-8"))
+    assert timeline["slides"][0]["start_time"] == 0.0 and timeline["duration"] > 0
+    assert len(timeline["segments"]) == len(wavs)

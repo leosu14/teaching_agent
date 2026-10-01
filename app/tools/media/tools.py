@@ -1,5 +1,5 @@
-"""Media tools (narration audio, video). Results are stored as artifacts so agents never handle files or
-URLs directly. Not used by the text-lesson workflow yet. Image tools live in app/tools/visual/."""
+"""Video tool. Results are stored as artifacts so agents never handle files or URLs directly. Not used by the lesson
+workflow yet. Image tools live in app/tools/visual/, speech and audio tools in app/tools/audio/."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from pydantic import Field
 
 from app.artifacts.service import ArtifactService
 from app.observability.scope import ExecutionScope
-from app.providers.tts.base import TTSProvider
 from app.providers.video.base import SceneSpec, VideoProvider
 from app.schemas.artifact import Artifact, ArtifactType
 from app.schemas.common import Schema
@@ -18,35 +17,6 @@ def _require_task(scope: ExecutionScope) -> str:
     if scope.task_id is None:
         raise ToolError("media artifacts can only be created inside a task")
     return scope.task_id
-
-
-class SpeechInput(Schema):
-    name: str
-    text: str = Field(min_length=1)
-    voice: str = "default"
-    language: str = "en"
-    parent_ids: list[str] = Field(default_factory=list)
-
-
-class SpeechSynthesisTool(Tool[SpeechInput, Artifact]):
-    name = "audio.synthesize"
-    description = "Synthesize narration audio with word timings and store it as an AUDIO artifact."
-    input_model = SpeechInput
-    output_model = Artifact
-    permissions = frozenset({"media:generate", "artifact:write"})
-
-    def __init__(self, provider: TTSProvider, artifacts: ArtifactService) -> None:
-        self._provider = provider
-        self._artifacts = artifacts
-
-    async def run(self, data: SpeechInput, scope: ExecutionScope) -> Artifact:
-        audio = await self._provider.synthesize(data.text, data.voice, data.language)
-        return self._artifacts.store(
-            task_id=_require_task(scope), name=data.name, type=ArtifactType.AUDIO, media_type=audio.media_type,
-            content=audio.content, provider=audio.provider, parent_ids=data.parent_ids,
-            metadata={"duration_ms": audio.duration_ms, "timings": [t.model_dump() for t in audio.timings]},
-            scope=scope,
-        )
 
 
 class VideoInput(Schema):

@@ -10,8 +10,8 @@ services     application services + the composition root (container.py); the CLI
 runtime      orchestrator (task lifecycle), workflow engine + node types, task state machine, workflow templates
 agents       decide WHAT to do; reach models only via ModelRouter and tools only via ToolManager
 tools        do the HOW (search, retrieval, dedup + ranking, research cache, image search / fetch / generation /
-             selection / validation / assets, slide plan validation, presentation build and render, learner memory,
-             artifacts, media);
+             selection / validation / assets, slide plan validation, presentation build and render, TTS, audio
+             plan and audio validation, audio assets, presentation timeline, learner memory, artifacts, media);
              no educational strategy
 providers    replaceable adapters: LLM, search, retrieval, ranking, image generation, image search, presentation
              renderer (python-pptx), TTS, video (mock/local in this release)
@@ -22,7 +22,7 @@ schemas / config / observability / utils   shared foundation
 ```
 
 Extra rules enforced by the lint test: only `storage` imports SQLAlchemy; vendor SDKs (python-pptx included) only in
-`providers`;
+`providers`; audio libraries (`wave`, pydub, ffmpeg, ...) only in `providers` and `utils`;
 agents may import only `providers.llm.base`/`router` from providers; the API imports only services, schemas
 and a few exception types.
 
@@ -35,7 +35,7 @@ template by required capabilities. The orchestrator itself holds no educational 
 ## Workflow engine
 
 Node types: `AgentNode`, `ToolNode`, `TransformNode`, `ConditionalNode`, `ParallelNode`, `ReviewNode`,
-`HumanApprovalNode`. Nodes declare hard dependencies (`depends_on`, a skipped dependency skips the node) and
+`HumanApprovalNode`, and the lesson workflow's `NarrationNode` (one tool sequence per audio segment). Nodes declare hard dependencies (`depends_on`, a skipped dependency skips the node) and
 ordering-only dependencies (`after`). The engine applies per-node retry and timeout policies, persists a
 checkpoint after every node (and inside the review loop), honours pause/cancel between nodes, and resumes
 from the checkpoint: completed nodes never run again.
@@ -56,11 +56,14 @@ all that is needed.
   (`research` → `research_policy` → `store_research` → `plan`); visuals run after review
   (`teach_review` → `visual_gate` → `visual` → `visual_policy`), then the lesson artifacts are stored and the
   presentation is made (`presentation_gate` → `slide_plan` → `validate_slide_plan` → `store_slide_plan` →
-  `build_presentation` → `render_presentation`) before `update_learner`. It stores `research_bundle` first,
+  `build_presentation` → `render_presentation`), then narrated (`audio_plan` → `validate_audio_plan` →
+  `store_audio_plan` → `synthesize_audio` → `audio_policy` → `audio_timeline`) before `update_learner`. It stores `research_bundle` first,
   then `visual_plan` (parent: research_bundle) and one `image_<visual_id>` IMAGE_ASSET per visual (parent:
   visual_plan), then `lesson_plan` (parent: research_bundle), `lesson` (parents: lesson_plan, research_bundle and
   its image assets), `narration_script` and `review_report`, then `slide_plan` (parent: lesson) and `presentation`
-  (parents: slide_plan, lesson and the image assets it places).
+  (parents: slide_plan, lesson and the image assets it places), then `audio_plan` (parents: presentation,
+  slide_plan, lesson), one `audio_<segment_id>` AUDIO_ASSET per voiced segment (parent: audio_plan) and
+  `presentation_timeline` (parents: presentation, audio_plan and the audio assets).
 - `lesson_evaluation`: started for a completed lesson task (`TaskService.start_evaluation`), with the lesson
   task id in `plan.inputs`. It reads the lesson and lesson plan artifacts (`artifact.read`), takes a learner
   snapshot, asks `LearnerEvaluationAgent` for an assessment sized by objectives, taught concepts, level and
@@ -212,6 +215,56 @@ Events: `slide_planning.started`, `slide_plan.created`, `slide_plan.validated`, 
 `presentation.artifact_created`, `presentation.failed`. The planner's tokens and cost are recorded like any agent's;
 rendering is recorded per service (`presentation_render:<renderer>`, units: slides, images, bytes) with no cost.
 
+## Audio
+
+Planning, synthesis and timing are separate steps with separate representations:
+
+```
+Lesson + SlideDeckPlan (+ ResearchBundle) → AudioPlannerAgent → AudioPlan → AudioPlanValidator → TTSTool → TTSProvider
+→ AudioValidator → AUDIO_ASSET → timing resolver → PresentationTimeline (→ PRESENTATION, slides, AUDIO_ASSETs)
+```
+
+- `AudioPlan` (`app/schemas/audio.py`): plan id, task id, deck id, language (BCP 47), default voice, metadata and
+  ordered `AudioSegment`s. A segment names its slide, its source (`slide_title`, `slide_content`, `speaker_notes`,
+  `exercise_instructions`, `answer_explanation`) and `source_ref`, the text, language, voice, speaking rate, pitch,
+  pauses, a planning estimate of its duration and whether it is required. `start_time`/`end_time`/`duration` stay
+  empty until the audio exists. No provider details are in the plan.
+- `AudioPlannerAgent` (`audio_planner`, `app/agents/audio/`) runs only for a rendered presentation. The model sees the
+  slides' speakable text (titles, text/bullet/vocabulary lines, speaker notes, questions, answers), never images,
+  captions, tables or citations, and proposes concise segments. Code picks the voice from the provider's catalog
+  (`tts.voices`), assigns deterministic segment ids (`<slide_id>_a<n>`) and plan id, and checks the plan with
+  `audio_plan.validate` through the ToolManager, sending errors back to the model. It never synthesizes or stores.
+- `AudioPlanValidator` (`app/tools/audio/validation.py`): unique segment ids, known slides in deck order, contiguous
+  order, non-empty and concise text, no citation ids/source titles/URLs read aloud, language and voice against the
+  provider's live catalog and, for a timed plan, no negative durations or overlaps. The workflow gate
+  (`validate_audio_plan`) fails the task before any speech is made.
+- `TTSProvider` (`app/providers/tts/base.py`): `voices()` and `synthesize(ProviderSpeechRequest)`, with declared
+  formats and optional parameters (rate, pitch, sample rate) and reported usage (characters, tokens, seconds,
+  estimated and actual cost). Real adapters (OpenAI TTS, ElevenLabs, Azure Speech, Google Cloud TTS) keep their SDKs
+  in their own provider module. `MockTTSProvider` writes a real 16-bit PCM WAV, deterministic per request, whose
+  length follows the text and rate and whose tone follows the voice and pitch.
+- `TTSTool` (`tts.synthesize`): `TTSRequest` → `TTSResult` (stored object reference, declared duration, sample rate,
+  channels, format, provider, model, usage, ignored parameters). Usage is recorded per service (`tts:<provider>`).
+- `NarrationNode` (`synthesize_audio`) voices each segment: reuse an AUDIO_ASSET made from the same inputs whose bytes
+  still match (`audio.find_asset`), otherwise synthesize and create the asset (`audio.create_asset`), which re-reads
+  the bytes and runs `AudioValidator` (MIME type, readable container, non-empty, non-zero measured duration, declared
+  vs measured duration, sample rate, channels, checksum; `app/utils/audio.py` has the container readers, WAV for now).
+  Invalid audio never becomes an asset. Identical bytes are one object in the store.
+- Failure policy (`audio_policy`): an optional segment that fails becomes a warning and its slide plays without it;
+  a required one fails the task (`TA_AUDIO_FAILURE_POLICY=fail`, the default) or becomes a warning (`continue`).
+  Generated assets are kept either way, and every failure names its segment, stage and reason.
+- `audio.timeline` resolves timing deterministically in whole milliseconds from the measured durations: slides in
+  deck order, each segment after its `pause_before` and followed by its `pause_after`, a slide without narration
+  held for `TA_AUDIO_SILENT_SLIDE_SECONDS`. `PresentationTimeline` has one `SlideTiming` per slide (start, end,
+  duration, segment refs) and one `SegmentTiming` per voiced segment (with its AUDIO_ASSET id), references the
+  PRESENTATION artifact and slide ids (never the PPTX file, which is not modified) and is stored as
+  PRESENTATION_TIMELINE. This is the timeline a video composer will consume.
+
+A rejected lesson, a lesson accepted with warnings, or a failed presentation gets no audio. Resume continues from
+the last completed audio node; a narration interrupted mid-plan reuses the assets already stored. Events:
+`audio_planning.started`, `audio_plan.created`, `audio_plan.validated`, `tts.started`, `tts.completed`,
+`audio.validation_failed`, `audio.asset_created`, `timeline.created`, `audio.completed`, `audio.failed`.
+
 ## Agents
 
 Each agent declares id, name, description, input/output schemas, a system prompt (`prompt.md`), a tool
@@ -237,5 +290,5 @@ persisted and logged as JSON, so a task can be reconstructed from its event log.
 ## Not in this release
 
 Real LLM/search/image/media providers, web scraping, vector retrieval and embeddings, advanced slide design,
-animations, cloud rendering, TTS narration, video rendering, coding exercises and
+animations, cloud rendering, real TTS adapters, video rendering, subtitles, coding exercises and
 VS Code integration, UI. The provider and tool interfaces they plug into already exist.

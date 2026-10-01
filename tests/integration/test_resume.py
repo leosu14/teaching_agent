@@ -60,7 +60,8 @@ async def test_kill_after_planner_then_resume(settings) -> None:
         assert sum(1 for e in events if e.type == "node.started" and e.node_id == node) == 1, node
 
     # Final artifacts are correct, and the cost includes both processes' work.
-    arts = {a.name: a for a in second.task_service.artifacts(task.task_id)}
+    arts = {a.name: a for a in second.task_service.artifacts(task.task_id)
+            if not a.name.startswith(("audio_", "presentation_timeline"))}
     assert set(arts) == {"research_bundle", "lesson_plan", "lesson", "narration_script", "slide_plan",
                          "review_report", "visual_plan", "image_v1_photo", "image_v1_diagram",
                          "image_v2_illustration", "image_v2_diagram", "presentation"}

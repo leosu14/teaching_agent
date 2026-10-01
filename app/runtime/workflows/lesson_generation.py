@@ -3,7 +3,8 @@
 snapshot -> adaptive diagnostic (ask / wait for answers / re-assess, up to N rounds) -> research
 -> research policy -> research artifact -> plan -> teach/review/revise loop -> visuals (only for an approved
 lesson) -> visual policy -> lesson artifacts -> slide planning -> slide plan validation -> presentation build ->
-presentation render (only for an approved lesson) -> learner memory.
+presentation render (only for an approved lesson) -> audio planning -> audio plan validation -> TTS, audio validation
+and AUDIO_ASSETs -> audio policy -> presentation timeline (only after the presentation is rendered) -> learner memory.
 """
 
 from __future__ import annotations
@@ -22,9 +23,19 @@ from app.runtime.workflow.nodes import (
     ToolNode,
     TransformNode,
 )
+from app.runtime.workflows.audio import AudioFailurePolicy, NarrationNode, apply_audio_policy
 from app.runtime.workflows.research_policy import ResearchRequirement, apply_research_policy
 from app.runtime.workflows.visual_policy import VisualFailurePolicy, apply_visual_policy
 from app.schemas.artifact import Artifact, ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
+from app.schemas.audio import (
+    AudioPlan,
+    AudioPlanningRequest,
+    AudioPlanValidationReport,
+    NarrationRequest,
+    NarrationResult,
+    TimelineRequest,
+    TimelineResult,
+)
 from app.schemas.learner import LearnerSnapshot, MasteryUpdate
 from app.schemas.lesson import (
     DiagnosticAnswers,
@@ -75,6 +86,14 @@ class LessonWorkflowOptions:
     visual_max_candidates: int = 3
     presentation_config: PresentationConfig = field(default_factory=PresentationConfig)
     presentation_max_slides: int = 20
+    audio_failure_policy: AudioFailurePolicy = "fail"
+    audio_language: str | None = None  # BCP 47 tag; None: the lesson's language of instruction
+    audio_voice: str | None = None  # a provider voice id; None: the provider's first voice for the language
+    audio_speaking_rate: float = 1.0
+    audio_format: str = "wav"
+    audio_sample_rate: int | None = None  # None: the provider's default
+    audio_max_words_per_segment: int = 80
+    audio_silent_slide_seconds: float = 3.0
 
 
 def _request(v: StateView) -> LessonRequest:
@@ -141,6 +160,48 @@ def _slide_plan_artifact_id(v: StateView) -> str:
 
 def _presentation(v: StateView) -> Artifact | None:
     return v.maybe("render_presentation", Artifact)
+
+
+def _presentation_artifact_id(v: StateView) -> str:
+    presentation = _presentation(v)
+    assert presentation is not None
+    return presentation.artifact_id
+
+
+def _audio_planning(v: StateView, options: LessonWorkflowOptions) -> AudioPlanningRequest:
+    return AudioPlanningRequest(
+        task_id=v.task.task_id, request=_request(v), lesson=_lesson(v), deck=_deck(v), research=_research(v),
+        presentation_artifact_id=_presentation_artifact_id(v),
+        language=options.audio_language or _request(v).language_of_instruction, voice_id=options.audio_voice,
+        speaking_rate=options.audio_speaking_rate, max_words_per_segment=options.audio_max_words_per_segment,
+    )
+
+
+def _audio_plan(v: StateView) -> AudioPlan:
+    """The audio plan as validated by the gate; nothing downstream sees an unvalidated plan."""
+    plan = v.output("validate_audio_plan", AudioPlanValidationReport).plan
+    assert plan is not None
+    return plan
+
+
+def _audio_plan_artifact_id(v: StateView) -> str:
+    return v.output("store_audio_plan", StoredArtifacts).by_key["audio_plan"]
+
+
+def _narration(v: StateView) -> NarrationResult | None:
+    """The voiced segments after the audio policy; None before they exist or when audio was skipped."""
+    return v.maybe("audio_policy", NarrationResult)
+
+
+def _timeline(v: StateView) -> TimelineResult | None:
+    return v.maybe("audio_timeline", TimelineResult)
+
+
+def _audio_warnings(v: StateView) -> list[str]:
+    if v.status("audio_plan") == NodeStatus.SKIPPED:
+        return ["No narration was generated: audio is only generated for the presentation of an approved lesson."]
+    narration = _narration(v)
+    return narration.warnings if narration else []
 
 
 def _presentation_warnings(v: StateView) -> list[str]:
@@ -287,12 +348,37 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                      research=_research(v))),
         ToolNode(id="render_presentation", tool="presentation.render", permissions=frozenset({"artifact:write"}),
                  depends_on=("build_presentation",), build_input=_render_request),
+        # Audio only for a rendered presentation (so only for an approved lesson); a skipped or failed presentation
+        # means no audio.
+        AgentNode(id="audio_plan", agent="audio_planner", depends_on=("render_presentation",),
+                  build_input=lambda v: _audio_planning(v, options)),
+        ToolNode(id="validate_audio_plan", tool="audio_plan.validate", depends_on=("audio_plan",),
+                 build_input=lambda v: _audio_planning(v, options).validation_request(
+                     v.output("audio_plan", AudioPlan), enforce=True)),
+        ToolNode(id="store_audio_plan", tool="artifact.store", permissions=frozenset({"artifact:write"}),
+                 depends_on=("validate_audio_plan",), build_input=_audio_plan_batch),
+        NarrationNode(id="synthesize_audio", depends_on=("store_audio_plan",),
+                      build_input=lambda v: NarrationRequest(
+                          plan=_audio_plan(v), audio_plan_artifact_id=_audio_plan_artifact_id(v),
+                          output_format=options.audio_format, sample_rate=options.audio_sample_rate)),
+        TransformNode(id="audio_policy", depends_on=("synthesize_audio",),
+                      fn=lambda v: apply_audio_policy(v.output("synthesize_audio", NarrationResult),
+                                                      options.audio_failure_policy)),
+        ToolNode(id="audio_timeline", tool="audio.timeline", permissions=frozenset({"artifact:write"}),
+                 depends_on=("audio_policy",),
+                 build_input=lambda v: TimelineRequest(
+                     plan=_audio_plan(v), narration=v.output("audio_policy", NarrationResult),
+                     slide_ids=[s.slide_id for s in _deck(v).slides],
+                     presentation_artifact_id=_presentation_artifact_id(v),
+                     audio_plan_artifact_id=_audio_plan_artifact_id(v),
+                     silent_slide_seconds=options.audio_silent_slide_seconds)),
         ToolNode(id="update_learner", tool="learner.record_lesson", permissions=frozenset({"learner:write"}),
-                 depends_on=("store_artifacts",), after=("render_presentation",), build_input=_lesson_outcome),
+                 depends_on=("store_artifacts",), after=("render_presentation", "audio_timeline"),
+                 build_input=_lesson_outcome),
     ]
     return WorkflowDefinition(id=WORKFLOW_ID, nodes=tuple(nodes), summarize=_summarize,
                               description="Diagnose, research, plan, teach with review, illustrate, store, plan, "
-                                          "build and render the presentation, remember.")
+                                          "build and render the presentation, narrate it, time it, remember.")
 
 
 def _research_batch(v: StateView) -> ArtifactBatch:
@@ -314,6 +400,18 @@ def _slide_plan_batch(v: StateView) -> ArtifactBatch:
         metadata={"deck_id": deck.deck_id, "slides": len(deck.slides),
                   "slide_types": [s.slide_type.value for s in deck.slides],
                   "image_artifact_ids": deck.image_artifact_ids(), "citation_ids": deck.citation_ids()},
+    )])
+
+
+def _audio_plan_batch(v: StateView) -> ArtifactBatch:
+    plan = _audio_plan(v)
+    return ArtifactBatch(drafts=[ArtifactDraft(
+        key="audio_plan", name="audio_plan", type=ArtifactType.AUDIO_PLAN, media_type="application/json",
+        content=_json(plan),
+        parent_ids=[_presentation_artifact_id(v), _slide_plan_artifact_id(v), _lesson_artifact_id(v)],
+        metadata={"audio_plan_id": plan.audio_plan_id, "deck_id": plan.deck_id, "language": plan.language,
+                  "voice": plan.voice, "segments": len(plan.segments),
+                  "required": sum(s.required for s in plan.segments), "expected_duration": plan.expected_duration()},
     )])
 
 
@@ -373,7 +471,8 @@ def _lesson_outcome(v: StateView) -> LessonOutcome:
         concepts=step.concepts, lesson_title=_lesson(v).title,
         taught_concept_ids=[c.concept_id for c in plan.concepts],
         artifact_ids=[_research_artifact_id(v), *_visual_artifact_ids(v),
-                      *(a.artifact_id for a in stored.artifacts), *_presentation_artifact_ids(v)],
+                      *(a.artifact_id for a in stored.artifacts), *_presentation_artifact_ids(v),
+                      *(a.artifact_id for a in _audio_artifacts(v))],
     )
 
 
@@ -387,6 +486,17 @@ def _presentation_artifact_ids(v: StateView) -> list[str]:
     if presentation is None:
         return []
     return [_slide_plan_artifact_id(v), presentation.artifact_id]
+
+
+def _audio_artifacts(v: StateView) -> list[Artifact]:
+    """The audio plan, every AUDIO_ASSET and the timeline, once the timeline exists."""
+    timeline = _timeline(v)
+    if timeline is None:
+        return []
+    plan = v.output("store_audio_plan", StoredArtifacts).artifacts
+    narration = _narration(v)
+    assert narration is not None
+    return [*plan, *narration.artifacts, timeline.artifact]
 
 
 def _summarize(v: StateView) -> TaskResult:
@@ -403,12 +513,12 @@ def _summarize(v: StateView) -> TaskResult:
         artifacts=[ArtifactSummary(artifact_id=a.artifact_id, type=a.type, name=a.name, version=a.version,
                                    uri=a.uri, parent_ids=a.parent_ids)
                    for a in [*research.artifacts, *(visuals.artifacts if visuals else []), *stored.artifacts,
-                             *presentation_artifacts]],
+                             *presentation_artifacts, *_audio_artifacts(v)]],
         mastery_changes=update.changes,
         review_verdict=review.final_review.verdict.value if review.status == "approved" else review.status,
         revisions=review.revisions,
         estimated_level=update.estimated_level,
-        warnings=[*_research(v).warnings, *_visual_warnings(v), *_presentation_warnings(v)],
+        warnings=[*_research(v).warnings, *_visual_warnings(v), *_presentation_warnings(v), *_audio_warnings(v)],
     )
 
 
@@ -416,8 +526,10 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
     rounds = options.diagnostic_rounds
     return WorkflowTemplate(
         id=WORKFLOW_ID,
-        description="Personalised text lesson with diagnostic, research, review loop, visuals and a presentation.",
-        provides=frozenset({"lesson.text", "lesson.review", "lesson.visuals", "slides.plan", "presentation.pptx"}),
+        description="Personalised text lesson with diagnostic, research, review loop, visuals, a presentation and "
+                    "its narration.",
+        provides=frozenset({"lesson.text", "lesson.review", "lesson.visuals", "slides.plan", "presentation.pptx",
+                            "audio.narration", "presentation.timeline"}),
         build=lambda request: build_lesson_workflow(request, options),
         expected_calls=(
             ExpectedCall("request_interpreter", 700, 200),
@@ -428,5 +540,6 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
             ExpectedCall("content_reviewer", 10000, 900, calls=2),
             ExpectedCall("visual", 9000, 1500),
             ExpectedCall("slide_planner", 9000, 3000),
+            ExpectedCall("audio_planner", 6000, 2500),
         ),
     )

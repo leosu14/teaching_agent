@@ -26,7 +26,9 @@ ALLOWED: dict[str, set[str]] = {
 # Finer rules on top of the layer order.
 AGENT_PROVIDER_MODULES = {"app.providers.llm.base", "app.providers.llm.router"}
 SQL_PACKAGES = {"sqlalchemy"}
-VENDOR_SDKS = {"anthropic", "openai", "google", "requests", "httpx", "boto3", "elevenlabs", "minimax", "pptx"}
+VENDOR_SDKS = {"anthropic", "openai", "google", "requests", "httpx", "boto3", "elevenlabs", "minimax", "pptx", "azure"}
+# Audio processing libraries: only providers (and the stdlib-based probe in utils) may touch audio bytes.
+AUDIO_LIBS = {"wave", "pydub", "ffmpeg", "soundfile", "audioop", "pyaudio"}
 API_EXCEPTION_MODULES = {  # the API may import exception types from lower layers, nothing else
     "app.runtime.orchestrator.orchestrator": {"InvalidInput"},
     "app.runtime.tasks.state_machine": {"InvalidTransition"},
@@ -68,6 +70,8 @@ def violations_for(layer: str, module: str, names: list[str], where: str) -> lis
             problems.append(f"{where}: only the storage layer may use {root}")
         if root in VENDOR_SDKS and layer != "providers":
             problems.append(f"{where}: vendor SDK '{root}' outside the providers layer")
+        if root in AUDIO_LIBS and layer not in {"providers", "utils"}:
+            problems.append(f"{where}: audio library '{root}' outside providers and utils")
         if root == "fastapi" and layer != "api":
             problems.append(f"{where}: fastapi outside the api layer")
     return problems
@@ -101,5 +105,9 @@ def test_checker_flags_upward_imports() -> None:
     assert violations_for("tools", "openai", [], "x")
     assert violations_for("agents", "pptx", [], "x") and violations_for("tools", "pptx.util", [], "x")
     assert not violations_for("providers", "pptx", [], "x")
+    assert violations_for("agents", "pydub", [], "x") and violations_for("agents", "wave", [], "x")
+    assert violations_for("tools", "ffmpeg", [], "x") and violations_for("runtime", "elevenlabs", [], "x")
+    assert violations_for("agents", "app.providers.tts.mock", [], "x")
+    assert not violations_for("providers", "wave", [], "x") and not violations_for("utils", "wave", [], "x")
     assert not violations_for("agents", "app.providers.llm.router", [], "x")
     assert not violations_for("services", "app.storage.repositories", [], "x")

@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     visual_max_candidates: int = Field(default=3, ge=1, le=10)
     presentation_aspect_ratio: Literal["16:9", "4:3"] = "16:9"
     presentation_max_slides: int = Field(default=20, ge=2, le=30)
+    audio_failure_policy: Literal["fail", "continue"] = "fail"
+    audio_language: str | None = Field(default=None, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
+    audio_voice: str | None = None
+    audio_speaking_rate: float = Field(default=1.0, ge=0.5, le=2.0)
+    audio_format: str = "wav"
+    audio_sample_rate: int | None = Field(default=None, ge=8000, le=192000)
+    audio_max_words_per_segment: int = Field(default=80, ge=5, le=400)
+    audio_silent_slide_seconds: float = Field(default=3.0, gt=0, le=60)
 
     log_level: str = "INFO"
     log_json: bool = True

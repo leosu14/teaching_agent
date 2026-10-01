@@ -14,6 +14,7 @@ from collections import defaultdict
 
 from app.providers.llm.base import LLMRequest
 from app.providers.llm.mock import Responder
+from app.schemas.audio import AudioPlanningInput, AudioPlanProposal, NarrationProposal, concise
 from app.schemas.evaluation import (
     AssessmentPlan,
     AssessmentQuestion,
@@ -583,6 +584,39 @@ def plan_slides(request: LLMRequest) -> dict:
         .model_dump(mode="json")
 
 
+# --- audio --------------------------------------------------------------------------------
+
+
+def plan_audio(request: LLMRequest) -> dict:
+    """The title is announced, then each slide's speaker notes (or its title and content lines) are narrated
+    concisely; exercise prompts are read as instructions and answers explained (optional narration). Slides with
+    nothing to say, such as references, get no segment."""
+    p = AudioPlanningInput.model_validate(request.input_payload)
+    segments: list[NarrationProposal] = []
+
+    def add(slide, source_type: str, ref: str, text: str, *, required: bool = True, pause_after: float = 0.5) -> None:
+        segments.append(NarrationProposal(slide_id=slide.slide_id, source_type=source_type, source_ref=ref,
+                                          text=concise(text, p.max_words_per_segment), required=required,
+                                          pause_after=pause_after))
+
+    for slide in p.slides:
+        if slide.slide_type == "title":
+            add(slide, "slide_title", f"{slide.slide_id}.title", slide.title, pause_after=0.8)
+        if slide.speaker_notes:
+            add(slide, "speaker_notes", f"{slide.slide_id}.notes", slide.speaker_notes)
+        elif slide.content:
+            lines = [line.rstrip(".") for line in slide.content]
+            add(slide, "slide_content", f"{slide.slide_id}.content", ". ".join([slide.title, *lines]) + ".")
+        for q in slide.questions:
+            add(slide, "exercise_instructions", q.question_id, q.prompt, pause_after=1.5)
+        for a in slide.answers:
+            text = f"{a.answer.rstrip('.')}. {a.explanation}" if a.explanation else a.answer
+            add(slide, "answer_explanation", a.question_id, text, required=False)
+    return AudioPlanProposal(segments=segments, rationale="Speaker notes where a slide has them, otherwise its "
+                             "title and content; exercises read as instructions; answers explained.") \
+        .model_dump(mode="json")
+
+
 # --- visuals ------------------------------------------------------------------------------
 
 
@@ -728,6 +762,7 @@ def default_responders(*, first_draft_defects: bool = True) -> dict[str, Respond
         "teacher": make_teacher(first_draft_defects),
         "content_reviewer": review,
         "slide_planner": plan_slides,
+        "audio_planner": plan_audio,
         "visual": visuals,
         "learner_evaluation": evaluate_learner,
     }

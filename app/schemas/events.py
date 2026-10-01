@@ -70,6 +70,16 @@ class EventType:
     PRESENTATION_RENDER_COMPLETED = "presentation.render_completed"
     PRESENTATION_ARTIFACT_CREATED = "presentation.artifact_created"
     PRESENTATION_FAILED = "presentation.failed"
+    AUDIO_PLANNING_STARTED = "audio_planning.started"
+    AUDIO_PLAN_CREATED = "audio_plan.created"
+    AUDIO_PLAN_VALIDATED = "audio_plan.validated"
+    TTS_STARTED = "tts.started"
+    TTS_COMPLETED = "tts.completed"
+    AUDIO_VALIDATION_FAILED = "audio.validation_failed"
+    AUDIO_ASSET_CREATED = "audio.asset_created"
+    TIMELINE_CREATED = "timeline.created"
+    AUDIO_COMPLETED = "audio.completed"
+    AUDIO_FAILED = "audio.failed"
 
 
 class Event(Schema):

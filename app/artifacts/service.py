@@ -1,6 +1,6 @@
 """Artifact service: versioning, content-hash deduplication and the artifact dependency graph.
 
-Media objects (images) are content-addressed: `put_object` stores identical bytes once, and any number of
+Media objects (images, audio, presentations) are content-addressed: `put_object` stores identical bytes once, and any number of
 artifacts can point at the same object.
 """
 
@@ -21,6 +21,9 @@ EXTENSIONS = {
     "text/plain": ".txt",
     "image/svg+xml": ".svg",
     "audio/wav": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/flac": ".flac",
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/gif": ".gif",

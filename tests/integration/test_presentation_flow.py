@@ -291,7 +291,8 @@ async def test_crash_after_slide_planning_resumes_without_rerunning_earlier_work
     second = make_container(llm=llm, data_dir=data_dir, image_generation_provider=generation)
     resumed = await second.task_service.resume(task.task_id)
     assert resumed.status == TaskStatus.COMPLETED, resumed.errors
-    assert sum(llm.calls.values()) == 0 and generation.calls == 0  # no diagnostic, research, teaching or images
+    # No diagnostic, research, teaching or images; only the audio stage after the presentation calls a model.
+    assert set(llm.calls) == {"audio_planner"} and generation.calls == 0
     events = second.task_service.events(task.task_id)
     started = [e.node_id for e in events if e.type == "node.started"]
     for node in ("diagnose_1", "research", "plan", "teach_review", "visual", "store_artifacts", "slide_plan"):
@@ -300,7 +301,9 @@ async def test_crash_after_slide_planning_resumes_without_rerunning_earlier_work
         assert started.count(node) == 1, node
     after = {a.artifact_id: a for a in second.task_service.artifacts(task.task_id)}
     assert before <= set(after)
-    assert {a.name for a in after.values() if a.artifact_id not in before} == {"slide_plan", "presentation"}
+    new = {a.name for a in after.values() if a.artifact_id not in before}
+    assert {"slide_plan", "presentation"} <= new and all(n.startswith(("audio_", "presentation")) or n == "slide_plan"
+                                                         for n in new)
 
 
 async def test_rerunning_the_render_stage_reuses_the_presentation_artifact(make_container, tmp_path) -> None:
