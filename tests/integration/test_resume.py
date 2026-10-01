@@ -62,7 +62,8 @@ async def test_kill_after_planner_then_resume(settings) -> None:
     # Final artifacts are correct, and the cost includes both processes' work.
     arts = {a.name: a for a in second.task_service.artifacts(task.task_id)}
     assert set(arts) == {"research_bundle", "lesson_plan", "lesson", "narration_script", "slide_plan",
-                         "review_report"}
+                         "review_report", "visual_plan", "image_v1_photo", "image_v1_diagram",
+                         "image_v2_illustration", "image_v2_diagram"}
     assert arts["lesson"].type == ArtifactType.LESSON and arts["lesson"].version == 1
     assert arts["slide_plan"].parent_ids == [arts["lesson"].artifact_id]
     assert resumed.cost.actual_cost_usd > cost_before
@@ -73,10 +74,11 @@ async def test_kill_after_planner_then_resume(settings) -> None:
                                 llm_providers={"mock": MockLLMProvider(default_responders())})
     clean = await run_lesson(reference)
     clean_lesson = reference.artifacts.read(next(a.artifact_id for a in clean.result.artifacts if a.name == "lesson"))
-    # Identical apart from retrieval timestamps in the resolved references.
+    # Identical apart from retrieval timestamps in the resolved references and the (per-task) image artifact ids.
     resumed_lesson = LessonContent.model_validate_json(second.artifacts.read(arts["lesson"].artifact_id))
     clean_lesson = LessonContent.model_validate_json(clean_lesson)
-    assert resumed_lesson.model_dump(exclude={"references"}) == clean_lesson.model_dump(exclude={"references"})
+    exclude = {"references": True, "sections": {"__all__": {"visuals": {"__all__": {"artifact_id"}}}}}
+    assert resumed_lesson.model_dump(exclude=exclude) == clean_lesson.model_dump(exclude=exclude)
     assert ([r.model_dump(exclude={"retrieved_at"}) for r in resumed_lesson.references]
             == [r.model_dump(exclude={"retrieved_at"}) for r in clean_lesson.references])
     assert [c.model_dump() for c in resumed.result.mastery_changes] == [c.model_dump() for c in clean.result.mastery_changes]

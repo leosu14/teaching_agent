@@ -4,11 +4,12 @@ An agentic, personalised education platform. It assesses what a learner knows, r
 with traceable sources, plans a lesson for that learner, writes and reviews the lesson, plans slides,
 stores versioned artifacts, and updates long-term learner memory, so the next lesson adapts.
 
-This release is the **text-lesson vertical slice** with research, fully deterministic on mock providers:
+This release is the **text-lesson vertical slice** with research and visuals, fully deterministic on mock providers:
 
 ```
 Request → Task → Request Interpreter → Learner Snapshot → Diagnostic (adaptive, can WAIT for answers)
-→ Research (queries → search → dedup/rank → evidence → cited ResearchBundle) → Curriculum Plan → Teacher ⇄ Reviewer (revision loop) → Slide Plan → Artifact Storage
+→ Research (queries → search → dedup/rank → evidence → cited ResearchBundle) → Curriculum Plan → Teacher ⇄ Reviewer (revision loop)
+→ Visual (approved lessons only: visual plan → image search / generation → selection → validation → IMAGE_ASSET) → Slide Plan → Artifact Storage
 → Learner Memory → COMPLETED
 ```
 
@@ -26,6 +27,7 @@ pip install -e ".[dev]"
 python scripts/run_demo.py          # one command that proves the slice works
 python scripts/run_evaluation_demo.py  # lesson, then its evaluation, mastery before/after, recommendation
 python scripts/run_research_demo.py    # the lesson's research: queries, results, sources, evidence, citations
+python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, selection, generation, validation, assets
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
 uvicorn app.api.main:app --reload   # the same services over HTTP
 ```
@@ -37,6 +39,9 @@ prints the evaluation, mastery before and after, remaining gaps and the next rec
 `run_research_demo.py` runs the lesson and shows its research: the request, generated queries, mock search
 results (with duplicates), selected and rejected sources, extracted evidence, citations, the stored
 ResearchBundle, and how each lesson section's citations resolve to evidence and sources.
+`run_visual_demo.py` runs the lesson and shows its visuals: the visual plan and requirements, each image search with
+its selected and rejected candidates (one rejected by validation for misreporting its size), generated images, the
+validation checks, attribution, the IMAGE_ASSET artifacts with checksums, and image usage.
 
 ## API
 

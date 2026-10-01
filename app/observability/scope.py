@@ -19,8 +19,9 @@ class UsageLedger:
         self.summary.record(agent_id=agent_id, model=model, usage=usage, cost_usd=cost_usd)
 
     def record_service(self, *, service: str, results: int, cache_hit: bool = False,
-                       cost_usd: float | None = None) -> None:
-        self.summary.record_service(service=service, results=results, cache_hit=cache_hit, cost_usd=cost_usd)
+                       cost_usd: float | None = None, units: dict[str, float] | None = None) -> None:
+        self.summary.record_service(service=service, results=results, cache_hit=cache_hit, cost_usd=cost_usd,
+                                    units=units)
 
 
 @dataclass(frozen=True)

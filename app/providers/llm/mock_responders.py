@@ -59,6 +59,7 @@ from app.schemas.lesson import (
     SlideInput,
     TeacherInput,
     Verdict,
+    VisualPlanningInput,
     VisualSpec,
     MAX_BULLETS_PER_SLIDE,
     MAX_WORDS_PER_BULLET,
@@ -540,6 +541,40 @@ def slides(request: LLMRequest) -> dict:
     return SlideDeckPlan(title=lesson.title, slides=deck).model_dump(mode="json")
 
 
+# --- visuals ------------------------------------------------------------------------------
+
+
+def visuals(request: LLMRequest) -> dict:
+    """A searched picture per section (the first one required) plus a required generated concept diagram."""
+    p = VisualPlanningInput.model_validate(request.input_payload)
+    topic = p.research.objective.topic
+    names = {c.concept_id: c.name for c in p.plan.concepts}
+    requirements = []
+    for i, section in enumerate(p.lesson.sections, start=1):
+        concept = names.get(section.concept_id, section.heading)
+        first = i == 1
+        requirements.append({
+            "visual_id": f"v{i}_{'photo' if first else 'illustration'}", "lesson_section_id": section.section_id,
+            "purpose": f"Set the real-world context for {section.heading.lower()}.",
+            "concept": concept, "description": f"A {topic} scene that shows {section.heading.lower()}.",
+            "visual_type": "photo" if first else "illustration", "preferred_source": "search",
+            "search_query": f"{section.heading} {topic}",
+            "generation_prompt": None if first else f"Illustration of {section.heading.lower()} in a {topic} setting",
+            "aspect_ratio": "16:9", "required": first, "attribution_required": True,
+        })
+        requirements.append({
+            "visual_id": f"v{i}_diagram", "lesson_section_id": section.section_id,
+            "purpose": f"Summarise how {concept.lower()} works.", "concept": concept,
+            "description": f"A labelled diagram of {concept.lower()} with one example.",
+            "visual_type": "diagram", "preferred_source": "generate",
+            "generation_prompt": f"Labelled teaching diagram explaining {concept.lower()}, with the example: "
+                                 f"{(section.examples or [section.heading])[0]}",
+            "aspect_ratio": "16:9", "required": True, "attribution_required": False,
+        })
+    return {"requirements": requirements[:p.max_visuals],
+            "rationale": "One real-world picture for context and one generated diagram per section."}
+
+
 # --- learner evaluation --------------------------------------------------------------------
 
 WEAK_MASTERY = 0.6
@@ -651,5 +686,6 @@ def default_responders(*, first_draft_defects: bool = True) -> dict[str, Respond
         "teacher": make_teacher(first_draft_defects),
         "content_reviewer": review,
         "slide_generation": slides,
+        "visual": visuals,
         "learner_evaluation": evaluate_learner,
     }

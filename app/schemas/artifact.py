@@ -16,7 +16,7 @@ class ArtifactType(str, Enum):
     SLIDE = "SLIDE"
     SLIDE_PLAN = "SLIDE_PLAN"
     PPTX = "PPTX"
-    IMAGE = "IMAGE"
+    IMAGE_ASSET = "IMAGE_ASSET"
     AUDIO = "AUDIO"
     VIDEO = "VIDEO"
     CODE = "CODE"
@@ -26,6 +26,7 @@ class ArtifactType(str, Enum):
     LESSON_PLAN = "LESSON_PLAN"
     LEARNER_EVALUATION = "LEARNER_EVALUATION"
     RESEARCH_BUNDLE = "RESEARCH_BUNDLE"
+    VISUAL_PLAN = "VISUAL_PLAN"
 
 
 class Artifact(Schema):
@@ -42,6 +43,16 @@ class Artifact(Schema):
     parent_ids: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class StoredObject(Schema):
+    """A content-addressed object in the object store: identical bytes are stored once and share this reference."""
+
+    uri: str
+    checksum: str  # sha256 of the content, hex
+    media_type: str
+    size_bytes: int = Field(ge=0)
+    reused: bool = False  # the object already existed when it was stored
 
 
 class ArtifactDraft(Schema):

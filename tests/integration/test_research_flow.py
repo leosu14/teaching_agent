@@ -105,8 +105,9 @@ async def test_research_artifact_is_linked_and_stored_before_planning(make_conta
     assert bundle_art.artifact_id in task.artifact_ids
     assert arts["lesson_plan"].parent_ids == [bundle_art.artifact_id]
     assert bundle_art.artifact_id in arts["lesson"].parent_ids
-    assert [a.name for a in container.artifacts.lineage(arts["slide_plan"].artifact_id)] == \
-        ["lesson", "lesson_plan", "research_bundle"]
+    lineage = [a.name for a in container.artifacts.lineage(arts["slide_plan"].artifact_id)]
+    assert lineage[:3] == ["lesson", "lesson_plan", "research_bundle"]
+    assert lineage[-1] == "visual_plan" and all(n.startswith("image_") for n in lineage[3:-1])  # the lesson's visuals
     events = container.task_service.events(task.task_id)
     created = next(i for i, e in enumerate(events) if e.type == "artifact.created"
                    and e.data["artifact_type"] == "RESEARCH_BUNDLE")

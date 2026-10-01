@@ -20,6 +20,13 @@ class FilesystemObjectStore:
         tmp.replace(path)
         return path.as_uri()
 
+    def put_if_absent(self, key: str, data: bytes) -> tuple[str, bool]:
+        """Write `data` unless `key` already exists. Returns (uri, created). For content-addressed keys."""
+        path = self._path(key)
+        if path.exists():
+            return path.as_uri(), False
+        return self.put(key, data), True
+
     def get(self, uri: str) -> bytes:
         if not uri.startswith("file://"):
             raise ValueError(f"unsupported uri {uri}")

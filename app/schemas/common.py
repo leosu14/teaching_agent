@@ -71,6 +71,7 @@ class ServiceUsageLine(Schema):
     cache_hits: int = 0
     results: int = 0
     cost_usd: float | None = None
+    units: dict[str, float] = Field(default_factory=dict)  # provider-reported units, e.g. images, megapixels
 
 
 class CostSummary(Schema):
@@ -93,8 +94,10 @@ class CostSummary(Schema):
             line.cost_usd = round(line.cost_usd + cost_usd, 8)
 
     def record_service(self, *, service: str, results: int, cache_hit: bool = False,
-                       cost_usd: float | None = None) -> None:
+                       cost_usd: float | None = None, units: dict[str, float] | None = None) -> None:
         line = self.by_service.setdefault(service, ServiceUsageLine())
+        for unit, amount in (units or {}).items():
+            line.units[unit] = round(line.units.get(unit, 0.0) + amount, 6)
         if cache_hit:
             line.cache_hits += 1
         else:

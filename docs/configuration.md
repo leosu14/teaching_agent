@@ -11,8 +11,9 @@ They are validated when the container is built; errors say what to fix.
 | `TA_ROUTING_FILE` | `config/routing.toml` | Model tiers, fallback chains, pricing, output limits |
 | `TA_LLM_PROVIDERS` | `["mock"]` | Enabled LLM providers (only `mock` has an adapter now) |
 | `TA_SEARCH_PROVIDER` / `TA_RETRIEVAL_PROVIDER` | `mock` / `local` | Web search and knowledge-base retrieval |
-| `TA_IMAGE_PROVIDER` / `TA_TTS_PROVIDER` / `TA_VIDEO_PROVIDER` | `mock` | Media providers |
-| `TA_CORPUS_DIR` | `fixtures/demo` | Corpus for the mock search and local knowledge base |
+| `TA_IMAGE_PROVIDER` / `TA_TTS_PROVIDER` / `TA_VIDEO_PROVIDER` | `mock` | Media providers (`TA_IMAGE_PROVIDER` is image generation) |
+| `TA_IMAGE_SEARCH_PROVIDER` | `mock` | Image search |
+| `TA_CORPUS_DIR` | `fixtures/demo` | Corpus for the mock search, mock image search (`image_catalog.json`) and local knowledge base |
 | `TA_MAX_REVISIONS` | `2` | Revision budget of the review loop |
 | `TA_REVISION_EXHAUSTED_POLICY` | `fail` | `fail` or `accept_with_warnings` when the budget is used |
 | `TA_DIAGNOSTIC_MAX_ROUNDS` | `2` | Adaptive diagnostic question rounds |
@@ -22,6 +23,9 @@ They are validated when the container is built; errors say what to fix.
 | `TA_RESEARCH_MAX_SOURCES` | `6` | Sources kept after ranking |
 | `TA_RESEARCH_MIN_RELIABILITY` | `0.5` | Sources rated below this are rejected (the reason is kept in the bundle) |
 | `TA_RESEARCH_CACHE` | `true` | Process-local cache of search results |
+| `TA_VISUAL_FAILURE_POLICY` | `fail` | When a required visual cannot be produced: `fail` the lesson task, or `continue` with a warning. Optional visuals never stop a lesson |
+| `TA_VISUAL_MAX_PER_LESSON` | `6` | Most visuals the visual planner may propose (`0` disables visuals) |
+| `TA_VISUAL_MAX_CANDIDATES` | `3` | Searched candidates fetched and validated per visual before falling back or giving up |
 | `TA_LOG_LEVEL` / `TA_LOG_JSON` | `INFO` / `true` | Structured logging |
 
 ## Model routing (`config/routing.toml`)
