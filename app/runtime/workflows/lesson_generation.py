@@ -2,7 +2,8 @@
 
 snapshot -> adaptive diagnostic (ask / wait for answers / re-assess, up to N rounds) -> research
 -> research policy -> research artifact -> plan -> teach/review/revise loop -> visuals (only for an approved
-lesson) -> visual policy -> slide plan -> artifacts -> learner memory.
+lesson) -> visual policy -> lesson artifacts -> slide planning -> slide plan validation -> presentation build ->
+presentation render (only for an approved lesson) -> learner memory.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from app.runtime.workflow.nodes import (
 )
 from app.runtime.workflows.research_policy import ResearchRequirement, apply_research_policy
 from app.runtime.workflows.visual_policy import VisualFailurePolicy, apply_visual_policy
-from app.schemas.artifact import ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
+from app.schemas.artifact import Artifact, ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
 from app.schemas.learner import LearnerSnapshot, MasteryUpdate
 from app.schemas.lesson import (
     DiagnosticAnswers,
@@ -40,10 +41,17 @@ from app.schemas.lesson import (
     ReviewerInput,
     RevisionContext,
     SectionVisual,
-    SlideDeckPlan,
-    SlideInput,
     TeacherInput,
     VisualRequest,
+)
+from app.schemas.presentation import (
+    Presentation,
+    PresentationBuildRequest,
+    PresentationConfig,
+    PresentationRenderRequest,
+    SlideDeckPlan,
+    SlidePlanningRequest,
+    SlidePlanValidationReport,
 )
 from app.schemas.research import ResearchBundle
 from app.schemas.task import ArtifactSummary, TaskResult
@@ -65,6 +73,8 @@ class LessonWorkflowOptions:
     visual_failure_policy: VisualFailurePolicy = "fail"
     visual_max_per_lesson: int = 6
     visual_max_candidates: int = 3
+    presentation_config: PresentationConfig = field(default_factory=PresentationConfig)
+    presentation_max_slides: int = 20
 
 
 def _request(v: StateView) -> LessonRequest:
@@ -103,6 +113,41 @@ def _lesson(v: StateView) -> LessonContent:
     cited = {c for s in lesson.sections for c in s.citations}
     return lesson.model_copy(update={"sections": sections,
                                      "references": [c for c in research.citations if c.citation_id in cited]})
+
+
+def _lesson_artifact_id(v: StateView) -> str:
+    return v.output("store_artifacts", StoredArtifacts).by_key["lesson"]
+
+
+def _slide_planning(v: StateView, options: LessonWorkflowOptions) -> SlidePlanningRequest:
+    visuals = _visuals(v)
+    return SlidePlanningRequest(
+        request=_request(v), plan=v.output("plan", LessonPlan), lesson=_lesson(v), research=_research(v),
+        visual_plan=visuals.plan if visuals else None, image_assets=visuals.assets if visuals else [],
+        max_slides=options.presentation_max_slides,
+    )
+
+
+def _deck(v: StateView) -> SlideDeckPlan:
+    """The slide plan as validated by the gate; nothing downstream sees an unvalidated deck."""
+    deck = v.output("validate_slide_plan", SlidePlanValidationReport).deck
+    assert deck is not None
+    return deck
+
+
+def _slide_plan_artifact_id(v: StateView) -> str:
+    return v.output("store_slide_plan", StoredArtifacts).by_key["slide_plan"]
+
+
+def _presentation(v: StateView) -> Artifact | None:
+    return v.maybe("render_presentation", Artifact)
+
+
+def _presentation_warnings(v: StateView) -> list[str]:
+    if v.status("slide_plan") == NodeStatus.SKIPPED:
+        return [f"No presentation was generated: the lesson was {_review(v).status.replace('_', ' ')}, "
+                "and presentations are only generated for an approved lesson."]
+    return []
 
 
 def _visual_warnings(v: StateView) -> list[str]:
@@ -220,17 +265,34 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
         TransformNode(id="visual_policy", depends_on=("visual",),
                       fn=lambda v: apply_visual_policy(v.output("visual", VisualResult),
                                                        options.visual_failure_policy)),
-        AgentNode(id="slides", agent="slide_generation", depends_on=("teach_review",), after=("visual_policy",),
-                  build_input=lambda v: SlideInput(lesson=_lesson(v), plan=v.output("plan", LessonPlan))),
-        TransformNode(id="package_artifacts", depends_on=("slides",), fn=_package),
+        TransformNode(id="package_artifacts", depends_on=("teach_review",), after=("visual_policy",), fn=_package),
         ToolNode(id="store_artifacts", tool="artifact.store", permissions=frozenset({"artifact:write"}),
                  depends_on=("package_artifacts",), build_input=lambda v: v.output("package_artifacts", ArtifactBatch)),
+        # The presentation, like the visuals, is only made for a lesson that passed review.
+        ConditionalNode(id="presentation_gate", depends_on=("store_artifacts",),
+                        predicate=lambda v: _review(v).status == "approved", when_true=("slide_plan",)),
+        AgentNode(id="slide_plan", agent="slide_planner", depends_on=("presentation_gate",),
+                  build_input=lambda v: _slide_planning(v, options)),
+        ToolNode(id="validate_slide_plan", tool="slide_plan.validate", depends_on=("slide_plan",),
+                 build_input=lambda v: _slide_planning(v, options).validation_request(
+                     v.output("slide_plan", SlideDeckPlan), enforce=True)),
+        ToolNode(id="store_slide_plan", tool="artifact.store", permissions=frozenset({"artifact:write"}),
+                 depends_on=("validate_slide_plan",), build_input=_slide_plan_batch),
+        ToolNode(id="build_presentation", tool="presentation.build", permissions=frozenset({"artifact:read"}),
+                 depends_on=("store_slide_plan",),
+                 build_input=lambda v: PresentationBuildRequest(
+                     deck=_deck(v), slide_plan_artifact_id=_slide_plan_artifact_id(v),
+                     config=options.presentation_config.model_copy(
+                         update={"language": _request(v).language_of_instruction}),
+                     research=_research(v))),
+        ToolNode(id="render_presentation", tool="presentation.render", permissions=frozenset({"artifact:write"}),
+                 depends_on=("build_presentation",), build_input=_render_request),
         ToolNode(id="update_learner", tool="learner.record_lesson", permissions=frozenset({"learner:write"}),
-                 depends_on=("store_artifacts",), build_input=_lesson_outcome),
+                 depends_on=("store_artifacts",), after=("render_presentation",), build_input=_lesson_outcome),
     ]
     return WorkflowDefinition(id=WORKFLOW_ID, nodes=tuple(nodes), summarize=_summarize,
-                              description="Diagnose, research, plan, teach with review, illustrate, plan slides, "
-                                          "store, remember.")
+                              description="Diagnose, research, plan, teach with review, illustrate, store, plan, "
+                                          "build and render the presentation, remember.")
 
 
 def _research_batch(v: StateView) -> ArtifactBatch:
@@ -242,6 +304,25 @@ def _research_batch(v: StateView) -> ArtifactBatch:
                   "evidence": len(research.evidence), "citations": len(research.citations),
                   "warnings": len(research.warnings)},
     )])
+
+
+def _slide_plan_batch(v: StateView) -> ArtifactBatch:
+    deck = _deck(v)
+    return ArtifactBatch(drafts=[ArtifactDraft(
+        key="slide_plan", name="slide_plan", type=ArtifactType.SLIDE_PLAN, media_type="application/json",
+        content=_json(deck), parent_ids=[_lesson_artifact_id(v)],
+        metadata={"deck_id": deck.deck_id, "slides": len(deck.slides),
+                  "slide_types": [s.slide_type.value for s in deck.slides],
+                  "image_artifact_ids": deck.image_artifact_ids(), "citation_ids": deck.citation_ids()},
+    )])
+
+
+def _render_request(v: StateView) -> PresentationRenderRequest:
+    presentation = v.output("build_presentation", Presentation)
+    slide_plan, lesson = _slide_plan_artifact_id(v), _lesson_artifact_id(v)
+    return PresentationRenderRequest(presentation=presentation, slide_plan_artifact_id=slide_plan,
+                                     lesson_artifact_id=lesson,
+                                     parent_ids=[slide_plan, lesson, *presentation.image_artifact_ids()])
 
 
 def _json(model) -> str:
@@ -261,7 +342,6 @@ def _package(v: StateView) -> ArtifactBatch:
     review = _review(v)
     research = _research(v)
     research_artifact = _research_artifact_id(v)
-    slides = v.output("slides", SlideDeckPlan)
     visuals = _visuals(v)
     image_ids = [a.artifact_id for a in visuals.assets] if visuals else []
     return ArtifactBatch(drafts=[
@@ -277,9 +357,6 @@ def _package(v: StateView) -> ArtifactBatch:
                                 "visual_warnings": _visual_warnings(v)}),
         ArtifactDraft(key="script", name="narration_script", type=ArtifactType.SCRIPT, media_type="text/markdown",
                       content=_script(lesson), parent_keys=["lesson"]),
-        ArtifactDraft(key="slide_plan", name="slide_plan", type=ArtifactType.SLIDE_PLAN,
-                      media_type="application/json", content=_json(slides), parent_keys=["lesson"],
-                      metadata={"slides": len(slides.slides)}),
         ArtifactDraft(key="review", name="review_report", type=ArtifactType.REPORT, media_type="application/json",
                       content=review.model_dump_json(indent=2, exclude={"candidate"}), parent_keys=["lesson"],
                       metadata={"kind": "content_review", "status": review.status, "revisions": review.revisions}),
@@ -296,7 +373,7 @@ def _lesson_outcome(v: StateView) -> LessonOutcome:
         concepts=step.concepts, lesson_title=_lesson(v).title,
         taught_concept_ids=[c.concept_id for c in plan.concepts],
         artifact_ids=[_research_artifact_id(v), *_visual_artifact_ids(v),
-                      *(a.artifact_id for a in stored.artifacts)],
+                      *(a.artifact_id for a in stored.artifacts), *_presentation_artifact_ids(v)],
     )
 
 
@@ -305,22 +382,33 @@ def _visual_artifact_ids(v: StateView) -> list[str]:
     return [a.artifact_id for a in visuals.artifacts] if visuals else []
 
 
+def _presentation_artifact_ids(v: StateView) -> list[str]:
+    presentation = _presentation(v)
+    if presentation is None:
+        return []
+    return [_slide_plan_artifact_id(v), presentation.artifact_id]
+
+
 def _summarize(v: StateView) -> TaskResult:
     research = v.output("store_research", StoredArtifacts)
     visuals = _visuals(v)
     stored = v.output("store_artifacts", StoredArtifacts)
+    slide_plan = v.maybe("store_slide_plan", StoredArtifacts)
+    presentation = _presentation(v)
+    presentation_artifacts = [*(slide_plan.artifacts if slide_plan else []), *([presentation] if presentation else [])]
     update = v.output("update_learner", MasteryUpdate)
     review = _review(v)
     return TaskResult(
         title=_lesson(v).title,
         artifacts=[ArtifactSummary(artifact_id=a.artifact_id, type=a.type, name=a.name, version=a.version,
                                    uri=a.uri, parent_ids=a.parent_ids)
-                   for a in [*research.artifacts, *(visuals.artifacts if visuals else []), *stored.artifacts]],
+                   for a in [*research.artifacts, *(visuals.artifacts if visuals else []), *stored.artifacts,
+                             *presentation_artifacts]],
         mastery_changes=update.changes,
         review_verdict=review.final_review.verdict.value if review.status == "approved" else review.status,
         revisions=review.revisions,
         estimated_level=update.estimated_level,
-        warnings=[*_research(v).warnings, *_visual_warnings(v)],
+        warnings=[*_research(v).warnings, *_visual_warnings(v), *_presentation_warnings(v)],
     )
 
 
@@ -328,8 +416,8 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
     rounds = options.diagnostic_rounds
     return WorkflowTemplate(
         id=WORKFLOW_ID,
-        description="Personalised text lesson with diagnostic, research, review loop, visuals and slide plan.",
-        provides=frozenset({"lesson.text", "lesson.review", "lesson.visuals", "slides.plan"}),
+        description="Personalised text lesson with diagnostic, research, review loop, visuals and a presentation.",
+        provides=frozenset({"lesson.text", "lesson.review", "lesson.visuals", "slides.plan", "presentation.pptx"}),
         build=lambda request: build_lesson_workflow(request, options),
         expected_calls=(
             ExpectedCall("request_interpreter", 700, 200),
@@ -339,6 +427,6 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
             ExpectedCall("teacher", 8000, 3500, calls=2),
             ExpectedCall("content_reviewer", 10000, 900, calls=2),
             ExpectedCall("visual", 9000, 1500),
-            ExpectedCall("slide_generation", 4000, 2000),
+            ExpectedCall("slide_planner", 9000, 3000),
         ),
     )

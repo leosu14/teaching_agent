@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from app.config.settings import Settings
 from app.schemas.artifact import ArtifactType
-from app.schemas.lesson import LessonContent, SlideDeckPlan
+from app.schemas.lesson import LessonContent
+from app.schemas.presentation import SlideDeckPlan
 from app.schemas.research import ResearchBundle
 from app.schemas.task import TaskStatus
 from app.services.container import build_container
@@ -39,8 +40,9 @@ async def test_request_to_completed_lesson(container, mock_llm) -> None:
 
     order = task.workflow.execution_order
     expected = ["learner_snapshot", "diagnose_1", "answers_1", "diagnose_2", "answers_2", "diagnose_3", "diagnostic",
-                "research", "research_policy", "store_research", "plan", "teach_review", "visual_gate", "visual", "visual_policy", "slides", "package_artifacts",
-                "store_artifacts", "update_learner"]
+                "research", "research_policy", "store_research", "plan", "teach_review", "visual_gate", "visual", "visual_policy", "package_artifacts",
+                "store_artifacts", "presentation_gate", "slide_plan", "validate_slide_plan", "store_slide_plan",
+                "build_presentation", "render_presentation", "update_learner"]
     assert [n for n in order if not n.startswith("diagnostic_gate")] == expected
 
     # Artifacts and their dependency graph.
@@ -57,7 +59,7 @@ async def test_request_to_completed_lesson(container, mock_llm) -> None:
         assert arts[child].parent_ids == [arts["lesson"].artifact_id]
     lesson = LessonContent.model_validate_json(container.artifacts.read(arts["lesson"].artifact_id))
     slides = SlideDeckPlan.model_validate_json(container.artifacts.read(arts["slide_plan"].artifact_id))
-    assert {s.narration_section_id for s in slides.slides if s.narration_section_id} == {s.section_id for s in lesson.sections}
+    assert {r for s in slides.slides for r in s.section_refs} == {s.section_id for s in lesson.sections}
     # Every section is traceable to selected sources; the unreliable forum source was rejected.
     research = ResearchBundle.model_validate_json(container.artifacts.read(arts["research_bundle"].artifact_id))
     assert any(r.source.publisher == "Fan Forum" and "reliability" in r.reason for r in research.rejected_sources)

@@ -25,6 +25,7 @@ EXTENSIONS = {
     "image/jpeg": ".jpg",
     "image/gif": ".gif",
     "image/webp": ".webp",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
 }
 
 
@@ -84,10 +85,10 @@ class ArtifactService:
     def put_object(self, content: bytes, media_type: str) -> StoredObject:
         """Store bytes content-addressed by their sha256. Identical content is written once and reused."""
         digest = hashlib.sha256(content).hexdigest()
-        uri, created = self._store.put_if_absent(f"objects/sha256/{digest[:2]}/{digest}{_extension(media_type)}",
-                                                 content)
+        key = f"objects/sha256/{digest[:2]}/{digest}{_extension(media_type)}"
+        uri, created = self._store.put_if_absent(key, content)
         return StoredObject(uri=uri, checksum=digest, media_type=media_type, size_bytes=len(content),
-                            reused=not created)
+                            reused=not created, key=key)
 
     def read_object(self, uri: str) -> bytes:
         return self._store.get(uri)

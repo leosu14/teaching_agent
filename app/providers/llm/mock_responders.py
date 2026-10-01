@@ -24,6 +24,19 @@ from app.schemas.evaluation import (
     LearningRecommendation,
 )
 from app.schemas.learner import AnswerEvaluation
+from app.schemas.presentation import (
+    MAX_BULLETS_PER_BLOCK,
+    MAX_WORDS_PER_BULLET,
+    AnswerBlock,
+    BulletBlock,
+    CitationBlock,
+    ImageBlock,
+    QuestionBlock,
+    SlideDeckProposal,
+    SlidePlan,
+    SlidePlanningInput,
+    TextBlock,
+)
 from app.schemas.research import (
     EvidenceExtraction,
     EvidenceExtractionInput,
@@ -54,15 +67,9 @@ from app.schemas.lesson import (
     ReviewerInput,
     ReviewIssue,
     ReviewResult,
-    Slide,
-    SlideDeckPlan,
-    SlideInput,
     TeacherInput,
     Verdict,
     VisualPlanningInput,
-    VisualSpec,
-    MAX_BULLETS_PER_SLIDE,
-    MAX_WORDS_PER_BULLET,
 )
 
 LEVEL_RE = re.compile(r"\b(A1|A2|B1|B2|C1|C2)\b", re.IGNORECASE)
@@ -505,40 +512,75 @@ def review(request: LLMRequest) -> dict:
 # --- slides --------------------------------------------------------------------------------
 
 
-def slides(request: LLMRequest) -> dict:
-    p = SlideInput.model_validate(request.input_payload)
+QUESTIONS_PER_SLIDE = 3
+
+
+def plan_slides(request: LLMRequest) -> dict:
+    """Title, objectives, an explanation (with its context picture) and an example slide (with its diagram) per
+    section, exercises, answers, summary and references. Images and citations are only ever the ids given."""
+    p = SlidePlanningInput.model_validate(request.input_payload)
     lesson = p.lesson
-    deck: list[Slide] = [
-        Slide(slide_id="sl1", kind="title", heading=lesson.title,
-              bullets=[f"Level {lesson.level}", f"{p.plan.estimated_minutes} minutes"],
-              speaker_notes=lesson.introduction),
-        Slide(slide_id="sl2", kind="objectives", heading="Objectives",
-              bullets=[clip_words(o) for o in p.plan.objectives[:MAX_BULLETS_PER_SLIDE]]),
-    ]
+    by_section: dict[str, list] = defaultdict(list)
+    for v in p.visuals:
+        by_section[v.lesson_section_id].append(v)
+    slides: list[SlidePlan] = []
+
+    def add(**fields) -> None:
+        slides.append(SlidePlan(slide_id=f"s{len(slides) + 1:02d}", order=len(slides) + 1, **fields))
+
+    def picture(v, layout: str) -> dict:
+        return {"layout": layout, "visual_refs": [v.artifact_id]}
+
+    add(slide_type="title", layout="title", title=lesson.title, subtitle=f"{p.topic.capitalize()} | Level {p.level}",
+        speaker_notes=lesson.introduction, duration_hint=30)
+    add(slide_type="objectives", layout="title_content", title="Objectives", duration_hint=45,
+        content_blocks=[BulletBlock(items=[clip_words(o) for o in p.plan.objectives[:MAX_BULLETS_PER_BLOCK]])])
     for section in lesson.sections:
-        deck.append(Slide(
-            slide_id=f"sl{len(deck) + 1}", kind="explanation", heading=section.heading,
-            bullets=[clip_words(s) for s in sentences(section.explanation)[:4]],
-            visual=VisualSpec(kind="image", description=f"Illustration for: {section.heading}"),
-            narration_section_id=section.section_id, speaker_notes=section.narration,
-        ))
+        mine = by_section[section.section_id]
+        context = next((v for v in mine if v.visual_type.value != "diagram"), None)
+        diagram = next((v for v in mine if v.visual_type.value == "diagram"), None)
+        refs = {"citation_refs": section.citations, "section_refs": [section.section_id]}
+        points = BulletBlock(items=[clip_words(s) for s in sentences(section.explanation)[:4]])
+        if context:
+            add(slide_type="explanation", title=section.heading, speaker_notes=section.narration, duration_hint=90,
+                content_blocks=[points, ImageBlock(artifact_id=context.artifact_id, caption=clip_words(context.purpose, 12))],
+                **picture(context, "image_text"), **refs)
+        else:
+            add(slide_type="explanation", layout="title_content", title=section.heading,
+                speaker_notes=section.narration, duration_hint=90, content_blocks=[points], **refs)
         if section.examples:
-            deck.append(Slide(
-                slide_id=f"sl{len(deck) + 1}", kind="example", heading=f"{section.heading}: examples",
-                bullets=[clip_words(e) for e in section.examples[:MAX_BULLETS_PER_SLIDE]],
-                narration_section_id=section.section_id,
-            ))
-    if lesson.exercises:
-        deck.append(Slide(
-            slide_id=f"sl{len(deck) + 1}", kind="exercise", heading="Practice",
-            bullets=[clip_words(e.prompt) for e in lesson.exercises[:MAX_BULLETS_PER_SLIDE]],
-        ))
-    deck.append(Slide(
-        slide_id=f"sl{len(deck) + 1}", kind="summary", heading="Summary",
-        bullets=[clip_words(s.heading) for s in lesson.sections[:MAX_BULLETS_PER_SLIDE]],
-        speaker_notes=lesson.summary,
-    ))
-    return SlideDeckPlan(title=lesson.title, slides=deck).model_dump(mode="json")
+            examples = BulletBlock(items=[clip_words(e) for e in section.examples[:MAX_BULLETS_PER_BLOCK]])
+            blocks = [examples, *([ImageBlock(artifact_id=diagram.artifact_id)] if diagram else [])]
+            add(slide_type="example", title=f"{section.heading}: examples", content_blocks=blocks, duration_hint=60,
+                **(picture(diagram, "two_column") if diagram else {"layout": "title_content"}), **refs)
+        elif diagram:
+            add(slide_type="explanation", title=f"{section.heading}: overview", duration_hint=45,
+                content_blocks=[ImageBlock(artifact_id=diagram.artifact_id, caption=clip_words(diagram.description, 12))],
+                **picture(diagram, "full_image"), **refs)
+
+    sections_of = lambda concept: [s.section_id for s in lesson.sections if s.concept_id == concept]  # noqa: E731
+    exercises = lesson.exercises
+    for start in range(0, len(exercises), QUESTIONS_PER_SLIDE):
+        chunk = exercises[start:start + QUESTIONS_PER_SLIDE]
+        add(slide_type="exercise", layout="exercise", title="Practice", duration_hint=120,
+            content_blocks=[QuestionBlock(question_id=e.exercise_id, prompt=e.prompt) for e in chunk],
+            section_refs=list(dict.fromkeys(s for e in chunk for s in sections_of(e.concept_id))))
+    answered = [e for e in exercises if e.answer.strip()]
+    for start in range(0, len(answered), QUESTIONS_PER_SLIDE):
+        chunk = answered[start:start + QUESTIONS_PER_SLIDE]
+        add(slide_type="answer", layout="exercise", title="Answers", duration_hint=60,
+            content_blocks=[AnswerBlock(question_id=e.exercise_id, answer=e.answer, explanation=e.explanation)
+                            for e in chunk])
+    add(slide_type="summary", layout="summary", title="Summary", speaker_notes=lesson.summary, duration_hint=45,
+        content_blocks=[TextBlock(text=clip_words(lesson.summary, 40)),
+                        BulletBlock(items=[clip_words(s.heading) for s in lesson.sections[:MAX_BULLETS_PER_BLOCK]])])
+    cited = list(dict.fromkeys(c for s in lesson.sections for c in s.citations))
+    if cited:
+        add(slide_type="references", layout="title_content", title="References", duration_hint=20,
+            content_blocks=[CitationBlock(citation_ids=cited)])
+    return SlideDeckProposal(title=lesson.title, slides=slides[:p.max_slides],
+                             rationale="One explanation and one example slide per section, then practice.") \
+        .model_dump(mode="json")
 
 
 # --- visuals ------------------------------------------------------------------------------
@@ -685,7 +727,7 @@ def default_responders(*, first_draft_defects: bool = True) -> dict[str, Respond
         "curriculum_planner": plan,
         "teacher": make_teacher(first_draft_defects),
         "content_reviewer": review,
-        "slide_generation": slides,
+        "slide_planner": plan_slides,
         "visual": visuals,
         "learner_evaluation": evaluate_learner,
     }

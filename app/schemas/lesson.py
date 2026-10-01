@@ -380,45 +380,6 @@ class VisualRequest(Schema):
                                    max_visuals=self.max_visuals)
 
 
-# --- Slides ------------------------------------------------------------------------------
-
-MAX_BULLETS_PER_SLIDE = 5
-MAX_WORDS_PER_BULLET = 20
-
-
-class VisualSpec(Schema):
-    kind: Literal["none", "image", "diagram", "equation", "code"]
-    description: str = ""
-
-
-class Slide(Schema):
-    slide_id: str
-    kind: Literal["title", "objectives", "explanation", "example", "exercise", "summary", "diagram", "code", "equation"]
-    heading: str
-    bullets: list[str] = Field(default_factory=list, max_length=MAX_BULLETS_PER_SLIDE)
-    visual: VisualSpec = Field(default_factory=lambda: VisualSpec(kind="none"))
-    narration_section_id: str | None = None
-    speaker_notes: str = ""
-
-    @field_validator("bullets")
-    @classmethod
-    def _short_bullets(cls, bullets: list[str]) -> list[str]:
-        for bullet in bullets:
-            if len(bullet.split()) > MAX_WORDS_PER_BULLET:
-                raise ValueError(f"bullet exceeds {MAX_WORDS_PER_BULLET} words: {bullet[:40]}...")
-        return bullets
-
-
-class SlideInput(Schema):
-    lesson: LessonContent
-    plan: LessonPlan
-
-
-class SlideDeckPlan(Schema):
-    title: str
-    slides: list[Slide] = Field(min_length=2)
-
-
 # --- Learner memory update -----------------------------------------------------------------
 
 

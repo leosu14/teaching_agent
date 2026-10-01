@@ -1,15 +1,16 @@
 # Teaching Agent
 
 An agentic, personalised education platform. It assesses what a learner knows, researches the topic
-with traceable sources, plans a lesson for that learner, writes and reviews the lesson, plans slides,
-stores versioned artifacts, and updates long-term learner memory, so the next lesson adapts.
+with traceable sources, plans a lesson for that learner, writes and reviews the lesson, turns it into a
+PowerPoint presentation, stores versioned artifacts, and updates long-term learner memory, so the next lesson adapts.
 
-This release is the **text-lesson vertical slice** with research and visuals, fully deterministic on mock providers:
+This release is the **text-lesson vertical slice** with research, visuals and a presentation, fully deterministic on mock providers:
 
 ```
 Request → Task → Request Interpreter → Learner Snapshot → Diagnostic (adaptive, can WAIT for answers)
 → Research (queries → search → dedup/rank → evidence → cited ResearchBundle) → Curriculum Plan → Teacher ⇄ Reviewer (revision loop)
-→ Visual (approved lessons only: visual plan → image search / generation → selection → validation → IMAGE_ASSET) → Slide Plan → Artifact Storage
+→ Visual (approved lessons only: visual plan → image search / generation → selection → validation → IMAGE_ASSET) → Artifact Storage
+→ Slide Planning → SlideDeckPlan validation → Presentation Build → Presentation Render (approved lessons only: PPTX → PRESENTATION)
 → Learner Memory → COMPLETED
 ```
 
@@ -28,6 +29,7 @@ python scripts/run_demo.py          # one command that proves the slice works
 python scripts/run_evaluation_demo.py  # lesson, then its evaluation, mastery before/after, recommendation
 python scripts/run_research_demo.py    # the lesson's research: queries, results, sources, evidence, citations
 python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, selection, generation, validation, assets
+python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validation, build, real .pptx with the images
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
 uvicorn app.api.main:app --reload   # the same services over HTTP
 ```
@@ -42,6 +44,9 @@ ResearchBundle, and how each lesson section's citations resolve to evidence and 
 `run_visual_demo.py` runs the lesson and shows its visuals: the visual plan and requirements, each image search with
 its selected and rejected candidates (one rejected by validation for misreporting its size), generated images, the
 validation checks, attribution, the IMAGE_ASSET artifacts with checksums, and image usage.
+`run_presentation_demo.py` runs the lesson and shows its presentation: the SlideDeckPlan slide by slide, its
+validation, the built presentation with its numbered references, the render events, the stored PRESENTATION artifact
+(MIME type, checksum, object key, parents) and the .pptx opened again with python-pptx, with the images on each slide.
 
 ## API
 

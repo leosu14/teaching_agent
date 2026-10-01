@@ -10,17 +10,19 @@ services     application services + the composition root (container.py); the CLI
 runtime      orchestrator (task lifecycle), workflow engine + node types, task state machine, workflow templates
 agents       decide WHAT to do; reach models only via ModelRouter and tools only via ToolManager
 tools        do the HOW (search, retrieval, dedup + ranking, research cache, image search / fetch / generation /
-             selection / validation / assets, learner memory, artifacts, media);
+             selection / validation / assets, slide plan validation, presentation build and render, learner memory,
+             artifacts, media);
              no educational strategy
-providers    replaceable adapters: LLM, search, retrieval, ranking, image generation, image search, TTS, video
-             (mock/local in this release)
+providers    replaceable adapters: LLM, search, retrieval, ranking, image generation, image search, presentation
+             renderer (python-pptx), TTS, video (mock/local in this release)
 learner      level frameworks, mastery rules, LearnerMemoryService (long-term memory)
 artifacts    ArtifactService: versioning, content-hash dedup, dependency graph, content-addressed media objects
 storage      SQLAlchemy/SQLite metadata repositories + filesystem object store (no business rules)
 schemas / config / observability / utils   shared foundation
 ```
 
-Extra rules enforced by the lint test: only `storage` imports SQLAlchemy; vendor SDKs only in `providers`;
+Extra rules enforced by the lint test: only `storage` imports SQLAlchemy; vendor SDKs (python-pptx included) only in
+`providers`;
 agents may import only `providers.llm.base`/`router` from providers; the API imports only services, schemas
 and a few exception types.
 
@@ -52,10 +54,13 @@ all that is needed.
 
 - `lesson_generation`: the lesson slice above. Research runs between the diagnostic and the planner
   (`research` → `research_policy` → `store_research` → `plan`); visuals run after review
-  (`teach_review` → `visual_gate` → `visual` → `visual_policy` → `slides`). It stores `research_bundle` first,
+  (`teach_review` → `visual_gate` → `visual` → `visual_policy`), then the lesson artifacts are stored and the
+  presentation is made (`presentation_gate` → `slide_plan` → `validate_slide_plan` → `store_slide_plan` →
+  `build_presentation` → `render_presentation`) before `update_learner`. It stores `research_bundle` first,
   then `visual_plan` (parent: research_bundle) and one `image_<visual_id>` IMAGE_ASSET per visual (parent:
   visual_plan), then `lesson_plan` (parent: research_bundle), `lesson` (parents: lesson_plan, research_bundle and
-  its image assets), `narration_script`, `slide_plan` and `review_report`.
+  its image assets), `narration_script` and `review_report`, then `slide_plan` (parent: lesson) and `presentation`
+  (parents: slide_plan, lesson and the image assets it places).
 - `lesson_evaluation`: started for a completed lesson task (`TaskService.start_evaluation`), with the lesson
   task id in `plan.inputs`. It reads the lesson and lesson plan artifacts (`artifact.read`), takes a learner
   snapshot, asks `LearnerEvaluationAgent` for an assessment sized by objectives, taught concepts, level and
@@ -153,6 +158,60 @@ named, `continue` completes with a warning. Events: `visual.started`, `visual.pl
 `visual.failed`. Image search, fetch and generation usage is tracked per service in the task cost, with units
 (requests, images, megapixels, bytes); a cost is recorded only when the provider reports one.
 
+## Presentation
+
+Planning, building and rendering are separate steps with separate representations:
+
+```
+Lesson + LessonPlan + ResearchBundle + IMAGE_ASSETs → SlidePlannerAgent → SlideDeckPlan (WHAT appears)
+→ SlidePlanValidator → PresentationBuilder → Presentation (renderer-independent) → PresentationRenderer → .pptx
+```
+
+- `SlideDeckPlan` (`app/schemas/presentation.py`): deck id, title, language, level, topic, objective, metadata and
+  `SlidePlan`s. Each slide has an id, order, `SlideType` (title, objectives, explanation, example, comparison,
+  vocabulary, exercise, answer, summary, references), title, subtitle, structured content blocks (`TextBlock`,
+  `BulletBlock`, `TableBlock`, `QuestionBlock`, `AnswerBlock`, `VocabularyBlock`, `CitationBlock`, `ImageBlock`;
+  never raw HTML or one string), `visual_refs` (IMAGE_ASSET artifact ids), `citation_refs` (research citation
+  ids), `section_refs` (lesson section ids), speaker notes, a semantic `SlideLayout` (title, title_content,
+  two_column, image_text, full_image, exercise, summary) and a duration hint. No geometry or file details.
+- `SlidePlannerAgent` (`app/agents/slides/`, id `slide_planner`) runs only for an approved lesson
+  (`presentation_gate`). The model proposes the slides from the lesson, plan, the research citations and the image
+  assets (ids and descriptions, never bytes or paths); code assigns a deterministic deck id and the lesson metadata,
+  then calls `slide_plan.validate` through the ToolManager and sends any errors back to the model. It never builds or
+  renders files, touches storage or calls image providers.
+- `SlidePlanValidator` (`app/tools/presentation/validation.py`, tool `slide_plan.validate`) is deterministic: schema
+  (slide types, block kinds, non-empty fields), slide count, unique ids, ordering 1..n, a title slide first,
+  non-empty content slides, lesson sections, image artifacts (existing, declared, placed), citation ids, question
+  ids (an answer only after its question), layout fit (an image layout has one image; text-only layouts none), the
+  block a slide type needs, and density (blocks and words per slide). The workflow's `validate_slide_plan` node
+  runs it with `enforce`: an invalid deck fails the task there, before any artifact of it exists.
+- `PresentationBuilder` (`app/tools/presentation/builder.py`, tool `presentation.build`) turns the validated deck into
+  a `Presentation` of `PresentationSlide`s and `PresentationElement`s (title, text, bullets, table, image, footer)
+  placed in layout regions. It resolves citations Slide → Citation → Evidence → Source through the research bundle
+  (numbered by first use, footers and a references slide) and images through their IMAGE_ASSET metadata (object,
+  checksum, size, alt text, attribution credit), so the plan never duplicates image metadata. Visual attribution
+  stays separate: Slide → IMAGE_ASSET → source or generation metadata.
+- `PresentationRenderer` (`app/providers/presentation/base.py`): `render(presentation) -> RenderedPresentation`.
+  `PptxPresentationRenderer` uses python-pptx locally: it maps each semantic layout to geometry from
+  `PresentationConfig` (aspect ratio, width, height, language, theme, footer) and `PresentationTheme` (fonts,
+  typography scale, spacing, colours, border/radius where supported), places the stored image bytes after checking
+  their checksum (it never generates an image), adds footers, slide numbers and speaker notes, and writes
+  byte-reproducible files (fixed zip and core-property timestamps). `MockPresentationRenderer` writes a canonical
+  JSON description for tests.
+- `presentation.render` stores the file content-addressed in the existing object store and creates the
+  `PRESENTATION` artifact (MIME type, checksum, object key, renderer, slide/element counts, placed images, citations,
+  layouts; parents: slide_plan, lesson, placed images). Its identity is the artifact id, not a path. Re-rendering the
+  same presentation produces the same bytes, so a rerun reuses the artifact instead of adding a version.
+
+Failures: an invalid plan fails the task at `validate_slide_plan`; a render failure fails it at
+`render_presentation` with the error persisted and the built presentation still inspectable; a missing optional
+visual follows the visual policy and is simply not placed. A lesson accepted with warnings gets no presentation (a
+warning says so); a rejected lesson never reaches it. Resume continues from the last completed presentation node.
+Events: `slide_planning.started`, `slide_plan.created`, `slide_plan.validated`, `presentation.build_started`,
+`presentation.build_completed`, `presentation.render_started`, `presentation.render_completed`,
+`presentation.artifact_created`, `presentation.failed`. The planner's tokens and cost are recorded like any agent's;
+rendering is recorded per service (`presentation_render:<renderer>`, units: slides, images, bytes) with no cost.
+
 ## Agents
 
 Each agent declares id, name, description, input/output schemas, a system prompt (`prompt.md`), a tool
@@ -177,6 +236,6 @@ persisted and logged as JSON, so a task can be reconstructed from its event log.
 
 ## Not in this release
 
-Real LLM/search/image/media providers, web scraping, vector retrieval and embeddings, slide rendering, PPTX, TTS
-narration, video rendering, coding exercises and
+Real LLM/search/image/media providers, web scraping, vector retrieval and embeddings, advanced slide design,
+animations, cloud rendering, TTS narration, video rendering, coding exercises and
 VS Code integration, UI. The provider and tool interfaces they plug into already exist.

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     image_search_provider: Literal["mock"] = "mock"
     tts_provider: Literal["mock"] = "mock"
     video_provider: Literal["mock"] = "mock"
+    presentation_renderer: Literal["pptx", "mock"] = "pptx"  # pptx: local python-pptx; mock: JSON for tests
     corpus_dir: Path = REPO_ROOT / "fixtures" / "demo"
 
     max_revisions: int = Field(default=2, ge=0, le=10)
@@ -42,6 +43,8 @@ class Settings(BaseSettings):
     visual_failure_policy: Literal["fail", "continue"] = "fail"
     visual_max_per_lesson: int = Field(default=6, ge=0, le=20)
     visual_max_candidates: int = Field(default=3, ge=1, le=10)
+    presentation_aspect_ratio: Literal["16:9", "4:3"] = "16:9"
+    presentation_max_slides: int = Field(default=20, ge=2, le=30)
 
     log_level: str = "INFO"
     log_json: bool = True

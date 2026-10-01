@@ -15,7 +15,7 @@ class ArtifactType(str, Enum):
     SCRIPT = "SCRIPT"
     SLIDE = "SLIDE"
     SLIDE_PLAN = "SLIDE_PLAN"
-    PPTX = "PPTX"
+    PRESENTATION = "PRESENTATION"
     IMAGE_ASSET = "IMAGE_ASSET"
     AUDIO = "AUDIO"
     VIDEO = "VIDEO"
@@ -50,6 +50,7 @@ class StoredObject(Schema):
 
     uri: str
     checksum: str  # sha256 of the content, hex
+    key: str | None = None  # storage-relative key, e.g. objects/sha256/ab/<sha256>.png
     media_type: str
     size_bytes: int = Field(ge=0)
     reused: bool = False  # the object already existed when it was stored

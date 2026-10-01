@@ -100,9 +100,9 @@ async def test_end_to_end_lesson_with_visual_assets(make_container) -> None:
     assert task.status == TaskStatus.COMPLETED, task.errors
     order = [n for n in task.workflow.execution_order
              if n in {"diagnostic", "research", "plan", "teach_review", "visual_gate", "visual", "visual_policy",
-                      "slides", "store_artifacts"}]
+                      "slide_plan", "store_artifacts"}]
     assert order == ["diagnostic", "research", "plan", "teach_review", "visual_gate", "visual", "visual_policy",
-                     "slides", "store_artifacts"]
+                     "store_artifacts", "slide_plan"]
 
     # Visual planning got the lesson plan, the approved lesson and the research bundle.
     planning = VisualPlanningInput.model_validate(next(r for r in llm.requests if r.agent_id == "visual").input_payload)

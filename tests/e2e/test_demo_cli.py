@@ -46,3 +46,21 @@ def test_research_demo_script_runs_to_completion(tmp_path) -> None:
                      "[c6] -> ev6 ->", "search:mock"):
         assert expected in out, expected
     assert any((tmp_path / "objects").rglob("research_bundle/v1.json"))
+
+
+def test_presentation_demo_script_writes_a_real_pptx(tmp_path) -> None:
+    out_file = tmp_path / "lesson.pptx"
+    proc = subprocess.run([sys.executable, "scripts/run_presentation_demo.py", "--data-dir", str(tmp_path / "data"),
+                           "--out", str(out_file)], cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    for expected in ("1. Completed lesson", "2. ResearchBundle", "3. IMAGE_ASSET artifacts", "4. SlideDeckPlan",
+                     "5. Validation", "valid=True", "6. Presentation build", "7. Render PPTX",
+                     "presentation.artifact_created", "8. Stored PRESENTATION artifact",
+                     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                     "bytes match: True", "9. The .pptx opened with python-pptx", "pictures: image_v1_photo"):
+        assert expected in out, expected
+    from pptx import Presentation
+
+    assert len(Presentation(str(out_file)).slides) >= 5
+    assert any((tmp_path / "data" / "objects").rglob("*.pptx"))

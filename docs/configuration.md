@@ -26,6 +26,9 @@ They are validated when the container is built; errors say what to fix.
 | `TA_VISUAL_FAILURE_POLICY` | `fail` | When a required visual cannot be produced: `fail` the lesson task, or `continue` with a warning. Optional visuals never stop a lesson |
 | `TA_VISUAL_MAX_PER_LESSON` | `6` | Most visuals the visual planner may propose (`0` disables visuals) |
 | `TA_VISUAL_MAX_CANDIDATES` | `3` | Searched candidates fetched and validated per visual before falling back or giving up |
+| `TA_PRESENTATION_RENDERER` | `pptx` | `pptx` renders a real PowerPoint file locally with python-pptx; `mock` writes a deterministic JSON description (tests) |
+| `TA_PRESENTATION_ASPECT_RATIO` | `16:9` | Slide size: `16:9` (13.33 x 7.5 in) or `4:3` (10 x 7.5 in) |
+| `TA_PRESENTATION_MAX_SLIDES` | `20` | Most slides the slide planner may plan; a longer deck fails validation |
 | `TA_LOG_LEVEL` / `TA_LOG_JSON` | `INFO` / `true` | Structured logging |
 
 ## Model routing (`config/routing.toml`)

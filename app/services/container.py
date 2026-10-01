@@ -16,7 +16,7 @@ from app.agents.planner.agent import CurriculumPlannerAgent
 from app.agents.registry import AgentRegistry
 from app.agents.research.agent import ResearchAgent
 from app.agents.reviewer.agent import ContentReviewAgent
-from app.agents.slides.agent import SlideGenerationAgent
+from app.agents.slides.agent import SlidePlannerAgent
 from app.agents.teacher.agent import TeacherAgent
 from app.agents.visual.agent import VisualAgent
 from app.artifacts.service import ArtifactService
@@ -34,6 +34,9 @@ from app.providers.llm.base import LLMProvider
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
 from app.providers.llm.router import ModelRouter
+from app.providers.presentation.base import PresentationRenderer
+from app.providers.presentation.mock import MockPresentationRenderer
+from app.providers.presentation.pptx_renderer import PptxPresentationRenderer
 from app.providers.retrieval.base import Retriever
 from app.providers.retrieval.local import LocalKnowledgeBase
 from app.providers.ranking.heuristic import HeuristicRanker
@@ -46,6 +49,7 @@ from app.runtime.orchestrator.planner import WorkflowPlanner
 from app.runtime.workflow.engine import WorkflowEngine
 from app.runtime.workflows.lesson_evaluation import evaluation_template
 from app.runtime.workflows.lesson_generation import LessonWorkflowOptions, lesson_template
+from app.schemas.presentation import PresentationConfig
 from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
 from app.services.learners import LearnerService
@@ -62,6 +66,9 @@ from app.tools.artifacts.tools import ReadArtifactsTool, StoreArtifactsTool
 from app.tools.learner.tools import LearnerSnapshotTool, LearnerSummaryTool, RecordEvaluationTool, RecordLessonTool
 from app.tools.manager import ToolManager
 from app.tools.media.tools import SpeechSynthesisTool, VideoRenderTool
+from app.tools.presentation.builder import PresentationBuildTool
+from app.tools.presentation.render import PresentationRenderTool
+from app.tools.presentation.validation import SlidePlanValidationTool
 from app.tools.rag.retrieve import ConceptMapTool, RetrievalTool
 from app.tools.registry import ToolRegistry
 from app.tools.research.cache import InMemoryResearchCache
@@ -72,6 +79,11 @@ from app.tools.visual.search import ImageFetchTool, ImageSearchTool
 from app.tools.visual.selection import ImageSelectionTool
 from app.tools.visual.validation import ImageValidationTool
 from app.tools.web.search import SearchTool
+
+PRESENTATION_RENDERER_FACTORIES = {
+    "pptx": lambda artifacts: PptxPresentationRenderer(media=artifacts.read_object),
+    "mock": lambda artifacts: MockPresentationRenderer(),
+}
 
 LLM_PROVIDER_FACTORIES = {
     "mock": lambda settings: MockLLMProvider(default_responders()),
@@ -118,6 +130,7 @@ def build_container(
     retriever: Retriever | None = None,
     image_search_provider: ImageSearchProvider | None = None,
     image_generation_provider: ImageGenerationProvider | None = None,
+    presentation_renderer: PresentationRenderer | None = None,
 ) -> Container:
     settings = settings or Settings()
     settings.validate_runtime()
@@ -140,6 +153,7 @@ def build_container(
     search_provider = search_provider or MockSearchProvider(settings.corpus_dir / "web_corpus.json")
     image_search = image_search_provider or MockImageSearchProvider(settings.corpus_dir / "image_catalog.json")
     image_generation = image_generation_provider or MockImageGenerationProvider()
+    renderer = presentation_renderer or PRESENTATION_RENDERER_FACTORIES[settings.presentation_renderer](artifacts)
     registry = ToolRegistry()
     for tool in (
         SearchTool(search_provider, cache=InMemoryResearchCache() if settings.research_cache else None),
@@ -158,6 +172,9 @@ def build_container(
         ImageGenerationTool(image_generation, artifacts),
         ImageValidationTool(artifacts),
         ImageAssetTool(artifacts),
+        SlidePlanValidationTool(),
+        PresentationBuildTool(artifacts),
+        PresentationRenderTool(renderer, artifacts),
         SpeechSynthesisTool(MockTTSProvider(), artifacts),
         VideoRenderTool(MockVideoProvider(), artifacts),
     ):
@@ -167,7 +184,7 @@ def build_container(
     agents = AgentRegistry()
     for agent in (RequestInterpreterAgent(), KnowledgeDiagnosticAgent(), ResearchAgent(),
                   CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), VisualAgent(),
-                  SlideGenerationAgent(), LearnerEvaluationAgent()):
+                  SlidePlannerAgent(), LearnerEvaluationAgent()):
         agents.register(agent)
     for agent_id in routing.agent_tiers:
         agents.get(agent_id)  # overrides must name real agents
@@ -184,6 +201,8 @@ def build_container(
         visual_failure_policy=settings.visual_failure_policy,
         visual_max_per_lesson=settings.visual_max_per_lesson,
         visual_max_candidates=settings.visual_max_candidates,
+        presentation_config=PresentationConfig.for_aspect(settings.presentation_aspect_ratio),
+        presentation_max_slides=settings.presentation_max_slides,
     )
     planner = WorkflowPlanner([lesson_template(options), evaluation_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,
