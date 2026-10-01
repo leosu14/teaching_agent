@@ -29,3 +29,5 @@ jobs:
         run: python scripts/run_visual_demo.py
       - name: Presentation demo
         run: python scripts/run_presentation_demo.py
+      - name: Audio demo
+        run: python scripts/run_audio_demo.py

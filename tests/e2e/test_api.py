@@ -49,7 +49,8 @@ def test_lesson_task_over_http(client: TestClient) -> None:
 
     artifacts = client.get(f"/tasks/{task['task_id']}/artifacts").json()
     assert {a["type"] for a in artifacts} == {"RESEARCH_BUNDLE", "VISUAL_PLAN", "IMAGE_ASSET",
-                                                "LESSON_PLAN", "LESSON", "SCRIPT", "SLIDE_PLAN", "REPORT", "PRESENTATION"}
+                                                "LESSON_PLAN", "LESSON", "SCRIPT", "SLIDE_PLAN", "REPORT", "PRESENTATION",
+                                                "AUDIO_PLAN", "AUDIO_ASSET", "PRESENTATION_TIMELINE"}
 
     events = client.get(f"/tasks/{task['task_id']}/events").json()
     types = [e["type"] for e in events]

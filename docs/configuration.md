@@ -29,6 +29,14 @@ They are validated when the container is built; errors say what to fix.
 | `TA_PRESENTATION_RENDERER` | `pptx` | `pptx` renders a real PowerPoint file locally with python-pptx; `mock` writes a deterministic JSON description (tests) |
 | `TA_PRESENTATION_ASPECT_RATIO` | `16:9` | Slide size: `16:9` (13.33 x 7.5 in) or `4:3` (10 x 7.5 in) |
 | `TA_PRESENTATION_MAX_SLIDES` | `20` | Most slides the slide planner may plan; a longer deck fails validation |
+| `TA_AUDIO_FAILURE_POLICY` | `fail` | When a required narration segment cannot be voiced: `fail` the lesson task, or `continue` with a warning. Optional segments never stop a lesson |
+| `TA_AUDIO_LANGUAGE` | lesson language | BCP 47 tag of the narration (`es-ES`, `en-US`, `zh-CN`, ...); by default the lesson's language of instruction |
+| `TA_AUDIO_VOICE` | provider's first voice | A voice id from the TTS provider's catalog; it must speak the narration language |
+| `TA_AUDIO_SPEAKING_RATE` | `1.0` | Speaking rate (0.5 to 2.0), where the provider supports it |
+| `TA_AUDIO_FORMAT` | `wav` | Audio format requested from the provider (the mock produces WAV) |
+| `TA_AUDIO_SAMPLE_RATE` | provider default | Requested sample rate in Hz; the validator checks the audio has it |
+| `TA_AUDIO_MAX_WORDS_PER_SEGMENT` | `80` | Longest narration segment the planner may propose |
+| `TA_AUDIO_SILENT_SLIDE_SECONDS` | `3.0` | How long the timeline shows a slide that has no narration |
 | `TA_LOG_LEVEL` / `TA_LOG_JSON` | `INFO` / `true` | Structured logging |
 
 ## Model routing (`config/routing.toml`)

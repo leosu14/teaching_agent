@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from app.agents.audio.agent import AudioPlannerAgent
 from app.agents.diagnostic.agent import KnowledgeDiagnosticAgent
 from app.agents.evaluator.agent import LearnerEvaluationAgent
 from app.agents.interpreter.agent import RequestInterpreterAgent
@@ -42,6 +43,7 @@ from app.providers.retrieval.local import LocalKnowledgeBase
 from app.providers.ranking.heuristic import HeuristicRanker
 from app.providers.search.base import SearchProvider
 from app.providers.search.mock import MockSearchProvider
+from app.providers.tts.base import TTSProvider
 from app.providers.tts.mock import MockTTSProvider
 from app.providers.video.mock import MockVideoProvider
 from app.runtime.orchestrator.orchestrator import NodeObserver, Orchestrator
@@ -65,7 +67,11 @@ from app.storage.repositories import (
 from app.tools.artifacts.tools import ReadArtifactsTool, StoreArtifactsTool
 from app.tools.learner.tools import LearnerSnapshotTool, LearnerSummaryTool, RecordEvaluationTool, RecordLessonTool
 from app.tools.manager import ToolManager
-from app.tools.media.tools import SpeechSynthesisTool, VideoRenderTool
+from app.tools.audio.assets import AudioAssetLookupTool, AudioAssetTool
+from app.tools.audio.timeline import PresentationTimelineTool
+from app.tools.audio.tts import TTSTool, VoiceCatalogTool
+from app.tools.audio.validation import AudioPlanValidationTool
+from app.tools.media.tools import VideoRenderTool
 from app.tools.presentation.builder import PresentationBuildTool
 from app.tools.presentation.render import PresentationRenderTool
 from app.tools.presentation.validation import SlidePlanValidationTool
@@ -83,6 +89,10 @@ from app.tools.web.search import SearchTool
 PRESENTATION_RENDERER_FACTORIES = {
     "pptx": lambda artifacts: PptxPresentationRenderer(media=artifacts.read_object),
     "mock": lambda artifacts: MockPresentationRenderer(),
+}
+
+TTS_PROVIDER_FACTORIES = {
+    "mock": lambda settings: MockTTSProvider(),
 }
 
 LLM_PROVIDER_FACTORIES = {
@@ -131,6 +141,7 @@ def build_container(
     image_search_provider: ImageSearchProvider | None = None,
     image_generation_provider: ImageGenerationProvider | None = None,
     presentation_renderer: PresentationRenderer | None = None,
+    tts_provider: TTSProvider | None = None,
 ) -> Container:
     settings = settings or Settings()
     settings.validate_runtime()
@@ -154,6 +165,7 @@ def build_container(
     image_search = image_search_provider or MockImageSearchProvider(settings.corpus_dir / "image_catalog.json")
     image_generation = image_generation_provider or MockImageGenerationProvider()
     renderer = presentation_renderer or PRESENTATION_RENDERER_FACTORIES[settings.presentation_renderer](artifacts)
+    tts = tts_provider or TTS_PROVIDER_FACTORIES[settings.tts_provider](settings)
     registry = ToolRegistry()
     for tool in (
         SearchTool(search_provider, cache=InMemoryResearchCache() if settings.research_cache else None),
@@ -175,7 +187,12 @@ def build_container(
         SlidePlanValidationTool(),
         PresentationBuildTool(artifacts),
         PresentationRenderTool(renderer, artifacts),
-        SpeechSynthesisTool(MockTTSProvider(), artifacts),
+        VoiceCatalogTool(tts),
+        TTSTool(tts, artifacts),
+        AudioPlanValidationTool(tts),
+        AudioAssetLookupTool(artifacts),
+        AudioAssetTool(artifacts),
+        PresentationTimelineTool(artifacts),
         VideoRenderTool(MockVideoProvider(), artifacts),
     ):
         registry.register(tool)
@@ -184,7 +201,7 @@ def build_container(
     agents = AgentRegistry()
     for agent in (RequestInterpreterAgent(), KnowledgeDiagnosticAgent(), ResearchAgent(),
                   CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), VisualAgent(),
-                  SlidePlannerAgent(), LearnerEvaluationAgent()):
+                  SlidePlannerAgent(), AudioPlannerAgent(), LearnerEvaluationAgent()):
         agents.register(agent)
     for agent_id in routing.agent_tiers:
         agents.get(agent_id)  # overrides must name real agents
@@ -203,6 +220,14 @@ def build_container(
         visual_max_candidates=settings.visual_max_candidates,
         presentation_config=PresentationConfig.for_aspect(settings.presentation_aspect_ratio),
         presentation_max_slides=settings.presentation_max_slides,
+        audio_failure_policy=settings.audio_failure_policy,
+        audio_language=settings.audio_language,
+        audio_voice=settings.audio_voice,
+        audio_speaking_rate=settings.audio_speaking_rate,
+        audio_format=settings.audio_format,
+        audio_sample_rate=settings.audio_sample_rate,
+        audio_max_words_per_segment=settings.audio_max_words_per_segment,
+        audio_silent_slide_seconds=settings.audio_silent_slide_seconds,
     )
     planner = WorkflowPlanner([lesson_template(options), evaluation_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,

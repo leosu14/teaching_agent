@@ -42,7 +42,8 @@ async def test_request_to_completed_lesson(container, mock_llm) -> None:
     expected = ["learner_snapshot", "diagnose_1", "answers_1", "diagnose_2", "answers_2", "diagnose_3", "diagnostic",
                 "research", "research_policy", "store_research", "plan", "teach_review", "visual_gate", "visual", "visual_policy", "package_artifacts",
                 "store_artifacts", "presentation_gate", "slide_plan", "validate_slide_plan", "store_slide_plan",
-                "build_presentation", "render_presentation", "update_learner"]
+                "build_presentation", "render_presentation", "audio_plan", "validate_audio_plan", "store_audio_plan",
+                "synthesize_audio", "audio_policy", "audio_timeline", "update_learner"]
     assert [n for n in order if not n.startswith("diagnostic_gate")] == expected
 
     # Artifacts and their dependency graph.
