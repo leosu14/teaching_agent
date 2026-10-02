@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from app.config.routing import ConfigError
-from app.providers.llm.base import LLMMessage, ProviderError
+from app.providers.core.errors import ProviderError
+from app.providers.llm.base import LLMMessage
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.router import AllProvidersFailed, ModelRouter
 from app.schemas.common import ModelTier, TokenUsage
@@ -39,7 +40,7 @@ async def test_falls_back_to_next_target_on_transient_error() -> None:
     sc, events = scope()
     response = await complete(router, sc)
     assert response.provider == "p2"
-    assert [e.type for e in events] == ["llm.failed", "llm.call"]
+    assert [e.type for e in events] == ["llm.failed", "provider.fallback", "llm.call"]  # fallback is recorded
 
 
 async def test_non_transient_error_is_not_masked_by_fallback() -> None:

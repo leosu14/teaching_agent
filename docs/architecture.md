@@ -15,7 +15,8 @@ tools        do the HOW (search, retrieval, dedup + ranking, research cache, ima
              composition / validation / artifact (VideoService), learner memory, artifacts);
              no educational strategy
 providers    replaceable adapters: LLM, search, retrieval, ranking, image generation, image search, presentation
-             renderer (python-pptx), TTS, video composer + prober (FFmpeg adapter, mock)
+             renderer (python-pptx), TTS, video composer + prober (FFmpeg adapter, mock); the provider core
+             (registry, selector, invoker, typed errors, rate limiter, HTTP client) and the managed wrappers
 learner      level frameworks, mastery rules, LearnerMemoryService (long-term memory)
 artifacts    ArtifactService: versioning, content-hash dedup, dependency graph, content-addressed media objects
 storage      SQLAlchemy/SQLite metadata repositories + filesystem object store (no business rules)
@@ -25,8 +26,11 @@ schemas / config / observability / utils   shared foundation
 Extra rules enforced by the lint test: only `storage` imports SQLAlchemy; vendor SDKs (python-pptx included) only in
 `providers`; audio libraries (`wave`, pydub, ffmpeg, ...) only in `providers` and `utils`; `subprocess`, Pillow and
 video libraries only in `providers` (FFmpeg runs only through `app/providers/video/ffmpeg.py`);
-agents may import only `providers.llm.base`/`router` from providers; the API imports only services, schemas
-and a few exception types.
+agents may import only `providers.llm.base`/`router`/`structured` from providers; outside `providers`, only the
+interface modules (`*.base`, the LLM router and StructuredLLM, `core.errors`/`registry`/`selector`) may be imported,
+except by the composition root (`services/container.py`), which builds the concrete adapters; HTTP clients
+(`httpx`, `requests`, ...) and vendor SDKs (`openai`, `anthropic`, ...) only in `providers`; the API imports only
+services, schemas and a few exception types.
 
 ## Task lifecycle
 
@@ -321,12 +325,53 @@ Video only follows a timeline (so an approved, rendered, narrated presentation).
 `video.validation_started`, `video.validation_completed`, `video.artifact_created`, `video.failed`. Usage is recorded
 as `video_compose:<composer>` with render seconds, CPU seconds, frames and output bytes, and no cost.
 
+## Providers
+
+```
+Agents ──► Tools / ModelRouter ──► provider interfaces (*.base) ──► Managed providers ──► concrete adapters
+                                                                   (invoker: offline guard, request id,
+                                                                    rate limit, timeout, retry, events,
+                                                                    usage; explicit fallback chain)
+```
+
+- **Interfaces.** `LLMProvider`, `TTSProvider`, `ImageGenerationProvider`, `ImageSearchProvider`, `SearchProvider`
+  share the `Provider` base: `provider_id`, `capabilities`, `configuration()` (never secrets), `health_check()`
+  (a structured `HealthStatus`; local checks for mocks and Tavily, a cheap authenticated GET for LLMs), plus the
+  capability's invocation method and usage. The mocks implement the same interfaces and stay the default.
+- **Adapters** (plain HTTPS through `app/providers/core/http.py`, `httpx` as the optional `providers` extra, no
+  SDKs): `llm/openai_compatible.py` (Chat Completions; any compatible server via `OPENAI_BASE_URL`),
+  `llm/anthropic.py` (Messages API), `tts/openai.py` (`/audio/speech`, PCM wrapped as WAV so duration is measured),
+  `image/openai.py` (`/images/generations`; the nearest supported size, centre-cropped to the exact request),
+  `search/tavily.py` (`/search` with domain filters and page text). Image search stays on the mock catalogue.
+- **Registry and selector.** `ProviderRegistry` holds every provider by capability, the default per capability
+  and the last health status; it refuses network providers in offline mode. `ProviderSelector` resolves the
+  provider (and model, for LLMs: tier chain or per-agent route) for a capability or agent from configuration;
+  no agent names a vendor.
+- **Invoker.** Every call runs through `ProviderInvoker`: a per-attempt timeout, retries only for timeouts, 429,
+  5xx and connection failures (typed errors; never auth or invalid requests), bounded exponential backoff that
+  honours `Retry-After` up to a cap, a local requests-per-minute and concurrency limit, a unique `preq_` request
+  id (sent as a header where the vendor accepts one, and recorded with the vendor's own request id), a
+  `ProviderUsage` record and the events `provider.request_started`, `provider.request_completed`,
+  `provider.request_failed`, `provider.rate_limited` and `provider.fallback`. Events go to the task that made the
+  call (the execution scope travels in a context variable set by ToolManager and the router).
+- **Fallback** is explicit: only a configured `*_FALLBACK_PROVIDER` (or a later routing target) is tried, only
+  after a transient failure, and always with a `provider.fallback` event.
+- **Structured output.** `StructuredLLM` is the one place that turns a schema (Pydantic model or JSON Schema) into a
+  validated object: it asks for the vendor's native JSON-schema mode when the schema fits its strict subset
+  (otherwise JSON mode), parses fenced or embedded JSON, validates, and sends validation errors back for a
+  correction. `Agent.generate` delegates to it.
+- **Security.** Keys are `SecretStr`, registered with the redactor, and removed from logs, events, errors and
+  provider error excerpts; https is required (except localhost), redirects are not followed, request and response
+  bodies are size-limited. Usage and events never carry prompts, binary content or headers.
+- **Offline mode.** `TEACHING_AGENT_OFFLINE=true` makes a real provider a startup error and makes the HTTP client
+  refuse any request; the test suite runs this way, so CI needs no keys.
+
 ## Agents
 
 Each agent declares id, name, description, input/output schemas, a system prompt (`prompt.md`), a tool
-allow-list with permissions, a model tier, timeout and retry policy. Every model response is parsed and
-validated against the output schema plus the agent's semantic `check`; failures go back to the model with
-the error, up to `validation_retries`. The mock LLM returns text exactly like a real provider, so it goes
+allow-list with permissions, a model tier, timeout and retry policy. Every model response goes through
+`StructuredLLM`: parsed and validated against the output schema plus the agent's semantic `check`; failures go
+back to the model with the error, up to `validation_retries`. The mock LLM returns text exactly like a real provider, so it goes
 through the same path.
 
 ## Learner model
@@ -345,6 +390,6 @@ persisted and logged as JSON, so a task can be reconstructed from its event log.
 
 ## Not in this release
 
-Real LLM/search/image/media providers, web scraping, vector retrieval and embeddings, advanced slide design,
-animations, cloud rendering, real TTS adapters, video rendering, subtitles, coding exercises and
-VS Code integration, UI. The provider and tool interfaces they plug into already exist.
+Real image-search and video-AI providers, MiniMax, web scraping, vector retrieval and embeddings, advanced slide
+design, animations, cloud rendering, coding exercises and VS Code integration, UI, deployment. The provider and
+tool interfaces they plug into already exist.

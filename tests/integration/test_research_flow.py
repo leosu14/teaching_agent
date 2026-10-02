@@ -7,10 +7,11 @@ import json
 import pytest
 
 from app.config.settings import Settings
+from app.providers.core.errors import ProviderError
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
 from app.providers.retrieval.local import LocalKnowledgeBase
-from app.providers.search.base import ProviderSearchRequest, SearchPage, SearchProvider, SearchProviderError
+from app.providers.search.base import ProviderSearchRequest, SearchPage, SearchProvider
 from app.schemas.artifact import ArtifactType
 from app.schemas.lesson import LessonContent
 from app.schemas.research import ResearchBundle
@@ -23,7 +24,7 @@ class DownSearch(SearchProvider):
     name = "down"
 
     async def search(self, request: ProviderSearchRequest) -> SearchPage:
-        raise SearchProviderError("search API unavailable", transient=False)
+        raise ProviderError("search API unavailable", transient=False)
 
 
 class ReferencesDown(LocalKnowledgeBase):

@@ -8,7 +8,7 @@ import time
 
 from pydantic import BaseModel, ValidationError
 
-from app.observability.scope import ExecutionScope
+from app.observability.scope import ExecutionScope, active_scope
 from app.schemas.events import EventType
 from app.tools.base import ToolCaller, ToolError, ToolPermissionError, ToolTransientError
 from app.tools.registry import ToolRegistry
@@ -41,7 +41,8 @@ class ToolManager:
             started = time.perf_counter()
             scope.emit(EventType.TOOL_STARTED, tool=name, caller=caller.caller_id, attempt=n)
             try:
-                result = await asyncio.wait_for(tool.run(data, scope), tool.timeout_seconds)
+                with active_scope(scope):  # provider calls made by the tool report into this task's scope
+                    result = await asyncio.wait_for(tool.run(data, scope), tool.timeout_seconds)
             except TimeoutError as exc:
                 scope.emit(EventType.TOOL_FAILED, tool=name, attempt=n, error="timeout")
                 raise ToolTransientError(f"tool '{name}' timed out after {tool.timeout_seconds}s") from exc

@@ -15,7 +15,8 @@ import hashlib
 from pydantic import ValidationError
 
 from app.observability.scope import ExecutionScope
-from app.providers.tts.base import TTSProvider, TTSProviderError
+from app.providers.core.errors import ProviderError
+from app.providers.tts.base import TTSProvider
 from app.schemas.audio import (
     AUDIO_MEDIA_TYPES,
     AudioPlan,
@@ -229,7 +230,7 @@ class AudioPlanValidationTool(Tool[AudioPlanValidationRequest, AudioPlanValidati
         if data.check_voices:
             try:
                 voices = await self._provider.voices()
-            except (TTSProviderError, ConnectionError, OSError) as exc:
+            except (ProviderError, ConnectionError, OSError) as exc:
                 raise ToolTransientError(f"TTS provider '{self._provider.name}' voice list failed: {exc}") from exc
         report = self._validator.validate(data, voices)
         if not data.enforce:

@@ -14,9 +14,9 @@ import pytest
 from pptx import Presentation as PptxDocument
 
 from app.config.settings import Settings
+from app.providers.core.errors import ProviderError
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
-from app.providers.tts.base import TTSProviderError
 from app.providers.tts.mock import MockTTSProvider
 from app.schemas.artifact import ArtifactType
 from app.schemas.audio import (
@@ -52,7 +52,7 @@ class SelectiveTTS(MockTTSProvider):
         if self.marker not in request.text:
             return speech
         if self.mode == "fail":
-            raise TTSProviderError("voice service rejected the text", transient=False)
+            raise ProviderError("voice service rejected the text", transient=False)
         if self.mode == "fake":  # arbitrary bytes posing as a WAV file
             return speech.model_copy(update={"content": b"RIFF....not really audio" * 20})
         return speech.model_copy(update={"duration": speech.duration + 3.0})  # declared duration is wrong

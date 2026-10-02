@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from app.agents.base import AgentContext
 from app.agents.research.agent import ResearchAgent
 from app.config.settings import REPO_ROOT
+from app.providers.core.errors import ProviderError
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
 from app.providers.llm.router import ModelRouter
@@ -21,7 +22,6 @@ from app.providers.search.base import (
     SearchHit,
     SearchPage,
     SearchProvider,
-    SearchProviderError,
     SearchUsage,
 )
 from app.providers.search.mock import MockSearchProvider
@@ -225,11 +225,11 @@ async def test_search_tool_returns_traceable_results_and_records_usage() -> None
 
 
 async def test_search_tool_maps_provider_failures() -> None:
-    transient = FakeProvider(error=SearchProviderError("rate limited"))
+    transient = FakeProvider(error=ProviderError("rate limited"))
     with pytest.raises(ToolTransientError):
         await manager(SearchTool(transient)).call(CALLER, "search.web", {"text": "x"}, scope()[0])
     assert transient.calls == 3  # the tool's retry policy
-    fatal = FakeProvider(error=SearchProviderError("bad api key", transient=False))
+    fatal = FakeProvider(error=ProviderError("bad api key", transient=False))
     with pytest.raises(ToolError, match="bad api key"):
         await manager(SearchTool(fatal)).call(CALLER, "search.web", {"text": "x"}, scope()[0])
     assert fatal.calls == 1
@@ -452,7 +452,7 @@ async def test_research_agent_rejects_non_verbatim_evidence() -> None:
 
 async def test_search_failure_is_recorded_and_no_source_is_invented() -> None:
     llm = MockLLMProvider(default_responders())
-    ctx, events = research_context(llm, FakeProvider(error=SearchProviderError("down", transient=False)),
+    ctx, events = research_context(llm, FakeProvider(error=ProviderError("down", transient=False)),
                                    DownRetriever(CORPUS / "knowledge_base.json"))
     out = await ResearchAgent().execute(research_request(), ctx)
     assert out.status == "failed" and out.sources == [] and out.evidence == [] and out.citations == []
@@ -464,7 +464,7 @@ async def test_search_failure_is_recorded_and_no_source_is_invented() -> None:
 
 async def test_partial_search_failure_keeps_real_sources_and_warns() -> None:
     llm = MockLLMProvider(default_responders())
-    ctx, _ = research_context(llm, FakeProvider(error=SearchProviderError("down", transient=False)))
+    ctx, _ = research_context(llm, FakeProvider(error=ProviderError("down", transient=False)))
     out = await ResearchAgent().execute(research_request(), ctx)
     assert out.status == "partial"
     assert {s.retrieved_via for s in out.sources} == {"knowledge_base"}

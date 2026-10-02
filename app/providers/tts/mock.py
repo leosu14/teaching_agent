@@ -11,7 +11,8 @@ import hashlib
 import math
 import struct
 
-from app.providers.tts.base import ProviderSpeechRequest, SynthesizedSpeech, TTSProvider, TTSProviderError
+from app.providers.core.errors import ProviderError
+from app.providers.tts.base import ProviderSpeechRequest, SynthesizedSpeech, TTSProvider
 from app.schemas.audio import AUDIO_MEDIA_TYPES, TTSUsage, Voice
 from app.utils.audio import encode_wav
 
@@ -52,14 +53,14 @@ class MockTTSProvider(TTSProvider):
         self.calls += 1
         voice = next((v for v in self._voices if v.voice_id == request.voice_id), None)
         if voice is None:
-            raise TTSProviderError(f"unknown voice '{request.voice_id}'", transient=False)
+            raise ProviderError(f"unknown voice '{request.voice_id}'", transient=False)
         if not voice.supports(request.language):
-            raise TTSProviderError(f"voice '{voice.voice_id}' does not speak {request.language}", transient=False)
+            raise ProviderError(f"voice '{voice.voice_id}' does not speak {request.language}", transient=False)
         if request.format not in self.formats:
-            raise TTSProviderError(f"format '{request.format}' is not supported", transient=False)
+            raise ProviderError(f"format '{request.format}' is not supported", transient=False)
         rate = request.sample_rate or DEFAULT_SAMPLE_RATE
         if rate not in SAMPLE_RATES:
-            raise TTSProviderError(f"sample rate {rate} is not supported", transient=False)
+            raise ProviderError(f"sample rate {rate} is not supported", transient=False)
         speed = request.speaking_rate or 1.0
         base = 110 + _digest(voice.voice_id)[0] % 150  # 110..259 Hz per voice
         frequency = base * 2 ** ((request.pitch or 0.0) / 12)

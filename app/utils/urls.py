@@ -30,3 +30,10 @@ def canonical_url(url: str) -> str:
 def source_id_for(url: str) -> str:
     """Stable id derived from the canonical URL: the same document always gets the same id."""
     return "src_" + hashlib.sha256(canonical_url(url).encode()).hexdigest()[:12]
+
+
+def host_matches(url: str, domain: str) -> bool:
+    """Whether the URL's host is `domain` or one of its subdomains (case-insensitive, `www.` ignored)."""
+    host = (urlsplit(url.strip()).hostname or "").lower().removeprefix("www.")
+    domain = domain.strip().lower().removeprefix("www.").rstrip(".")
+    return bool(domain) and (host == domain or host.endswith("." + domain))

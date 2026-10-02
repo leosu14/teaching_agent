@@ -7,10 +7,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import date
+from typing import ClassVar
 
 from pydantic import Field
 
+from app.providers.core.base import Provider
 from app.schemas.common import Schema
+from app.schemas.providers import Capability
 
 
 class ProviderSearchRequest(Schema):
@@ -18,7 +21,9 @@ class ProviderSearchRequest(Schema):
     max_results: int = Field(ge=1, le=50)
     language: str | None = None
     subject: str | None = None
-    domain: str | None = None
+    domain: str | None = None  # the knowledge domain of the query (a search hint), not a website
+    include_domains: list[str] = Field(default_factory=list)  # restrict results to these websites
+    exclude_domains: list[str] = Field(default_factory=list)
 
 
 class SearchHit(Schema):
@@ -46,16 +51,12 @@ class SearchUsage(Schema):
 class SearchPage(Schema):
     hits: list[SearchHit]
     usage: SearchUsage
+    provider: str | None = None  # set by the provider layer: the provider that actually answered (fallback)
 
 
-class SearchProviderError(Exception):
-    def __init__(self, message: str, *, transient: bool = True) -> None:
-        super().__init__(message)
-        self.transient = transient
-
-
-class SearchProvider(ABC):
-    name: str
+class SearchProvider(Provider, ABC):
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.SEARCH})
+    supports_domain_filter: ClassVar[bool] = False  # when False, the search tool filters results by host itself
 
     @abstractmethod
     async def search(self, request: ProviderSearchRequest) -> SearchPage: ...

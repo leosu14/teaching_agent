@@ -8,10 +8,10 @@ from datetime import datetime
 
 from app.artifacts.service import ArtifactService
 from app.observability.scope import ExecutionScope
+from app.providers.core.errors import ProviderError
 from app.providers.image_search.base import (
     ImageHit,
     ImageSearchProvider,
-    ImageSearchProviderError,
     ProviderImageSearchRequest,
 )
 from app.schemas.common import RetryPolicy, utcnow
@@ -67,7 +67,7 @@ class ImageSearchTool(Tool[ImageSearchRequest, ImageSearchResponse]):
         )
         try:
             page = await self._provider.search(request)
-        except (ImageSearchProviderError, ConnectionError, OSError) as exc:
+        except (ProviderError, ConnectionError, OSError) as exc:
             raise _provider_error(self._provider.name, exc) from exc
         retrieved_at = self._clock()
         results = [self._result(hit, rank, retrieved_at) for rank, hit in enumerate(page.hits, start=1)]
@@ -77,6 +77,8 @@ class ImageSearchTool(Tool[ImageSearchRequest, ImageSearchResponse]):
 
     def _result(self, hit: ImageHit, rank: int, retrieved_at: datetime) -> ImageSearchResult:
         metadata = dict(hit.metadata)
+        if hit.origin != "searched":
+            metadata.setdefault("origin", hit.origin)  # e.g. "external": licence is whatever the source states
         if hit.kind is not None:
             metadata.setdefault("provider_kind", hit.kind)
         if hit.score is not None:
@@ -114,7 +116,7 @@ class ImageFetchTool(Tool[ImageFetchRequest, FetchedImage]):
                             f"not '{self._provider.name}'")
         try:
             image = await self._provider.download(result.provider_image_id, result.url)
-        except (ImageSearchProviderError, ConnectionError, OSError) as exc:
+        except (ProviderError, ConnectionError, OSError) as exc:
             raise _provider_error(self._provider.name, exc) from exc
         if not image.content:
             raise ToolError(f"image {result.image_id} downloaded empty")

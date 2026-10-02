@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from app.providers.search.base import ProviderSearchRequest, SearchHit, SearchPage, SearchProvider, SearchUsage
+from app.utils.urls import host_matches
 
 HIT_FIELDS = set(SearchHit.model_fields) - {"score", "metadata"}
 
@@ -23,6 +24,7 @@ class MockSearchProvider(SearchProvider):
     """
 
     name = "mock"
+    supports_domain_filter = True
 
     def __init__(self, corpus_path: Path) -> None:
         self._docs = json.loads(corpus_path.read_text(encoding="utf-8"))
@@ -32,6 +34,10 @@ class MockSearchProvider(SearchProvider):
         scored = []
         for doc in self._docs:
             if request.language and doc.get("language") not in (None, request.language):
+                continue
+            if request.include_domains and not any(host_matches(doc["url"], d) for d in request.include_domains):
+                continue
+            if any(host_matches(doc["url"], d) for d in request.exclude_domains):
                 continue
             haystack = tokenize(f"{doc['title']} {doc['snippet']} {doc.get('content') or ''}")
             score = sum(1 for tok in haystack if tok in terms)

@@ -8,7 +8,8 @@ from datetime import datetime
 
 from app.artifacts.service import ArtifactService
 from app.observability.scope import ExecutionScope
-from app.providers.image.base import ImageGenerationProvider, ImageGenerationProviderError, ProviderImageRequest
+from app.providers.core.errors import ProviderError
+from app.providers.image.base import ImageGenerationProvider, ProviderImageRequest
 from app.schemas.common import RetryPolicy, utcnow
 from app.schemas.visual import GenerationAttribution, ImageGenerationRequest, ImageGenerationResult
 from app.tools.base import Tool, ToolError, ToolTransientError
@@ -48,23 +49,24 @@ class ImageGenerationTool(Tool[ImageGenerationRequest, ImageGenerationResult]):
         )
         try:
             image = await p.generate(request)
-        except (ImageGenerationProviderError, ConnectionError, OSError) as exc:
+        except (ProviderError, ConnectionError, OSError) as exc:
             transient = getattr(exc, "transient", True)
             raise (ToolTransientError if transient else ToolError)(
                 f"image generation provider '{p.name}' failed: {exc}") from exc
         if not image.content:
             raise ToolError(f"image generation provider '{p.name}' returned no content")
         obj = self._artifacts.put_object(image.content, image.media_type)
+        provider = image.provider or p.name  # the provider that produced it, after any configured fallback
         metadata = GenerationAttribution(
-            provider=p.name, model=image.model, generated_at=self._clock(), prompt=data.prompt,
+            provider=provider, model=image.model, generated_at=self._clock(), prompt=data.prompt,
             prompt_hash=prompt_hash(data.prompt), negative_prompt=request.negative_prompt, style=request.style,
             seed=image.seed if p.supports_seed else None, width=image.width, height=image.height,
             ignored_parameters=ignored, provider_metadata=image.metadata,
         )
-        scope.usage.record_service(service=f"image_generation:{p.name}", results=image.usage.images,
+        scope.usage.record_service(service=f"image_generation:{provider}", results=image.usage.images,
                                    cost_usd=image.usage.cost_usd,
                                    units={"images": image.usage.images, "megapixels": image.usage.megapixels})
         return ImageGenerationResult(
-            asset_id="img_" + obj.checksum[:16], provider=p.name, model=image.model, width=image.width,
+            asset_id="img_" + obj.checksum[:16], provider=provider, model=image.model, width=image.width,
             height=image.height, format=image.media_type, metadata=metadata, storage=obj, usage=image.usage,
         )

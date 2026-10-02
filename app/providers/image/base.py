@@ -5,10 +5,13 @@ these schemas. A provider declares which optional parameters it supports; the to
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import ClassVar, Literal
 
 from pydantic import Field
 
+from app.providers.core.base import Provider
 from app.schemas.common import Schema
+from app.schemas.providers import Capability
 from app.schemas.visual import ImageUsage
 
 
@@ -30,16 +33,14 @@ class GeneratedImage(Schema):
     seed: int | None = None
     usage: ImageUsage
     metadata: dict = Field(default_factory=dict)  # anything else the provider returned, verbatim
+    # A generation provider only ever produces generated images; searched and externally sourced images come from
+    # ImageSearchProvider, with the source's own attribution.
+    origin: Literal["generated"] = "generated"
+    provider: str | None = None  # set by the provider layer: the provider that actually produced it (fallback)
 
 
-class ImageGenerationProviderError(Exception):
-    def __init__(self, message: str, *, transient: bool = True) -> None:
-        super().__init__(message)
-        self.transient = transient
-
-
-class ImageGenerationProvider(ABC):
-    name: str
+class ImageGenerationProvider(Provider, ABC):
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.IMAGE})
     supports_negative_prompt: bool = False
     supports_seed: bool = False
     supports_style: bool = False

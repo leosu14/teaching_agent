@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.config.providers import ProviderSettings
 from app.config.routing import ConfigError
 from app.schemas.video import VideoConfig
 
@@ -22,12 +23,10 @@ class Settings(BaseSettings):
     object_store_dir: Path | None = None
     routing_file: Path = REPO_ROOT / "config" / "routing.toml"
 
-    llm_providers: list[str] = Field(default_factory=lambda: ["mock"])
-    search_provider: Literal["mock"] = "mock"
+    # LLM, TTS, image and search providers: unprefixed variables (LLM_PROVIDER, TTS_PROVIDER, ...), see
+    # app/config/providers.py. Every capability defaults to its mock provider.
+    providers: ProviderSettings = Field(default_factory=ProviderSettings)
     retrieval_provider: Literal["local"] = "local"
-    image_provider: Literal["mock"] = "mock"  # image generation
-    image_search_provider: Literal["mock"] = "mock"
-    tts_provider: Literal["mock"] = "mock"
     video_composer: Literal["ffmpeg", "mock"] = "ffmpeg"  # ffmpeg: real MP4; mock: a manifest, for tests
     presentation_renderer: Literal["pptx", "mock"] = "pptx"  # pptx: local python-pptx; mock: JSON for tests
     corpus_dir: Path = REPO_ROOT / "fixtures" / "demo"
@@ -103,9 +102,14 @@ class Settings(BaseSettings):
         return config
 
     def validate_runtime(self) -> None:
-        if not self.llm_providers:
-            raise ConfigError("TA_LLM_PROVIDERS must name at least one LLM provider")
-        if self.search_provider == "mock" or self.retrieval_provider == "local":
-            for name in ("web_corpus.json", "knowledge_base.json", "image_catalog.json"):
-                if not (self.corpus_dir / name).exists():
-                    raise ConfigError(f"TA_CORPUS_DIR={self.corpus_dir} is missing {name}")
+        """Startup validation: provider configuration first (every problem at once, secrets never shown), then the
+        local corpora the mock and local providers read."""
+        self.providers.validate_startup()
+        needed = {"knowledge_base.json"} if self.retrieval_provider == "local" else set()
+        if self.providers.search_provider == "mock":
+            needed.add("web_corpus.json")
+        if self.providers.image_search_provider == "mock":
+            needed.add("image_catalog.json")
+        for name in sorted(needed):
+            if not (self.corpus_dir / name).exists():
+                raise ConfigError(f"TA_CORPUS_DIR={self.corpus_dir} is missing {name}")

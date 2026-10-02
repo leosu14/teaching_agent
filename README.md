@@ -36,6 +36,7 @@ python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, sel
 python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validation, build, real .pptx with the images
 python scripts/run_audio_demo.py --out-dir narration/      # audio plan, mock TTS, real WAV assets, slide timings
 python scripts/run_video_demo.py --out-dir video/          # video plan, FFmpeg composition, a real playable MP4
+python scripts/run_provider_demo.py    # provider registry, selection, health, usage, retry, fallback (offline)
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
 uvicorn app.api.main:app --reload   # the same services over HTTP
 ```
@@ -61,6 +62,16 @@ artifacts and the PresentationTimeline it starts from, the VideoPlan slide by sl
 subtitles), its validation, the FFmpeg composition, the MP4 validation and the VIDEO artifact, then re-reads the MP4
 from the object store and prints its duration (against the timeline), resolution, frame rate, audio stream,
 subtitle status and checksum. `--width 1280 --height 720` and `--transition fade` change the output.
+
+`run_provider_demo.py` forces offline mode and the mock providers, then prints the provider configuration
+(credentials only as set/missing), every registered provider with its capabilities and health, the selected provider
+per capability and per agent, the fallback configuration, one call per capability with its request id and usage, a
+retry after rate limiting and an explicit fallback with their `provider.*` events, and a redaction check.
+
+Real providers are opt-in: install the `providers` extra (`pip install -e ".[providers]"`) and set e.g.
+`LLM_PROVIDER=anthropic LLM_MODEL=... ANTHROPIC_API_KEY=...`, `TTS_PROVIDER=openai`, `IMAGE_PROVIDER=openai`,
+`SEARCH_PROVIDER=tavily` (see [configuration](docs/configuration.md#providers)). The same agents and workflows then
+run on them; `run_provider_demo.py --smoke` sends each configured real provider one minimal request.
 
 ## API
 
