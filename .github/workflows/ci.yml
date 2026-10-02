@@ -37,5 +37,5 @@ jobs:
         run: python scripts/run_video_demo.py
       - name: Provider demo (offline, mock providers, no credentials)
         run: python scripts/run_provider_demo.py --smoke
-      - name: Production demo dry run (offline: checks configuration, calls nothing)
+      - name: Production demo dry run (offline, checks configuration, calls nothing)
         run: python scripts/run_production_demo.py --dry-run
