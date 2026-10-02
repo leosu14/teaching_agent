@@ -27,7 +27,7 @@ from tests.fake_vendors import FAKE_KEY, FakeAnthropic, FakeChatModel, FakeOpenA
 
 
 def real_settings(tmp_path, **overrides) -> Settings:
-    values = dict(teaching_agent_offline=False, llm_routes={}, llm_provider="openai", llm_model="gpt-test",
+    values = dict(teaching_agent_mode="production", teaching_agent_offline=False, llm_routes={}, llm_provider="openai", llm_model="gpt-test",
                   openai_api_key=FAKE_KEY, tts_provider="openai", image_provider="openai", search_provider="tavily",
                   search_api_key="tvly-test-0123456789abcdef", tts_languages="es-ES,en-US")
     values.update(overrides)
@@ -141,7 +141,7 @@ async def test_anthropic_adapter_serves_an_agent_route(tmp_path, monkeypatch) ->
     anthropic = AnthropicLLMProvider(http_client("anthropic", "https://api.anthropic.example", fake,
                                                  headers={"x-api-key": FAKE_KEY}, request_id_header=""))
     settings = Settings(data_dir=tmp_path / "data", log_json=False, providers=ProviderSettings(
-        teaching_agent_offline=False, anthropic_api_key=FAKE_KEY,
+        teaching_agent_mode="production", teaching_agent_offline=False, anthropic_api_key=FAKE_KEY,
         llm_routes={"content_reviewer": ("anthropic", "claude-test")}))
     from app.providers.llm.mock import MockLLMProvider
     c = build_container(settings, llm_providers={"mock": MockLLMProvider(default_responders()),

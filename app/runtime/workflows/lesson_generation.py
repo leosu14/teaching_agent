@@ -68,7 +68,9 @@ from app.schemas.presentation import (
     SlidePlanValidationReport,
 )
 from app.schemas.research import ResearchBundle
+from app.schemas.providers import Capability
 from app.schemas.task import ArtifactSummary, TaskResult
+from app.schemas.usage import TaskBudget
 from app.schemas.video import (
     AudioAssetInput,
     ImageAssetInput,
@@ -83,6 +85,9 @@ from app.schemas.visual import VisualResult
 from app.schemas.workflow import NodeStatus, ReviewOutcome, RevisionPolicy, RevisionRequest
 
 WORKFLOW_ID = "lesson_generation"
+# Provider capabilities the lesson's agents and tools call (what a production run must configure).
+PROVIDER_CAPABILITIES = frozenset({Capability.LLM, Capability.SEARCH, Capability.IMAGE, Capability.IMAGE_SEARCH,
+                                   Capability.TTS})
 
 
 @dataclass(frozen=True)
@@ -147,6 +152,14 @@ def _lesson(v: StateView) -> LessonContent:
     cited = {c for s in lesson.sections for c in s.citations}
     return lesson.model_copy(update={"sections": sections,
                                      "references": [c for c in research.citations if c.citation_id in cited]})
+
+
+def _image_budget(v: StateView) -> dict:
+    """The task's image budget (a production task carries one in its metadata); no limit otherwise."""
+    budget = TaskBudget.of(v.task.metadata)
+    if budget is None:
+        return {}
+    return {"max_generated_images": budget.max_generated_images, "max_searched_images": budget.max_searched_images}
 
 
 def _lesson_artifact_id(v: StateView) -> str:
@@ -381,7 +394,8 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                   build_input=lambda v: VisualRequest(
                       plan=v.output("plan", LessonPlan), lesson=_lesson(v), research=_research(v),
                       language=_request(v).language_of_instruction, max_visuals=options.visual_max_per_lesson,
-                      max_candidates=options.visual_max_candidates, parent_artifact_ids=[_research_artifact_id(v)])),
+                      max_candidates=options.visual_max_candidates, parent_artifact_ids=[_research_artifact_id(v)],
+                      **_image_budget(v))),
         TransformNode(id="visual_policy", depends_on=("visual",),
                       fn=lambda v: apply_visual_policy(v.output("visual", VisualResult),
                                                        options.visual_failure_policy)),
@@ -633,6 +647,7 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
         provides=frozenset({"lesson.text", "lesson.review", "lesson.visuals", "slides.plan", "presentation.pptx",
                             "audio.narration", "presentation.timeline", "video.mp4"}),
         build=lambda request: build_lesson_workflow(request, options),
+        provider_capabilities=PROVIDER_CAPABILITIES,
         expected_calls=(
             ExpectedCall("request_interpreter", 700, 200),
             ExpectedCall("knowledge_diagnostic", 3000, 1200, calls=rounds),

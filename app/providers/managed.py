@@ -50,7 +50,8 @@ class _Chain(Generic[P]):
         self.capability = capability
 
     async def run(self, operation: str, fn: Callable[[P], Awaitable[T]],
-                  usage: Callable[[P, T, str], ProviderUsage], model: str | None = None) -> tuple[P, T]:
+                  usage: Callable[[P, T, str], ProviderUsage], model: str | None = None,
+                  units: dict[str, float] | None = None) -> tuple[P, T]:
         failure: ProviderError | None = None
         for index, provider in enumerate(self.providers):
             if failure is not None:
@@ -59,7 +60,7 @@ class _Chain(Generic[P]):
             try:
                 result = await self.invoker.call(
                     provider, self.capability, operation, lambda p=provider: fn(p),
-                    usage=lambda r, rid, p=provider: usage(p, r, rid), model=model)
+                    usage=lambda r, rid, p=provider: usage(p, r, rid), model=model, units=units)
             except ProviderError as exc:
                 if not exc.transient or index == len(self.providers) - 1:
                     raise
@@ -153,7 +154,8 @@ class ManagedTTSProvider(_Delegating, TTSProvider):
                 currency=_currency(u.estimated_cost_usd, u.cost_usd),
             )
 
-        provider, speech = await self._chain.run("synthesize", lambda p: p.synthesize(request), usage)
+        provider, speech = await self._chain.run("synthesize", lambda p: p.synthesize(request), usage,
+                                                 units={"characters": len(request.text)})
         return speech.model_copy(update={"provider": provider.name})
 
 

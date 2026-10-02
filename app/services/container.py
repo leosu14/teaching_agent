@@ -77,6 +77,7 @@ from app.schemas.providers import Capability
 from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
 from app.services.learners import LearnerService
+from app.services.production import ProductionService
 from app.services.tasks import TaskService
 from app.storage.db import create_db, dispose
 from app.storage.object_store import FilesystemObjectStore
@@ -296,6 +297,7 @@ class Container:
     task_service: TaskService
     learner_service: LearnerService
     catalog: CatalogService
+    production: ProductionService
     _sessions: object
 
     def close(self) -> None:
@@ -419,12 +421,17 @@ def build_container(
     planner = WorkflowPlanner([lesson_template(options), evaluation_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,
                                 agents=agents, tools=tools, router=router, events=events, observers=observers)
+    task_service = TaskService(orchestrator, task_repo, event_repo, artifacts)
+    learner_service = LearnerService(memory)
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
         frameworks=frameworks, memory=memory, artifacts=artifacts, orchestrator=orchestrator,
-        task_service=TaskService(orchestrator, task_repo, event_repo, artifacts),
-        learner_service=LearnerService(memory),
+        task_service=task_service, learner_service=learner_service,
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
+        production=ProductionService(settings=settings, events=events, registry=providers.registry,
+                                     selector=providers.selector, router=router, agents=agents, tools=tools,
+                                     planner=planner, frameworks=frameworks, tasks=task_service,
+                                     learners=learner_service),
         _sessions=sessions,
     )

@@ -48,5 +48,35 @@
     "source_type": "forum",
     "language": "en",
     "content": "Spanish football forum chat. Gol is a feminine noun: la gol. Example: La gol fue increíble."
+  },
+  {
+    "url": "https://climate-spanish.example.org/vocabulary",
+    "title": "Climate change vocabulary in Spanish (B1): el cambio climático",
+    "snippet": "El cambio climático, el calentamiento global, las emisiones y la energía renovable.",
+    "publisher": "Open Spanish Resources",
+    "source_type": "educational",
+    "language": "es",
+    "published_at": "2025-03-18",
+    "content": "El calentamiento global es el aumento de la temperatura media del planeta, y los gases de efecto invernadero, como el dióxido de carbono, lo causan. Example: El calentamiento global provoca sequías más largas. Practice: ¿Cómo se dice 'renewable energy' en español? Answer: la energía renovable.\n\nPara hablar del tiempo extremo usamos la sequía, las inundaciones y la ola de calor. Example: Este verano hubo una ola de calor."
+  },
+  {
+    "url": "https://grammar-reference.example.org/connectors/cause-effect",
+    "title": "Climate change in Spanish: cause and consequence connectors (debido a, por eso)",
+    "snippet": "Debido a introduce una causa; por eso introduce una consecuencia.",
+    "publisher": "Open Grammar Reference",
+    "source_type": "reference",
+    "language": "es",
+    "published_at": "2024-11-02",
+    "content": "Debido a introduce la razón de algo y va seguido de un sustantivo. Example: Las temperaturas suben debido a las emisiones. Practice: Completa: Los ríos se secan ___ la sequía. Answer: debido a.\n\nPor eso introduce la consecuencia de una acción. Example: Usamos mucho el coche; por eso sube la contaminación."
+  },
+  {
+    "url": "https://grammar-reference.example.org/subjunctive/necessity",
+    "title": "Climate change solutions in Spanish: es necesario que + subjuntivo",
+    "snippet": "Es necesario que reduzcamos las emisiones.",
+    "publisher": "Open Grammar Reference",
+    "source_type": "reference",
+    "language": "es",
+    "published_at": "2024-06-20",
+    "content": "Después de es necesario que y es importante que se usa el presente de subjuntivo. Example: Es necesario que reduzcamos las emisiones. Practice: Completa: Es importante que todos ___ energía. (ahorrar) Answer: ahorremos.\n\nHay que con infinitivo expresa una obligación general. Example: Hay que usar más el transporte público."
   }
 ]

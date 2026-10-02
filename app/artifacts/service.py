@@ -57,6 +57,10 @@ class ObjectStore(Protocol):
 
     def open(self, uri: str) -> BinaryIO: ...
 
+    def exists(self, uri: str) -> bool: ...
+
+    def delete(self, uri: str) -> None: ...
+
 
 class ArtifactGraphError(ValueError):
     pass
@@ -156,7 +160,8 @@ class ArtifactService:
         for pid in parent_ids:
             self._repo.get(pid)  # every parent must exist
         latest = self._repo.latest(task_id, name)
-        if latest is not None and latest.content_hash == digest and sorted(latest.parent_ids) == sorted(parent_ids):
+        if (latest is not None and latest.content_hash == digest and sorted(latest.parent_ids) == sorted(parent_ids)
+                and self._store.exists(latest.uri)):
             return latest  # identical content: reuse instead of creating a new version
         return None
 
@@ -199,6 +204,21 @@ class ArtifactService:
 
     def get(self, artifact_id: str) -> Artifact:
         return self._repo.get(artifact_id)
+
+    def verify(self, artifact: Artifact) -> str | None:
+        """Why an artifact's stored bytes are unusable (missing, or not matching its checksum); None when intact."""
+        try:
+            if not self._store.exists(artifact.uri):
+                return "object missing"
+            if self.object_checksum(artifact.uri) != artifact.content_hash:
+                return "checksum mismatch"
+        except (OSError, ValueError) as exc:
+            return f"object unreadable: {exc}"
+        return None
+
+    def discard_object(self, artifact: Artifact) -> None:
+        """Remove an artifact's corrupt object so that storing the same content again writes it afresh."""
+        self._store.delete(artifact.uri)
 
     def read(self, artifact_id: str) -> bytes:
         return self._store.get(self._repo.get(artifact_id).uri)

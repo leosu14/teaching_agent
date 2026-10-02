@@ -37,6 +37,7 @@ python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validat
 python scripts/run_audio_demo.py --out-dir narration/      # audio plan, mock TTS, real WAV assets, slide timings
 python scripts/run_video_demo.py --out-dir video/          # video plan, FFmpeg composition, a real playable MP4
 python scripts/run_provider_demo.py    # provider registry, selection, health, usage, retry, fallback (offline)
+python scripts/run_production_demo.py --dry-run  # a production lesson's plan: providers, budget, stages
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
 uvicorn app.api.main:app --reload   # the same services over HTTP
 ```
@@ -68,10 +69,17 @@ subtitle status and checksum. `--width 1280 --height 720` and `--transition fade
 per capability and per agent, the fallback configuration, one call per capability with its request id and usage, a
 retry after rate limiting and an explicit fallback with their `provider.*` events, and a redaction check.
 
-Real providers are opt-in: install the `providers` extra (`pip install -e ".[providers]"`) and set e.g.
-`LLM_PROVIDER=anthropic LLM_MODEL=... ANTHROPIC_API_KEY=...`, `TTS_PROVIDER=openai`, `IMAGE_PROVIDER=openai`,
+Real providers are opt-in: install the `providers` extra (`pip install -e ".[providers]"`), set
+`TEACHING_AGENT_MODE=production` and e.g. `LLM_PROVIDER=anthropic LLM_MODEL=... ANTHROPIC_API_KEY=...`, `TTS_PROVIDER=openai`, `IMAGE_PROVIDER=openai`,
 `SEARCH_PROVIDER=tavily` (see [configuration](docs/configuration.md#providers)). The same agents and workflows then
 run on them; `run_provider_demo.py --smoke` sends each configured real provider one minimal request.
+
+`run_production_demo.py` runs one complete lesson (B1 Spanish, "Climate change" by default; any level, topic and
+language the knowledge base covers) on the real providers: preflight validation and a `--dry-run` that calls nothing,
+explicit `--confirm`, provider health checks, a per-task budget enforced before every billable request, resume from
+the last checkpoint without regenerating intact artifacts, and a `production_run.json` report with the artifact
+graph, per-request traceability, usage and cost. `--mock` rehearses the same path offline. See
+[docs/production.md](docs/production.md).
 
 ## API
 

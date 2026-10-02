@@ -211,6 +211,7 @@ def test_provider_settings_load_from_the_environment(monkeypatch) -> None:
     monkeypatch.setenv("SEARCH_REQUESTS_PER_MINUTE", "30")
     monkeypatch.setenv("SEARCH_INCLUDE_DOMAINS", "wikipedia.org, britannica.com")
     monkeypatch.setenv("TEACHING_AGENT_OFFLINE", "false")
+    monkeypatch.setenv("TEACHING_AGENT_MODE", "production")
     p = ProviderSettings()
     assert (p.llm_provider, p.llm_model, p.tts_provider, p.offline) == ("anthropic", "claude-test", "openai", False)
     assert p.llm_routes == {"teacher": ("openai", "gpt-teacher"), "content_reviewer": ("anthropic", "claude-review")}

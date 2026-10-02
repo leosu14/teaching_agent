@@ -175,18 +175,20 @@ class AudioPlanValidator:
                       "text")
 
         if voices is not None:
-            by_id = {v.voice_id: v for v in voices}
+            by_id: dict[str, list] = {}  # a multilingual voice is listed once per language it speaks
+            for v in voices:
+                by_id.setdefault(v.voice_id, []).append(v)
             for lang, where in ((plan.language, None), *((s.language, s) for s in plan.segments)):
                 if not any(v.supports(lang) for v in voices):
                     issue("unsupported_language", f"no voice speaks {lang}", where, "language")
             for voice_id, lang, where in ((plan.voice, plan.language, None),
                                           *((s.voice, s.language, s) for s in plan.segments)):
-                voice = by_id.get(voice_id)
-                if voice is None:
+                entries = by_id.get(voice_id)
+                if not entries:
                     issue("unknown_voice", f"voice {voice_id} is not in the provider's catalog", where, "voice")
-                elif not voice.supports(lang):
-                    issue("voice_language_mismatch", f"voice {voice_id} speaks {voice.language}, not {lang}", where,
-                          "voice")
+                elif not any(v.supports(lang) for v in entries):
+                    spoken = ", ".join(sorted({v.language for v in entries}))
+                    issue("voice_language_mismatch", f"voice {voice_id} speaks {spoken}, not {lang}", where, "voice")
         if timed:
             self._timing(plan, issue)
         return errors

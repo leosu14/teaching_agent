@@ -126,6 +126,13 @@ class VisualPlanProposal(Schema):
     requirements: list[VisualRequirement] = Field(default_factory=list)
     rationale: str = ""
 
+    def source_counts(self) -> tuple[int, int]:
+        """(searched, generated): how many visuals may search and how many may generate an image, counting a
+        visual's fallback source too. This is the most the plan can spend on each."""
+        searched = sum("search" in r.sources() for r in self.requirements)
+        generated = sum("generate" in r.sources() for r in self.requirements)
+        return searched, generated
+
     @field_validator("requirements")
     @classmethod
     def _unique(cls, requirements: list[VisualRequirement]) -> list[VisualRequirement]:

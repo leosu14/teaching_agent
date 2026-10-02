@@ -463,6 +463,18 @@ def test_plan_validator_rejects(change, code) -> None:
     assert not report.valid and code in {e.code for e in report.errors}, report.errors
 
 
+def test_plan_validator_accepts_a_multilingual_voice_listed_once_per_language() -> None:
+    # OpenAI-style catalogs list the same voice id for every configured language; the last entry must not win.
+    voices = [Voice(voice_id="alloy", language=lang, display_name="alloy", provider="openai")
+              for lang in ("es-ES", "en-US")]
+    segs = [segment().model_copy(update={"voice": "alloy"}), segment("s02_a1", "s02", 2, "Dos.").model_copy(
+        update={"voice": "alloy"})]
+    assert check(plan(*segs).model_copy(update={"voice": "alloy"}), voices).valid
+    french = [segs[0].model_copy(update={"language": "fr-FR"}), segs[1]]
+    errors = check(plan(*french).model_copy(update={"voice": "alloy"}), voices).errors
+    assert "voice alloy speaks en-US, es-ES, not fr-FR" in {e.message for e in errors}
+
+
 def test_plan_validator_reports_schema_errors_and_empty_plans() -> None:
     report = check({"audio_plan_id": "ap", "segments": [{"text": "x"}]})
     assert not report.valid and {e.code for e in report.errors} == {"invalid_schema"}

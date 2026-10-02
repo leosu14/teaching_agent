@@ -166,3 +166,29 @@ def test_checker_flags_vendor_code_outside_the_provider_layer() -> None:
             assert not violations_for(layer, module, [], f"app/{layer}/x.py:1"), (layer, module)
     assert not violations_for("services", "app.providers.tts.openai", [], "app/services/container.py:1")
     assert not violations_for("utils", "urllib.parse", [], "x")
+
+
+SCRIPTS = APP.parent / "scripts"
+# What the production CLI may use: services (through the container), schemas, configuration and observability.
+PRODUCTION_SCRIPT_LAYERS = {"services", "schemas", "config", "observability"}
+
+
+def test_production_script_uses_services_only() -> None:
+    problems = []
+    for module, _names, line in imports(SCRIPTS / "run_production_demo.py"):
+        where = f"scripts/run_production_demo.py:{line}"
+        root = module.split(".")[0]
+        if root == "app" and module.split(".")[1] not in PRODUCTION_SCRIPT_LAYERS:
+            problems.append(f"{where}: the production CLI must go through services, not {module}")
+        if root in VENDOR_SDKS or root in SQL_PACKAGES or any(module.startswith(m) for m in NETWORK_MODULES):
+            problems.append(f"{where}: no vendor SDK, SQL or network code in a script ({module})")
+    assert problems == []
+
+
+def test_provider_selection_is_built_in_the_composition_root_only() -> None:
+    builders = ("ProviderRegistry(", "ProviderSelector(", "ModelRouter(")
+    found = []
+    for path in sorted([*APP.rglob("*.py"), *SCRIPTS.glob("*.py")]):
+        text = path.read_text(encoding="utf-8")
+        found += [f"{path.relative_to(APP.parent)}: {b}" for b in builders if b in text]
+    assert found == [f"app/{COMPOSITION_ROOT}: {b}" for b in builders]

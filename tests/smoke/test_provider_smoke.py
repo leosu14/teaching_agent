@@ -3,7 +3,8 @@
 Skipped unless RUN_PROVIDER_SMOKE_TESTS=true, and each test is skipped unless its capability is configured with a
 real provider and credentials. They send one minimal request each, so they cost a little; CI never runs them.
 
-    RUN_PROVIDER_SMOKE_TESTS=true LLM_PROVIDER=anthropic LLM_MODEL=... ANTHROPIC_API_KEY=... pytest tests/smoke
+    RUN_PROVIDER_SMOKE_TESTS=true TEACHING_AGENT_MODE=production LLM_PROVIDER=anthropic LLM_MODEL=... \
+        ANTHROPIC_API_KEY=... pytest tests/smoke
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ class Answer(BaseModel):
 def real(tmp_path):
     settings = Settings(data_dir=tmp_path / "data", log_json=False)
     if settings.providers.offline:
-        pytest.skip("TEACHING_AGENT_OFFLINE=true")
+        pytest.skip("offline mode: set TEACHING_AGENT_MODE=production (and not TEACHING_AGENT_OFFLINE=true)")
     container = build_container(settings)  # raises ConfigError naming any missing variable
     yield container
     container.close()

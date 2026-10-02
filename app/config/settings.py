@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.config.production import ProductionSettings
 from app.config.providers import ProviderSettings
 from app.config.routing import ConfigError
 from app.schemas.video import VideoConfig
@@ -26,6 +27,8 @@ class Settings(BaseSettings):
     # LLM, TTS, image and search providers: unprefixed variables (LLM_PROVIDER, TTS_PROVIDER, ...), see
     # app/config/providers.py. Every capability defaults to its mock provider.
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
+    # Budget of a production task (MAX_LLM_REQUESTS, MAX_GENERATED_IMAGES, ...): see app/config/production.py.
+    production: ProductionSettings = Field(default_factory=ProductionSettings)
     retrieval_provider: Literal["local"] = "local"
     video_composer: Literal["ffmpeg", "mock"] = "ffmpeg"  # ffmpeg: real MP4; mock: a manifest, for tests
     presentation_renderer: Literal["pptx", "mock"] = "pptx"  # pptx: local python-pptx; mock: JSON for tests

@@ -11,8 +11,10 @@ from collections.abc import Callable, Sequence
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
 from app.observability.events import EventBus
+from app.observability.redaction import redact_text
 from app.observability.scope import ExecutionScope, UsageLedger
 from app.providers.llm.router import ModelRouter
+from app.runtime.failures import classify
 from app.runtime.orchestrator.planner import WorkflowPlanner
 from app.runtime.tasks.repository import TaskRepository
 from app.runtime.tasks.state_machine import InvalidTransition, transition
@@ -22,6 +24,7 @@ from app.schemas.common import new_id, utcnow
 from app.schemas.events import EventType
 from app.schemas.lesson import InterpretRequest, LessonRequest
 from app.schemas.task import Task, TaskControl, TaskError, TaskPlan, TaskStatus
+from app.schemas.usage import TaskBudget
 from app.schemas.workflow import NodeState, NodeStatus, WorkflowState
 
 NodeObserver = Callable[[Task, str], None]
@@ -67,12 +70,15 @@ class Orchestrator:
         return task
 
     def create_planned_task(self, *, request: str, learner_id: str, user_id: str, workflow_id: str,
-                            lesson_request: LessonRequest, inputs: dict[str, str]) -> Task:
-        """Create a task whose workflow is already known (no request interpretation needed)."""
+                            lesson_request: LessonRequest, inputs: dict[str, str],
+                            metadata: dict | None = None) -> Task:
+        """Create a task whose workflow is already known (no request interpretation needed). `metadata` may carry
+        the task's budget (see TaskBudget)."""
         template = self._planner.template(workflow_id)
         definition = template.build(lesson_request)
         estimate = self._planner.estimate(template)
-        task = Task(task_id=new_id("task"), user_id=user_id, learner_id=learner_id, request=request)
+        task = Task(task_id=new_id("task"), user_id=user_id, learner_id=learner_id, request=request,
+                    metadata=dict(metadata or {}))
         task.plan = TaskPlan(lesson_request=lesson_request, workflow_id=workflow_id, steps=list(definition.all_nodes),
                              estimated_cost_usd=estimate, inputs=inputs)
         task.cost.estimated_cost_usd = estimate
@@ -86,7 +92,7 @@ class Orchestrator:
     async def run(self, task_id: str) -> Task:
         """Plan (if needed) and execute until the task completes, waits, pauses, or fails."""
         task = self._tasks.get(task_id)
-        ledger = UsageLedger(task.cost)
+        ledger = UsageLedger(task.cost, budget=TaskBudget.of(task.metadata))
         scope = ExecutionScope(events=self._events, usage=ledger, task_id=task.task_id)
         if task.plan is None:
             if not await self._plan(task, scope, ledger):
@@ -129,6 +135,33 @@ class Orchestrator:
         self._events.emit(EventType.TASK_RESUMED, task_id=task_id, from_status=task.status.value)
         self._tasks.save(task)
         return await self.run(task_id)
+
+    def invalidate(self, task_id: str, node_ids: Sequence[str]) -> list[str]:
+        """Mark nodes (and everything downstream of them) to run again on the next resume: for a task whose stored
+        artifacts turned out to be missing or corrupt. Returns the node ids that were reset."""
+        task = self._tasks.get(task_id)
+        if task.status not in RESUMABLE or task.status == TaskStatus.CREATED:
+            raise InvalidTransition(f"task {task_id} in status {task.status.value} cannot be repaired")
+        assert task.workflow is not None
+        definition = self._definition(task)
+        dependents: dict[str, set[str]] = {nid: set() for nid in definition.all_nodes}
+        for node in definition.all_nodes.values():
+            for upstream in (*node.depends_on, *node.after):
+                dependents[upstream].add(node.id)
+        reset: set[str] = set()
+        frontier = [nid for nid in node_ids if nid in definition.all_nodes]
+        while frontier:
+            nid = frontier.pop()
+            if nid not in reset:
+                reset.add(nid)
+                frontier.extend(dependents[nid])
+        for nid in reset:
+            task.workflow.node_states[nid] = NodeState()
+        task.workflow.execution_order = [n for n in task.workflow.execution_order if n not in reset]
+        self._tasks.save(task)
+        ordered = [nid for nid in definition.all_nodes if nid in reset]
+        self._events.emit(EventType.TASK_RESUMED, task_id=task_id, reason="artifacts invalid", reset_nodes=ordered)
+        return ordered
 
     def request_pause(self, task_id: str) -> Task:
         task = self._tasks.get(task_id)
@@ -230,13 +263,19 @@ class Orchestrator:
             self._events.emit(EventType.TASK_CANCELLED, task_id=task.task_id)
         else:
             self._fail(task, ledger, "workflow", RuntimeError(outcome.error or "workflow failed"),
-                       node_id=outcome.failed_node)
+                       node_id=outcome.failed_node, category=outcome.category, stage=outcome.stage)
 
-    def _fail(self, task: Task, ledger: UsageLedger, kind: str, exc: Exception, node_id: str | None = None) -> None:
-        task.errors.append(TaskError(kind=kind, message=f"{type(exc).__name__}: {exc}", node_id=node_id))
+    def _fail(self, task: Task, ledger: UsageLedger, kind: str, exc: Exception, node_id: str | None = None,
+              category: str | None = None, stage: str | None = None) -> None:
+        if category is None:
+            classified, staged = classify(exc, node_id)
+            category, stage = classified.value, staged.value
+        task.errors.append(TaskError(kind=kind, message=redact_text(f"{type(exc).__name__}: {exc}"), node_id=node_id,
+                                     category=category, stage=stage))
         transition(task, TaskStatus.FAILED)
         self._save(task, ledger)
-        self._events.emit(EventType.TASK_FAILED, task_id=task.task_id, node_id=node_id, error=str(exc)[:1000])
+        self._events.emit(EventType.TASK_FAILED, task_id=task.task_id, node_id=node_id, category=category,
+                          error=redact_text(str(exc))[:1000])
 
     def _definition(self, task: Task) -> WorkflowDefinition:
         assert task.plan is not None

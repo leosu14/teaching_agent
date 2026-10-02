@@ -55,13 +55,14 @@ the default. FFmpeg: `apt-get install ffmpeg` (Debian/Ubuntu; CI does this), `br
 
 Provider settings have no `TA_` prefix (they use the standard vendor variable names). They are validated when the
 container is built: a missing key, an unknown provider, a fallback equal to its primary or a real provider in
-offline mode stops startup with one message listing every problem by variable name, never by value. The old
+offline mode (the default; set `TEACHING_AGENT_MODE=production` to use real providers) stops startup with one message listing every problem by variable name, never by value. The old
 `TA_LLM_PROVIDERS`, `TA_SEARCH_PROVIDER`, `TA_IMAGE_PROVIDER`, `TA_IMAGE_SEARCH_PROVIDER` and `TA_TTS_PROVIDER`
 are no longer read (they only ever accepted the mocks).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TEACHING_AGENT_OFFLINE` | `false` | `true`: only mock providers; any network provider is refused at startup and at request time |
+| `TEACHING_AGENT_MODE` | `offline` | `offline`: only mock providers; any network provider is refused at startup and at request time. `production`: the configured providers run. Never inferred from the presence of a key |
+| `TEACHING_AGENT_OFFLINE` | `false` | `true` forces offline mode whatever `TEACHING_AGENT_MODE` says (the test suite sets it); with `TEACHING_AGENT_MODE=production` it is reported as a contradiction |
 | `LLM_PROVIDER` / `LLM_MODEL` | routing file (mock) | `mock`, `openai` (any OpenAI-compatible endpoint) or `anthropic`, and the model for every tier |
 | `LLM_FALLBACK_PROVIDER` / `LLM_FALLBACK_MODEL` | none | Explicit fallback target, tried only after a transient failure (timeout, 429, 5xx, connection) |
 | `LLM_<ROLE>_PROVIDER` / `LLM_<ROLE>_MODEL` | none | Per-role route without touching the agent. `<ROLE>` is an agent id (`TEACHER`, `SLIDE_PLANNER`, ...) or an alias (`REVIEWER` = content_reviewer, `PLANNER` = curriculum_planner, `EVALUATOR`, ...); `DEFAULT` is `LLM_PROVIDER`/`LLM_MODEL` |
@@ -91,6 +92,13 @@ The real adapters use plain HTTP through `httpx`, an optional extra: `pip instal
 needed. `python scripts/run_provider_demo.py` shows the resolved configuration (keys only as set/missing);
 `--smoke` sends one minimal request to each configured real provider. `RUN_PROVIDER_SMOKE_TESTS=true pytest
 tests/smoke` does the same as tests; without credentials they are skipped.
+
+## Production runs
+
+`scripts/run_production_demo.py` runs a whole lesson on the real providers within a per-task budget
+(`MAX_LLM_REQUESTS`, `MAX_LLM_TOKENS`, `MAX_SEARCH_REQUESTS`, `MAX_GENERATED_IMAGES`, `MAX_SEARCHED_IMAGES`,
+`MAX_TTS_CHARACTERS`, `MAX_TTS_SECONDS`, `MAX_COST_USD`, `PRODUCTION_HEALTH_TIMEOUT_SECONDS`; no `TA_` prefix). See
+[production](production.md) for the variables, defaults, the dry run, confirmation, resume and the run report.
 
 ## Model routing (`config/routing.toml`)
 

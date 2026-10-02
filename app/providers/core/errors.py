@@ -58,7 +58,7 @@ class ProviderResponseError(ProviderError):
 
 
 class ProviderOfflineError(ProviderError):
-    """A network provider was used while offline mode (TEACHING_AGENT_OFFLINE=true) is on."""
+    """A network provider was used while offline mode (TEACHING_AGENT_MODE=offline, the default) is on."""
 
     default_transient = False
 

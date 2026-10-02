@@ -363,8 +363,13 @@ Agents ──► Tools / ModelRouter ──► provider interfaces (*.base) ─�
 - **Security.** Keys are `SecretStr`, registered with the redactor, and removed from logs, events, errors and
   provider error excerpts; https is required (except localhost), redirects are not followed, request and response
   bodies are size-limited. Usage and events never carry prompts, binary content or headers.
-- **Offline mode.** `TEACHING_AGENT_OFFLINE=true` makes a real provider a startup error and makes the HTTP client
-  refuse any request; the test suite runs this way, so CI needs no keys.
+- **Run mode.** `TEACHING_AGENT_MODE=offline` (the default, or `TEACHING_AGENT_OFFLINE=true`) makes a real provider a
+  startup error and makes the HTTP client refuse any request; the test suite runs this way, so CI needs no keys.
+  Real providers run only with `TEACHING_AGENT_MODE=production`, never because a key is present.
+- **Budgets.** The invoker asks the task's `UsageLedger` before every billable request (`admit`) and records every
+  attempt as a `ProviderRequestRecord` (request id, node, agent, attempt, status, units, cost). A production task's
+  budget lives in its metadata; a limit stops the task with `BudgetExceededError`, which is never retried or fallen
+  back from. `TaskUsage` is summed from the records.
 
 ## Agents
 
@@ -388,8 +393,21 @@ call. Each task carries estimated cost (from the workflow template's expected ca
 broken down by agent and model. Every event (task, node, agent, tool, LLM call, review, artifact, learner) is
 persisted and logged as JSON, so a task can be reconstructed from its event log.
 
+A failed task records a failure category (`ConfigurationError`, `BudgetExceededError`, `ProviderError`, or the stage:
+`ResearchError`, `VisualError`, `AudioError`, ...) classified from the typed errors in its cause chain
+(`app/runtime/failures.py`).
+
+## Production runs
+
+`ProductionService` (`app/services/production.py`) plans, runs, resumes and reports a production lesson on top of
+`TaskService`: it resolves the request (level framework, subject, language), checks readiness for the capabilities
+the workflow needs, health-checks them, derives a deterministic run key for idempotency, verifies artifact checksums
+on resume and invalidates only the nodes whose artifacts are missing or corrupt, and builds the run report (artifact
+graph, per-node trace, usage). `scripts/run_production_demo.py` is a thin CLI over it; see
+[production](production.md).
+
 ## Not in this release
 
-Real image-search and video-AI providers, MiniMax, web scraping, vector retrieval and embeddings, advanced slide
+Real image-search and AI video providers, MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
 design, animations, cloud rendering, coding exercises and VS Code integration, UI, deployment. The provider and
 tool interfaces they plug into already exist.
