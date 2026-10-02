@@ -19,6 +19,7 @@ from app.agents.research.agent import ResearchAgent
 from app.agents.reviewer.agent import ContentReviewAgent
 from app.agents.slides.agent import SlidePlannerAgent
 from app.agents.teacher.agent import TeacherAgent
+from app.agents.video.agent import VideoAgent
 from app.agents.visual.agent import VisualAgent
 from app.artifacts.service import ArtifactService
 from app.config.routing import ConfigError, load_routing
@@ -45,7 +46,9 @@ from app.providers.search.base import SearchProvider
 from app.providers.search.mock import MockSearchProvider
 from app.providers.tts.base import TTSProvider
 from app.providers.tts.mock import MockTTSProvider
-from app.providers.video.mock import MockVideoProvider
+from app.providers.video.base import VideoComposer, VideoProber
+from app.providers.video.ffmpeg import FFmpegAdapter, FFmpegVideoComposer, FFprobeVideoProber
+from app.providers.video.mock import MockVideoComposer, MockVideoProber
 from app.runtime.orchestrator.orchestrator import NodeObserver, Orchestrator
 from app.runtime.orchestrator.planner import WorkflowPlanner
 from app.runtime.workflow.engine import WorkflowEngine
@@ -71,12 +74,14 @@ from app.tools.audio.assets import AudioAssetLookupTool, AudioAssetTool
 from app.tools.audio.timeline import PresentationTimelineTool
 from app.tools.audio.tts import TTSTool, VoiceCatalogTool
 from app.tools.audio.validation import AudioPlanValidationTool
-from app.tools.media.tools import VideoRenderTool
 from app.tools.presentation.builder import PresentationBuildTool
 from app.tools.presentation.render import PresentationRenderTool
 from app.tools.presentation.validation import SlidePlanValidationTool
 from app.tools.rag.retrieve import ConceptMapTool, RetrievalTool
 from app.tools.registry import ToolRegistry
+from app.tools.video.service import VideoService
+from app.tools.video.tools import VideoArtifactTool, VideoComposeTool, VideoValidateTool
+from app.tools.video.validation import VideoPlanValidationTool
 from app.tools.research.cache import InMemoryResearchCache
 from app.tools.research.rank import RankSourcesTool
 from app.tools.visual.assets import ImageAssetTool
@@ -85,6 +90,7 @@ from app.tools.visual.search import ImageFetchTool, ImageSearchTool
 from app.tools.visual.selection import ImageSelectionTool
 from app.tools.visual.validation import ImageValidationTool
 from app.tools.web.search import SearchTool
+from app.utils.workspace import ScratchSpace
 
 PRESENTATION_RENDERER_FACTORIES = {
     "pptx": lambda artifacts: PptxPresentationRenderer(media=artifacts.read_object),
@@ -93,6 +99,19 @@ PRESENTATION_RENDERER_FACTORIES = {
 
 TTS_PROVIDER_FACTORIES = {
     "mock": lambda settings: MockTTSProvider(),
+}
+
+def _ffmpeg(settings: Settings) -> FFmpegAdapter:
+    return FFmpegAdapter(ffmpeg=settings.ffmpeg_path, ffprobe=settings.ffprobe_path,
+                         timeout_seconds=settings.video_timeout_seconds)
+
+
+VIDEO_COMPOSER_FACTORIES = {  # (composer, prober): a composer is always validated by the prober that can read it
+    "ffmpeg": lambda settings, artifacts: (
+        FFmpegVideoComposer(media=artifacts.read_object, adapter=_ffmpeg(settings),
+                            font_path=settings.video_font_path),
+        FFprobeVideoProber(_ffmpeg(settings))),
+    "mock": lambda settings, artifacts: (MockVideoComposer(media=artifacts.read_object), MockVideoProber()),
 }
 
 LLM_PROVIDER_FACTORIES = {
@@ -142,6 +161,8 @@ def build_container(
     image_generation_provider: ImageGenerationProvider | None = None,
     presentation_renderer: PresentationRenderer | None = None,
     tts_provider: TTSProvider | None = None,
+    video_composer: VideoComposer | None = None,
+    video_prober: VideoProber | None = None,
 ) -> Container:
     settings = settings or Settings()
     settings.validate_runtime()
@@ -166,6 +187,9 @@ def build_container(
     image_generation = image_generation_provider or MockImageGenerationProvider()
     renderer = presentation_renderer or PRESENTATION_RENDERER_FACTORIES[settings.presentation_renderer](artifacts)
     tts = tts_provider or TTS_PROVIDER_FACTORIES[settings.tts_provider](settings)
+    default_composer, default_prober = VIDEO_COMPOSER_FACTORIES[settings.video_composer](settings, artifacts)
+    video = VideoService(artifacts, video_composer or default_composer, video_prober or default_prober,
+                         ScratchSpace(settings.resolved_video_work_dir, keep_failed=settings.video_keep_failed_work))
     registry = ToolRegistry()
     for tool in (
         SearchTool(search_provider, cache=InMemoryResearchCache() if settings.research_cache else None),
@@ -193,7 +217,10 @@ def build_container(
         AudioAssetLookupTool(artifacts),
         AudioAssetTool(artifacts),
         PresentationTimelineTool(artifacts),
-        VideoRenderTool(MockVideoProvider(), artifacts),
+        VideoPlanValidationTool(),
+        VideoComposeTool(video),
+        VideoValidateTool(video),
+        VideoArtifactTool(video),
     ):
         registry.register(tool)
     tools = ToolManager(registry)
@@ -201,7 +228,7 @@ def build_container(
     agents = AgentRegistry()
     for agent in (RequestInterpreterAgent(), KnowledgeDiagnosticAgent(), ResearchAgent(),
                   CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), VisualAgent(),
-                  SlidePlannerAgent(), AudioPlannerAgent(), LearnerEvaluationAgent()):
+                  SlidePlannerAgent(), AudioPlannerAgent(), VideoAgent(), LearnerEvaluationAgent()):
         agents.register(agent)
     for agent_id in routing.agent_tiers:
         agents.get(agent_id)  # overrides must name real agents
@@ -228,6 +255,8 @@ def build_container(
         audio_sample_rate=settings.audio_sample_rate,
         audio_max_words_per_segment=settings.audio_max_words_per_segment,
         audio_silent_slide_seconds=settings.audio_silent_slide_seconds,
+        video_failure_policy=settings.video_failure_policy,
+        video_config=settings.video_config(),
     )
     planner = WorkflowPlanner([lesson_template(options), evaluation_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,

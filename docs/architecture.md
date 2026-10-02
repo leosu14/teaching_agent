@@ -11,10 +11,11 @@ runtime      orchestrator (task lifecycle), workflow engine + node types, task s
 agents       decide WHAT to do; reach models only via ModelRouter and tools only via ToolManager
 tools        do the HOW (search, retrieval, dedup + ranking, research cache, image search / fetch / generation /
              selection / validation / assets, slide plan validation, presentation build and render, TTS, audio
-             plan and audio validation, audio assets, presentation timeline, learner memory, artifacts, media);
+             plan and audio validation, audio assets, presentation timeline, video plan validation, video
+             composition / validation / artifact (VideoService), learner memory, artifacts);
              no educational strategy
 providers    replaceable adapters: LLM, search, retrieval, ranking, image generation, image search, presentation
-             renderer (python-pptx), TTS, video (mock/local in this release)
+             renderer (python-pptx), TTS, video composer + prober (FFmpeg adapter, mock)
 learner      level frameworks, mastery rules, LearnerMemoryService (long-term memory)
 artifacts    ArtifactService: versioning, content-hash dedup, dependency graph, content-addressed media objects
 storage      SQLAlchemy/SQLite metadata repositories + filesystem object store (no business rules)
@@ -22,7 +23,8 @@ schemas / config / observability / utils   shared foundation
 ```
 
 Extra rules enforced by the lint test: only `storage` imports SQLAlchemy; vendor SDKs (python-pptx included) only in
-`providers`; audio libraries (`wave`, pydub, ffmpeg, ...) only in `providers` and `utils`;
+`providers`; audio libraries (`wave`, pydub, ffmpeg, ...) only in `providers` and `utils`; `subprocess`, Pillow and
+video libraries only in `providers` (FFmpeg runs only through `app/providers/video/ffmpeg.py`);
 agents may import only `providers.llm.base`/`router` from providers; the API imports only services, schemas
 and a few exception types.
 
@@ -57,13 +59,16 @@ all that is needed.
   (`teach_review` → `visual_gate` → `visual` → `visual_policy`), then the lesson artifacts are stored and the
   presentation is made (`presentation_gate` → `slide_plan` → `validate_slide_plan` → `store_slide_plan` →
   `build_presentation` → `render_presentation`), then narrated (`audio_plan` → `validate_audio_plan` →
-  `store_audio_plan` → `synthesize_audio` → `audio_policy` → `audio_timeline`) before `update_learner`. It stores `research_bundle` first,
+  `store_audio_plan` → `synthesize_audio` → `audio_policy` → `audio_timeline`) and turned into a video (`video_plan`
+  → `validate_video_plan` → `store_video_plan` → `compose_video`) before `update_learner`. It stores `research_bundle` first,
   then `visual_plan` (parent: research_bundle) and one `image_<visual_id>` IMAGE_ASSET per visual (parent:
   visual_plan), then `lesson_plan` (parent: research_bundle), `lesson` (parents: lesson_plan, research_bundle and
   its image assets), `narration_script` and `review_report`, then `slide_plan` (parent: lesson) and `presentation`
   (parents: slide_plan, lesson and the image assets it places), then `audio_plan` (parents: presentation,
   slide_plan, lesson), one `audio_<segment_id>` AUDIO_ASSET per voiced segment (parent: audio_plan) and
-  `presentation_timeline` (parents: presentation, audio_plan and the audio assets).
+  `presentation_timeline` (parents: presentation, audio_plan and the audio assets), then `video_plan` (parents:
+  presentation_timeline, presentation and the image assets it shows), `subtitles` (WebVTT, parent: video_plan) and
+  `video` (the MP4; parents: video_plan, presentation_timeline, presentation).
 - `lesson_evaluation`: started for a completed lesson task (`TaskService.start_evaluation`), with the lesson
   task id in `plan.inputs`. It reads the lesson and lesson plan artifacts (`artifact.read`), takes a learner
   snapshot, asks `LearnerEvaluationAgent` for an assessment sized by objectives, taught concepts, level and
@@ -264,6 +269,57 @@ A rejected lesson, a lesson accepted with warnings, or a failed presentation get
 the last completed audio node; a narration interrupted mid-plan reuses the assets already stored. Events:
 `audio_planning.started`, `audio_plan.created`, `audio_plan.validated`, `tts.started`, `tts.completed`,
 `audio.validation_failed`, `audio.asset_created`, `timeline.created`, `audio.completed`, `audio.failed`.
+
+## Video
+
+```
+Presentation + PresentationTimeline + IMAGE_ASSETs + AUDIO_ASSETs → VideoAgent → VideoPlan → VideoPlanValidator
+→ VideoNode: video.compose → VideoService → VideoComposer (FFmpegVideoComposer → FFmpegAdapter) → MP4 object
+→ video.validate (VideoValidator + VideoProber/ffprobe) → video.create_artifact → VIDEO
+```
+
+- `VideoConfig` (`app/schemas/video.py`) holds every output default in one place: 1920x1080, 30 fps, H.264, AAC,
+  MP4, yuv420p, background colour, cut transitions (or fade), ±0.1 s duration tolerance and the subtitle style
+  (size and margin as fractions of the frame height, 42 characters x 2 lines, white on a translucent box).
+  `TA_VIDEO_*` settings override single fields; 1280x720 or any even resolution and any frame rate work.
+- `VideoPlan`: plan id (derived from the timeline checksum, every image and audio checksum and the configuration),
+  presentation and timeline refs, resolution, fps, duration, one `VideoSegment` per slide (times from the timeline,
+  `VisualRef` = the slide's IMAGE_ASSET on a slide card, or the slide card alone, its `AudioTrack` refs, subtitle
+  refs and the incoming `Transition`), the `AudioTrack`s, the `SubtitleTrack` and the `TransitionPoint`s. Assets are
+  referenced by artifact id, object URI and checksum. Nothing in the plan is FFmpeg-specific.
+- `VideoAgent` (`video`, `app/agents/video/`) is deterministic (no model call) and makes only the semantic decisions:
+  visuals, narration placement, subtitle cues (the AUDIO_ASSET narration text, split into cues timed in proportion
+  to their length; no speech-to-text) and transitions. It validates its plan through `video_plan.validate`.
+- `VideoPlanValidator` (`app/tools/video/validation.py`): unique ordered contiguous segments for known slides,
+  durations (at least one frame), segment and audio times equal to the timeline, total duration, image and audio
+  refs matching the given assets (and their checksums), audio inside its segment and not overlapping (unless
+  `allow_audio_overlap`), subtitle timing, transitions and configuration. The `validate_video_plan` gate stops an
+  invalid plan before any composition.
+- `VideoService` (`app/tools/video/service.py`) drives the composer and prober against the object store: the
+  composer writes into a `ScratchSpace` directory (`app/utils/workspace.py`; removed on success, kept under
+  `work/failed/` on failure with the FFmpeg arguments and log), the MP4 is streamed into the content-addressed
+  object store (`put_object_file`; never loaded whole, never in SQLite), validation measures a streamed scratch
+  copy. A composition key (plan id + configuration + composer version) finds an equivalent VIDEO artifact to reuse.
+- `FFmpegVideoComposer` (`app/providers/video/ffmpeg.py`): slide frames (card, image, burned-in subtitle) are drawn
+  with Pillow (`frames.py`); each segment is split where its subtitle changes, every still is held for a whole
+  number of frames on the global timeline (so the video has exactly round(duration x fps) frames), stills are
+  concatenated per slide, faded through the background where the plan says so, and concatenated again. Narration
+  is placed with `adelay` at its timeline position over a silent bed of the exact timeline length and mixed without
+  normalisation, so silence (pauses, silent slides) is preserved. `FFmpegAdapter` runs typed argument lists without
+  a shell, with `file:` paths inside the workspace only, a timeout, and no lesson text in any filter graph.
+- `VideoValidator` with `FFprobeVideoProber`: `ftyp` magic plus the parser's container, checksum, non-zero duration
+  within tolerance of the timeline, resolution, frame rate, codecs, an audio stream, narration audible in every
+  narrated window and silence on silent slides (decoded PCM), and sampled frames (one per segment) that are not
+  flat and change between slides.
+- Failure policy (`VideoNode`, `app/runtime/workflows/video.py`): `TA_VIDEO_FAILURE_POLICY=fail` (default, video is
+  required) fails the task with a persisted error and no VIDEO artifact, keeping every earlier artifact;
+  `continue` completes with a warning and no VIDEO artifact. Progress is checkpointed after composition and after
+  validation, so a resumed task does not compose again.
+
+Video only follows a timeline (so an approved, rendered, narrated presentation). Events: `video_planning.started`,
+`video_plan.created`, `video_plan.validated`, `video_composition.started`, `video_composition.completed`,
+`video.validation_started`, `video.validation_completed`, `video.artifact_created`, `video.failed`. Usage is recorded
+as `video_compose:<composer>` with render seconds, CPU seconds, frames and output bytes, and no cost.
 
 ## Agents
 

@@ -29,6 +29,8 @@ SQL_PACKAGES = {"sqlalchemy"}
 VENDOR_SDKS = {"anthropic", "openai", "google", "requests", "httpx", "boto3", "elevenlabs", "minimax", "pptx", "azure"}
 # Audio processing libraries: only providers (and the stdlib-based probe in utils) may touch audio bytes.
 AUDIO_LIBS = {"wave", "pydub", "ffmpeg", "soundfile", "audioop", "pyaudio"}
+# Video and imaging infrastructure (FFmpeg runs through subprocess; frames are drawn with Pillow): providers only.
+VIDEO_LIBS = {"subprocess", "PIL", "imageio_ffmpeg", "moviepy", "cv2", "av"}
 API_EXCEPTION_MODULES = {  # the API may import exception types from lower layers, nothing else
     "app.runtime.orchestrator.orchestrator": {"InvalidInput"},
     "app.runtime.tasks.state_machine": {"InvalidTransition"},
@@ -72,6 +74,8 @@ def violations_for(layer: str, module: str, names: list[str], where: str) -> lis
             problems.append(f"{where}: vendor SDK '{root}' outside the providers layer")
         if root in AUDIO_LIBS and layer not in {"providers", "utils"}:
             problems.append(f"{where}: audio library '{root}' outside providers and utils")
+        if root in VIDEO_LIBS and layer != "providers":
+            problems.append(f"{where}: video/process library '{root}' outside the providers layer")
         if root == "fastapi" and layer != "api":
             problems.append(f"{where}: fastapi outside the api layer")
     return problems
@@ -109,5 +113,9 @@ def test_checker_flags_upward_imports() -> None:
     assert violations_for("tools", "ffmpeg", [], "x") and violations_for("runtime", "elevenlabs", [], "x")
     assert violations_for("agents", "app.providers.tts.mock", [], "x")
     assert not violations_for("providers", "wave", [], "x") and not violations_for("utils", "wave", [], "x")
+    assert violations_for("agents", "subprocess", [], "x") and violations_for("tools", "PIL.Image", [], "x")
+    assert violations_for("runtime", "subprocess", [], "x") and violations_for("utils", "subprocess", [], "x")
+    assert violations_for("agents", "app.providers.video.ffmpeg", [], "x")
+    assert not violations_for("providers", "subprocess", [], "x") and not violations_for("providers", "PIL", [], "x")
     assert not violations_for("agents", "app.providers.llm.router", [], "x")
     assert not violations_for("services", "app.storage.repositories", [], "x")

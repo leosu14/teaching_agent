@@ -2,9 +2,11 @@
 
 An agentic, personalised education platform. It assesses what a learner knows, researches the topic
 with traceable sources, plans a lesson for that learner, writes and reviews the lesson, turns it into a
-PowerPoint presentation, narrates it with a timeline per slide, stores versioned artifacts, and updates long-term learner memory, so the next lesson adapts.
+PowerPoint presentation, narrates it with a timeline per slide, composes it into an MP4 video with subtitles,
+stores versioned artifacts, and updates long-term learner memory, so the next lesson adapts.
 
-This release is the **text-lesson vertical slice** with research, visuals, a presentation and its narration, fully deterministic on mock providers:
+This release is the **text-lesson vertical slice** with research, visuals, a presentation, its narration and the
+lesson video, fully deterministic on mock providers (the video is composed locally with FFmpeg):
 
 ```
 Request → Task → Request Interpreter → Learner Snapshot → Diagnostic (adaptive, can WAIT for answers)
@@ -12,6 +14,7 @@ Request → Task → Request Interpreter → Learner Snapshot → Diagnostic (ad
 → Visual (approved lessons only: visual plan → image search / generation → selection → validation → IMAGE_ASSET) → Artifact Storage
 → Slide Planning → SlideDeckPlan validation → Presentation Build → Presentation Render (approved lessons only: PPTX → PRESENTATION)
 → Audio Planning → AudioPlan validation → TTS → audio validation → AUDIO_ASSET → PresentationTimeline (rendered presentations only)
+→ Video Planning → VideoPlan validation → Video Composition (FFmpeg) → MP4 validation (ffprobe) → VIDEO
 → Learner Memory → COMPLETED
 ```
 
@@ -25,13 +28,14 @@ Completed lesson → Learner Evaluation (assessment) → WAITING for answers →
 ## Run it
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"                # plus ffmpeg + ffprobe on PATH (apt-get install ffmpeg / brew install ffmpeg)
 python scripts/run_demo.py          # one command that proves the slice works
 python scripts/run_evaluation_demo.py  # lesson, then its evaluation, mastery before/after, recommendation
 python scripts/run_research_demo.py    # the lesson's research: queries, results, sources, evidence, citations
 python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, selection, generation, validation, assets
 python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validation, build, real .pptx with the images
 python scripts/run_audio_demo.py --out-dir narration/      # audio plan, mock TTS, real WAV assets, slide timings
+python scripts/run_video_demo.py --out-dir video/          # video plan, FFmpeg composition, a real playable MP4
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
 uvicorn app.api.main:app --reload   # the same services over HTTP
 ```
@@ -52,6 +56,11 @@ validation, the built presentation with its numbered references, the render even
 `run_audio_demo.py` runs the lesson and shows its narration: the AudioPlan segment by segment, its validation, each
 mock TTS call, the audio validation, the AUDIO_ASSET artifacts (each WAV opened with Python's `wave` module), the
 PresentationTimeline with every slide's start and end time, the total audio duration and the artifact references.
+`run_video_demo.py` runs the lesson through the video stages and shows the PRESENTATION, IMAGE_ASSET and AUDIO_ASSET
+artifacts and the PresentationTimeline it starts from, the VideoPlan slide by slide (visual, narration or silence,
+subtitles), its validation, the FFmpeg composition, the MP4 validation and the VIDEO artifact, then re-reads the MP4
+from the object store and prints its duration (against the timeline), resolution, frame rate, audio stream,
+subtitle status and checksum. `--width 1280 --height 720` and `--transition fade` change the output.
 
 ## API
 

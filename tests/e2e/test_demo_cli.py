@@ -88,3 +88,30 @@ def test_audio_demo_script_writes_real_wav_files_and_a_timeline(tmp_path) -> Non
     timeline = json.loads((out_dir / "presentation_timeline.json").read_text(encoding="utf-8"))
     assert timeline["slides"][0]["start_time"] == 0.0 and timeline["duration"] > 0
     assert len(timeline["segments"]) == len(wavs)
+
+
+def test_video_demo_script_writes_a_real_playable_mp4(tmp_path) -> None:
+    """Lesson -> Presentation -> Visual assets -> Audio assets -> PresentationTimeline -> VideoPlan -> MP4 -> VIDEO
+    artifact, with the real FFmpeg composer (at 640x360 to keep the suite quick; the demo defaults to 1080p)."""
+    out_dir = tmp_path / "video"
+    proc = subprocess.run([sys.executable, "scripts/run_video_demo.py", "--data-dir", str(tmp_path / "data"),
+                           "--out-dir", str(out_dir), "--width", "640", "--height", "360"],
+                          cwd=REPO_ROOT, capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    for expected in ("1. Approved lesson", "2. PRESENTATION artifact", "3. IMAGE_ASSET artifacts",
+                     "4. AUDIO_ASSET artifacts", "5. PresentationTimeline", "6. VideoPlan", "7. VideoPlan validation",
+                     "8. Composition", "9. MP4 validation", "10. VIDEO artifact", "11. Result",
+                     "valid=True by video-plan-validator/1", "valid=True by video-validator/1+ffprobe/1",
+                     "composer=ffmpeg-composer/1", "resolution:    640x360", "fps:           30",
+                     "audio stream:  aac 48000 Hz, 2 channels", "cues burned in (yes)", "(matches artifact: True)",
+                     "audio: silence"):
+        assert expected in out, expected
+    data = json.loads(subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format",
+                                      "-show_streams", str(out_dir / "lesson.mp4")],
+                                     capture_output=True, text=True, check=True).stdout)
+    timeline = json.loads(next((tmp_path / "data" / "objects").rglob("presentation_timeline/v1.json")).read_text())
+    assert abs(float(data["format"]["duration"]) - timeline["duration"]) <= 0.1
+    assert {s["codec_type"] for s in data["streams"]} == {"video", "audio"}
+    assert (out_dir / "lesson.vtt").read_text(encoding="utf-8").startswith("WEBVTT")
+    assert any((tmp_path / "data" / "objects").rglob("*.mp4"))

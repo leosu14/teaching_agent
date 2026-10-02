@@ -1,6 +1,6 @@
 """Artifact service: versioning, content-hash deduplication and the artifact dependency graph.
 
-Media objects (images, audio, presentations) are content-addressed: `put_object` stores identical bytes once, and any number of
+Media objects (images, audio, presentations, video) are content-addressed: `put_object` stores identical bytes once, and any number of
 artifacts can point at the same object.
 """
 
@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
-from typing import Protocol
+from pathlib import Path
+from typing import BinaryIO, Protocol
 
 from app.observability.scope import ExecutionScope
 from app.schemas.artifact import Artifact, ArtifactDraft, ArtifactType, StoredArtifacts, StoredObject
@@ -29,7 +30,10 @@ EXTENSIONS = {
     "image/gif": ".gif",
     "image/webp": ".webp",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "video/mp4": ".mp4",
+    "text/vtt": ".vtt",
 }
+CHUNK = 1 << 20
 
 
 class ArtifactRepository(Protocol):
@@ -47,7 +51,11 @@ class ObjectStore(Protocol):
 
     def put_if_absent(self, key: str, data: bytes) -> tuple[str, bool]: ...
 
+    def put_file_if_absent(self, key: str, source: Path) -> tuple[str, bool]: ...
+
     def get(self, uri: str) -> bytes: ...
+
+    def open(self, uri: str) -> BinaryIO: ...
 
 
 class ArtifactGraphError(ValueError):
@@ -93,8 +101,32 @@ class ArtifactService:
         return StoredObject(uri=uri, checksum=digest, media_type=media_type, size_bytes=len(content),
                             reused=not created, key=key)
 
+    def put_object_file(self, path: Path, media_type: str) -> StoredObject:
+        """`put_object` for a file on disk: hashed and copied in chunks, never read into memory whole."""
+        digest = file_sha256(path)
+        key = f"objects/sha256/{digest[:2]}/{digest}{_extension(media_type)}"
+        uri, created = self._store.put_file_if_absent(key, path)
+        return StoredObject(uri=uri, checksum=digest, media_type=media_type, size_bytes=path.stat().st_size,
+                            reused=not created, key=key)
+
     def read_object(self, uri: str) -> bytes:
         return self._store.get(uri)
+
+    def copy_object_to(self, uri: str, target: Path) -> str:
+        """Stream an object into a local file (a scratch copy for tools that need a path). Returns its sha256."""
+        sha = hashlib.sha256()
+        with self._store.open(uri) as src, target.open("wb") as dst:
+            while chunk := src.read(CHUNK):
+                sha.update(chunk)
+                dst.write(chunk)
+        return sha.hexdigest()
+
+    def object_checksum(self, uri: str) -> str:
+        sha = hashlib.sha256()
+        with self._store.open(uri) as src:
+            while chunk := src.read(CHUNK):
+                sha.update(chunk)
+        return sha.hexdigest()
 
     def store_object(
         self,
@@ -193,6 +225,14 @@ class ArtifactService:
             seen[pid] = self._repo.get(pid)
             frontier.extend(seen[pid].parent_ids)
         return list(seen.values())
+
+
+def file_sha256(path: Path) -> str:
+    sha = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(CHUNK):
+            sha.update(chunk)
+    return sha.hexdigest()
 
 
 def _extension(media_type: str) -> str:
