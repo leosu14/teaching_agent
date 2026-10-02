@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from app.artifacts.service import ArtifactService
 from app.observability.scope import ExecutionScope
-from app.providers.tts.base import ProviderSpeechRequest, TTSProvider, TTSProviderError
+from app.providers.core.errors import ProviderError
+from app.providers.tts.base import ProviderSpeechRequest, TTSProvider
 from app.schemas.audio import TTSRequest, TTSResult, VoiceCatalog, VoiceQuery, voices_for
 from app.schemas.common import RetryPolicy
 from app.tools.base import Tool, ToolError, ToolTransientError
@@ -22,7 +23,7 @@ class VoiceCatalogTool(Tool[VoiceQuery, VoiceCatalog]):
     async def run(self, data: VoiceQuery, scope: ExecutionScope) -> VoiceCatalog:
         try:
             voices = await self._provider.voices()
-        except (TTSProviderError, ConnectionError, OSError) as exc:
+        except (ProviderError, ConnectionError, OSError) as exc:
             raise ToolTransientError(f"TTS provider '{self._provider.name}' voice list failed: {exc}") from exc
         return VoiceCatalog(provider=self._provider.name,
                             voices=voices_for(data.language, voices) if data.language else voices)
@@ -60,20 +61,21 @@ class TTSTool(Tool[TTSRequest, TTSResult]):
         )
         try:
             speech = await p.synthesize(request)
-        except (TTSProviderError, ConnectionError, OSError) as exc:
+        except (ProviderError, ConnectionError, OSError) as exc:
             transient = getattr(exc, "transient", True)
             raise (ToolTransientError if transient else ToolError)(f"TTS provider '{p.name}' failed: {exc}") from exc
         if not speech.content:
             raise ToolError(f"TTS provider '{p.name}' returned no audio")
         obj = self._artifacts.put_object(speech.content, speech.media_type)
+        provider = speech.provider or p.name  # the provider that produced it, after any configured fallback
         usage = speech.usage
         units = {"requests": usage.requests, "characters": usage.characters}
         units |= {k: v for k, v in (("tokens", usage.tokens), ("seconds", usage.seconds)) if v is not None}
-        scope.usage.record_service(service=f"tts:{p.name}", results=1, cost_usd=usage.cost_usd,
+        scope.usage.record_service(service=f"tts:{provider}", results=1, cost_usd=usage.cost_usd,
                                    estimated_cost_usd=usage.estimated_cost_usd, units=units)
         return TTSResult(
             audio=obj, duration=speech.duration, sample_rate=speech.sample_rate, channels=speech.channels,
-            format=speech.format, media_type=speech.media_type, provider=p.name, model=speech.model,
+            format=speech.format, media_type=speech.media_type, provider=provider, model=speech.model,
             voice=data.voice, language=data.language, input_hash=data.fingerprint(),
             provider_metadata=speech.metadata, usage=usage, ignored_parameters=ignored,
         )

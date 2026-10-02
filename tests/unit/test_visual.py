@@ -12,9 +12,10 @@ from pydantic import ValidationError
 
 from app.artifacts.service import ArtifactService
 from app.config.settings import REPO_ROOT
+from app.providers.core.errors import ProviderError
 from app.providers.image.base import GeneratedImage, ImageGenerationProvider, ProviderImageRequest
 from app.providers.image.mock import MockImageGenerationProvider
-from app.providers.image_search.base import ImageSearchProviderError, ProviderImageSearchRequest
+from app.providers.image_search.base import ProviderImageSearchRequest
 from app.providers.image_search.mock import MockImageSearchProvider
 from app.schemas.artifact import Artifact, ArtifactType
 from app.schemas.visual import (
@@ -170,7 +171,7 @@ async def test_mock_image_search_provider_is_deterministic_and_offline() -> None
     # This catalogue entry advertises 1600x900 but serves 1200x900, like a provider with wrong metadata.
     assert hit.provider_image_id == "commons-fans-opinions" and hit.metadata["mock_actual_size"] == [1200, 900]
     assert (probe_image(image.content).width, probe_image(image.content).height) == (1200, 900)
-    with pytest.raises(ImageSearchProviderError):
+    with pytest.raises(ProviderError):
         await provider.download("missing", "https://images.example.org/none.png")
 
 
@@ -221,7 +222,7 @@ async def test_image_search_tool_maps_provider_failures(tmp_path) -> None:
 
         async def search(self, request):
             calls.append(request)
-            raise ImageSearchProviderError("rate limited", transient=self.transient)
+            raise ProviderError("rate limited", transient=self.transient)
 
     for transient, error, attempts in ((True, ToolTransientError, 3), (False, ToolError, 1)):
         calls.clear()

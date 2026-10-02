@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 
 from app.observability.events import EventBus
@@ -43,3 +46,21 @@ class ExecutionScope:
         return self.events.emit(
             type, task_id=self.task_id, node_id=self.node_id, agent_id=self.agent_id, tool=tool, **data
         )
+
+
+# The scope of the work running in the current asyncio task. Tools and the model router set it, so code below them
+# (provider calls) can attribute its events to the right task, node and agent without a scope parameter.
+_current_scope: ContextVar[ExecutionScope | None] = ContextVar("current_scope", default=None)
+
+
+def current_scope() -> ExecutionScope | None:
+    return _current_scope.get()
+
+
+@contextmanager
+def active_scope(scope: ExecutionScope) -> Iterator[ExecutionScope]:
+    token = _current_scope.set(scope)
+    try:
+        yield scope
+    finally:
+        _current_scope.reset(token)

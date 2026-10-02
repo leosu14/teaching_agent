@@ -1,4 +1,6 @@
-"""ModelRouter: the only path from agents to LLM providers. Handles tiers, fallback, timeouts and cost."""
+"""ModelRouter: the only path from agents to LLM providers. Handles tiers and per-agent routes, explicit fallback
+chains, timeouts and cost. Providers are normally ManagedLLMProviders, so every call also gets the provider layer's
+request id, retry, rate limit, events and usage record."""
 
 from __future__ import annotations
 
@@ -6,8 +8,9 @@ import asyncio
 import time
 
 from app.config.routing import RoutingConfig, RoutingTarget
-from app.observability.scope import ExecutionScope
-from app.providers.llm.base import LLMMessage, LLMProvider, LLMRequest, LLMResponse, ProviderError
+from app.observability.scope import ExecutionScope, active_scope
+from app.providers.core.errors import ProviderError
+from app.providers.llm.base import LLMMessage, LLMProvider, LLMRequest, LLMResponse
 from app.schemas.common import ModelTier, TokenUsage
 from app.schemas.events import EventType
 
@@ -29,25 +32,24 @@ class ModelRouter:
     def tier_for(self, agent_id: str, default: ModelTier) -> ModelTier:
         return self._config.agent_tiers.get(agent_id, default)
 
-    def targets(self, tier: ModelTier) -> list[RoutingTarget]:
-        return list(self._config.tiers[tier])
+    @property
+    def config(self) -> RoutingConfig:
+        return self._config
+
+    def targets(self, tier: ModelTier, agent_id: str | None = None) -> list[RoutingTarget]:
+        return self._config.targets_for(agent_id, tier)
 
     def max_output_tokens(self, tier: ModelTier, requested: int) -> int:
         cap = self._config.max_output_tokens.get(tier)
         return min(requested, cap) if cap else requested
 
-    def cost(self, model: str, usage: TokenUsage) -> float:
-        price = self._config.pricing[model]
-        uncached = usage.input_tokens - usage.cached_input_tokens
-        return (
-            uncached * price.input_per_mtok
-            + usage.cached_input_tokens * price.cached_input_per_mtok
-            + usage.output_tokens * price.output_per_mtok
-        ) / 1_000_000
+    def cost(self, model: str, usage: TokenUsage) -> float | None:
+        """Cost in USD from configured pricing; None for a model configured without a price (unknown, not zero)."""
+        return self._config.cost(model, usage)
 
     def estimate(self, tier: ModelTier, input_tokens: int, output_tokens: int) -> float:
         model = self._config.tiers[tier][0].model
-        return self.cost(model, TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens))
+        return self.cost(model, TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)) or 0.0
 
     async def complete(
         self,
@@ -64,22 +66,32 @@ class ModelRouter:
         attempt: int = 1,
     ) -> LLMResponse:
         failures: list[str] = []
-        for target in self.targets(tier):
+        targets = self.targets(tier, agent_id)
+        for index, target in enumerate(targets):
+            if index:
+                previous = targets[index - 1]
+                scope.emit(EventType.PROVIDER_FALLBACK, capability="llm", operation="generate",
+                           from_provider=previous.provider, from_model=previous.model, to_provider=target.provider,
+                           to_model=target.model, error=failures[-1][:500])
             request = LLMRequest(
                 model=target.model,
                 system=system,
                 messages=messages,
                 response_schema=response_schema,
                 max_output_tokens=self.max_output_tokens(tier, max_output_tokens),
+                temperature=self._config.temperature,
                 agent_id=agent_id,
                 attempt=attempt,
                 input_payload=input_payload,
             )
+            provider = self._providers[target.provider]
+            # The agent's LLM timeout bounds the call, unless the provider's own policy (per-attempt timeout times
+            # bounded retries) needs longer: then the provider layer's timeouts are the bound.
+            deadline = max(timeout_seconds, getattr(provider, "deadline_seconds", 0.0))
             started = time.perf_counter()
             try:
-                response = await asyncio.wait_for(
-                    self._providers[target.provider].generate(request), timeout_seconds
-                )
+                with active_scope(scope):
+                    response = await asyncio.wait_for(provider.generate(request), deadline)
             except (ProviderError, TimeoutError) as exc:
                 if isinstance(exc, ProviderError) and not exc.transient:
                     raise
@@ -87,7 +99,7 @@ class ModelRouter:
                 scope.emit(EventType.LLM_FAILED, provider=target.provider, model=target.model, error=repr(exc))
                 continue
             cost = self.cost(target.model, response.usage)
-            scope.usage.record(agent_id=agent_id, model=target.model, usage=response.usage, cost_usd=cost)
+            scope.usage.record(agent_id=agent_id, model=target.model, usage=response.usage, cost_usd=cost or 0.0)
             scope.emit(
                 EventType.LLM_CALL,
                 provider=target.provider,

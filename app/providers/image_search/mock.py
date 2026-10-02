@@ -12,12 +12,12 @@ import json
 import re
 from pathlib import Path
 
+from app.providers.core.errors import ProviderError
 from app.providers.image_search.base import (
     DownloadedImage,
     ImageHit,
     ImageSearchPage,
     ImageSearchProvider,
-    ImageSearchProviderError,
     ProviderImageSearchRequest,
 )
 from app.schemas.visual import ImageUsage
@@ -57,7 +57,7 @@ class MockImageSearchProvider(ImageSearchProvider):
     async def download(self, provider_image_id: str, url: str) -> DownloadedImage:
         entry = self._by_id.get(provider_image_id)
         if entry is None or entry["url"] != url:
-            raise ImageSearchProviderError(f"no image {provider_image_id} at {url}", transient=False)
+            raise ProviderError(f"no image {provider_image_id} at {url}", transient=False)
         width, height = entry.get("mock_actual_size") or (entry["width"], entry["height"])
         digest = hashlib.sha256(f"{self.name}:{provider_image_id}".encode()).digest()
         return DownloadedImage(content=encode_png(width, height, colors_from(digest, 3)), media_type="image/png")

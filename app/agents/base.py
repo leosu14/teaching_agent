@@ -1,8 +1,9 @@
 """Agent runtime contract.
 
 An agent decides WHAT to do: it gathers context through tools (ToolManager) and asks a model
-(ModelRouter) for a structured result, which is always parsed and schema-validated. A result that
-fails validation is sent back to the model with the error, up to `validation_retries` times.
+(through StructuredLLM and the ModelRouter) for a structured result, which is always parsed and
+schema-validated. A result that fails validation is sent back to the model with the error, up to
+`validation_retries` times. Agents never see a provider or vendor: only the router and StructuredLLM.
 """
 
 from __future__ import annotations
@@ -10,18 +11,17 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import re
 import time
 from abc import ABC
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Generic, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from app.observability.scope import ExecutionScope
-from app.providers.llm.base import LLMMessage
 from app.providers.llm.router import AllProvidersFailed, ModelRouter
+from app.providers.llm.structured import StructuredLLM, StructuredOutputError
 from app.schemas.catalog import AgentInfo
 from app.schemas.common import ModelTier, RetryPolicy
 from app.schemas.events import EventType
@@ -31,8 +31,6 @@ from app.utils.retry import retry_async
 
 I = TypeVar("I", bound=BaseModel)
 O = TypeVar("O", bound=BaseModel)
-
-JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 
 class AgentError(Exception):
@@ -71,11 +69,6 @@ class AgentContext:
     router: ModelRouter
     tools: ToolManager
     scope: ExecutionScope
-
-
-def extract_json(text: str) -> str:
-    match = JSON_BLOCK.search(text)
-    return (match.group(1) if match else text).strip()
 
 
 class Agent(ABC, Generic[I, O]):
@@ -139,34 +132,16 @@ class Agent(ABC, Generic[I, O]):
         output from several steps can ask for an intermediate schema instead."""
         output_model = output_model or self.spec.output_model
         body = payload.model_dump(mode="json")
-        schema = output_model.model_json_schema()
-        messages = [LLMMessage(role="user", content=self._render(body, schema))]
-        tier = ctx.router.tier_for(self.spec.id, self.spec.tier)
-        last_error = ""
-        for attempt in range(1, self.spec.validation_retries + 2):
-            response = await ctx.router.complete(
-                tier=tier, agent_id=self.spec.id, system=self.system_prompt, messages=messages,
-                response_schema=schema, max_output_tokens=self.spec.max_output_tokens, input_payload=body,
-                scope=ctx.scope, timeout_seconds=self.spec.llm_timeout_seconds, attempt=attempt,
+        try:
+            return await StructuredLLM(ctx.router).generate(
+                output_model, agent_id=self.spec.id, tier=ctx.router.tier_for(self.spec.id, self.spec.tier),
+                system=self.system_prompt, prompt=self._render(body, output_model.model_json_schema()),
+                input_payload=body, scope=ctx.scope, max_output_tokens=self.spec.max_output_tokens,
+                timeout_seconds=self.spec.llm_timeout_seconds, validation_retries=self.spec.validation_retries,
+                check=lambda output: self.check(output, source),
             )
-            try:
-                output = output_model.model_validate_json(extract_json(response.text))
-                self.check(output, source)
-                return output
-            except (ValidationError, OutputRejected, ValueError) as exc:
-                last_error = str(exc)
-                ctx.scope.emit(EventType.AGENT_VALIDATION_FAILED, attempt=attempt, error=last_error[:2000])
-                messages = [
-                    *messages,
-                    LLMMessage(role="assistant", content=response.text),
-                    LLMMessage(role="user", content=(
-                        "Your previous output failed validation:\n"
-                        f"{last_error}\nReturn only corrected JSON that matches the schema."
-                    )),
-                ]
-        raise AgentOutputError(
-            f"{self.spec.id}: no valid output after {self.spec.validation_retries + 1} attempts: {last_error[:500]}"
-        )
+        except StructuredOutputError as exc:
+            raise AgentOutputError(str(exc)) from exc
 
     def _render(self, body: dict, schema: dict) -> str:
         return (

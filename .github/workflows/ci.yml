@@ -16,7 +16,7 @@ jobs:
       - name: System packages (FFmpeg for video composition, DejaVu fonts for slide text and subtitles)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,providers]"
       - name: Lint
         run: ruff check app tests scripts --select F,E9
       - name: Tests (unit, integration, e2e, architecture lint)
@@ -35,3 +35,5 @@ jobs:
         run: python scripts/run_audio_demo.py
       - name: Video demo
         run: python scripts/run_video_demo.py
+      - name: Provider demo (offline, mock providers, no credentials)
+        run: python scripts/run_provider_demo.py --smoke

@@ -8,9 +8,9 @@ import json
 import pytest
 
 from app.config.settings import Settings
-from app.providers.image.base import ImageGenerationProviderError
+from app.providers.core.errors import ProviderError
 from app.providers.image.mock import MockImageGenerationProvider
-from app.providers.image_search.base import ImageSearchPage, ImageSearchProviderError
+from app.providers.image_search.base import ImageSearchPage
 from app.providers.image_search.mock import MockImageSearchProvider
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
@@ -42,7 +42,7 @@ class SearchWithout(MockImageSearchProvider):
     async def search(self, request):
         if self.word.lower() in request.query.lower():
             if self.fail:
-                raise ImageSearchProviderError("image search API unavailable", transient=False)
+                raise ProviderError("image search API unavailable", transient=False)
             return ImageSearchPage(hits=[], usage=ImageUsage(requests=1, results=0))
         return await super().search(request)
 
@@ -57,9 +57,9 @@ class GenerationFailing(MockImageGenerationProvider):
         self.calls += 1
         if self.transient_once:
             if self.calls == 1:
-                raise ImageGenerationProviderError("GPU busy", transient=True)
+                raise ProviderError("GPU busy", transient=True)
         elif request.prompt.startswith(self.prefix):
-            raise ImageGenerationProviderError("image generation API unavailable", transient=False)
+            raise ProviderError("image generation API unavailable", transient=False)
         return await super().generate(request)
 
 

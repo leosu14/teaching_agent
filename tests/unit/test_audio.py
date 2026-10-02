@@ -11,7 +11,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.artifacts.service import ArtifactService
-from app.providers.tts.base import ProviderSpeechRequest, SynthesizedSpeech, TTSProvider, TTSProviderError
+from app.providers.core.errors import ProviderError
+from app.providers.tts.base import ProviderSpeechRequest, SynthesizedSpeech, TTSProvider
 from app.providers.tts.mock import MockTTSProvider
 from app.schemas.artifact import ArtifactDraft, ArtifactType, StoredObject
 from app.schemas.audio import (
@@ -201,7 +202,7 @@ async def test_mock_provider_languages_and_errors() -> None:
         ({"format": "mp3"}, "not supported"),
         ({"sample_rate": 11025}, "sample rate"),
     ):
-        with pytest.raises(TTSProviderError, match=message) as err:
+        with pytest.raises(ProviderError, match=message) as err:
             await provider.synthesize(ProviderSpeechRequest(**{
                 "text": "Hola", "language": "es-ES", "voice_id": "mock-es-ES-1", "format": "wav", **request}))
         assert err.value.transient is False
@@ -269,12 +270,12 @@ async def test_tts_tool_reports_ignored_parameters_and_provider_usage(artifacts)
 
 async def test_tts_tool_maps_provider_errors(artifacts) -> None:
     sc, _ = scope("t1")
-    transient = PlainProvider(fail=TTSProviderError("rate limited"))
+    transient = PlainProvider(fail=ProviderError("rate limited"))
     with pytest.raises(ToolTransientError):
         await manager_for(artifacts, transient).call(CALLER, "tts.synthesize",
                                                      TTSRequest(text="Hi", language="en-US", voice="p1"), sc)
     assert len(transient.requests) == 2  # retried once
-    fatal = PlainProvider(fail=TTSProviderError("bad voice", transient=False))
+    fatal = PlainProvider(fail=ProviderError("bad voice", transient=False))
     with pytest.raises(ToolError, match="bad voice"):
         await manager_for(artifacts, fatal).call(CALLER, "tts.synthesize",
                                                  TTSRequest(text="Hi", language="en-US", voice="p1"), sc)

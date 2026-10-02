@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import wave
@@ -115,3 +116,17 @@ def test_video_demo_script_writes_a_real_playable_mp4(tmp_path) -> None:
     assert {s["codec_type"] for s in data["streams"]} == {"video", "audio"}
     assert (out_dir / "lesson.vtt").read_text(encoding="utf-8").startswith("WEBVTT")
     assert any((tmp_path / "data" / "objects").rglob("*.mp4"))
+
+
+def test_provider_demo_script_runs_offline_with_mocks() -> None:
+    proc = subprocess.run([sys.executable, "scripts/run_provider_demo.py", "--smoke"], cwd=REPO_ROOT,
+                          capture_output=True, text=True, timeout=120,
+                          env={k: v for k, v in os.environ.items() if not k.endswith("_API_KEY")})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    for expected in ("Registered providers and capabilities", "structured LLM output (LessonHook)",
+                     "provider.rate_limited", "provider.fallback", "-> mock", "request_id=preq_",
+                     "Bearer ***", "skipped: no real provider is configured",
+                     "mock provider demo: OK (offline, no network, no credentials)"):
+        assert expected in out, expected
+    assert "sk-" not in out

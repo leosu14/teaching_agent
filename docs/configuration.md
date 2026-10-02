@@ -9,11 +9,8 @@ They are validated when the container is built; errors say what to fix.
 | `TA_DATABASE_URL` | `sqlite:///$TA_DATA_DIR/teaching_agent.db` | Metadata database |
 | `TA_OBJECT_STORE_DIR` | `$TA_DATA_DIR/objects` | Artifact blobs |
 | `TA_ROUTING_FILE` | `config/routing.toml` | Model tiers, fallback chains, pricing, output limits |
-| `TA_LLM_PROVIDERS` | `["mock"]` | Enabled LLM providers (only `mock` has an adapter now) |
-| `TA_SEARCH_PROVIDER` / `TA_RETRIEVAL_PROVIDER` | `mock` / `local` | Web search and knowledge-base retrieval |
-| `TA_IMAGE_PROVIDER` / `TA_TTS_PROVIDER` | `mock` | Media providers (`TA_IMAGE_PROVIDER` is image generation) |
+| `TA_RETRIEVAL_PROVIDER` | `local` | Knowledge-base retrieval |
 | `TA_VIDEO_COMPOSER` | `ffmpeg` | `ffmpeg` composes a real MP4 (needs `ffmpeg` and `ffprobe`); `mock` writes a manifest-only file for tests |
-| `TA_IMAGE_SEARCH_PROVIDER` | `mock` | Image search |
 | `TA_CORPUS_DIR` | `fixtures/demo` | Corpus for the mock search, mock image search (`image_catalog.json`) and local knowledge base |
 | `TA_MAX_REVISIONS` | `2` | Revision budget of the review loop |
 | `TA_REVISION_EXHAUSTED_POLICY` | `fail` | `fail` or `accept_with_warnings` when the budget is used |
@@ -54,6 +51,47 @@ Defaults for the video format live only in `VideoConfig` (`app/schemas/video.py`
 the default. FFmpeg: `apt-get install ffmpeg` (Debian/Ubuntu; CI does this), `brew install ffmpeg` (macOS).
 | `TA_LOG_LEVEL` / `TA_LOG_JSON` | `INFO` / `true` | Structured logging |
 
+## Providers
+
+Provider settings have no `TA_` prefix (they use the standard vendor variable names). They are validated when the
+container is built: a missing key, an unknown provider, a fallback equal to its primary or a real provider in
+offline mode stops startup with one message listing every problem by variable name, never by value. The old
+`TA_LLM_PROVIDERS`, `TA_SEARCH_PROVIDER`, `TA_IMAGE_PROVIDER`, `TA_IMAGE_SEARCH_PROVIDER` and `TA_TTS_PROVIDER`
+are no longer read (they only ever accepted the mocks).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TEACHING_AGENT_OFFLINE` | `false` | `true`: only mock providers; any network provider is refused at startup and at request time |
+| `LLM_PROVIDER` / `LLM_MODEL` | routing file (mock) | `mock`, `openai` (any OpenAI-compatible endpoint) or `anthropic`, and the model for every tier |
+| `LLM_FALLBACK_PROVIDER` / `LLM_FALLBACK_MODEL` | none | Explicit fallback target, tried only after a transient failure (timeout, 429, 5xx, connection) |
+| `LLM_<ROLE>_PROVIDER` / `LLM_<ROLE>_MODEL` | none | Per-role route without touching the agent. `<ROLE>` is an agent id (`TEACHER`, `SLIDE_PLANNER`, ...) or an alias (`REVIEWER` = content_reviewer, `PLANNER` = curriculum_planner, `EVALUATOR`, ...); `DEFAULT` is `LLM_PROVIDER`/`LLM_MODEL` |
+| `LLM_TEMPERATURE` | provider default | Sent only when set |
+| `LLM_INPUT_PRICE_PER_MTOK` / `LLM_OUTPUT_PRICE_PER_MTOK` | none | USD per million tokens for the env-configured models; without them the cost is reported as unknown (`null`), never guessed |
+| `LLM_NATIVE_STRUCTURED_OUTPUT` | `true` | Use the vendor's JSON-schema mode when the schema fits it; output is validated either way |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_ORGANIZATION` | — / `https://api.openai.com/v1` / — | OpenAI or a compatible server (https required except on localhost) |
+| `OPENAI_MAX_TOKENS_PARAM` | `max_completion_tokens` | `max_tokens` for older OpenAI-compatible servers |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` | — / `https://api.anthropic.com` | Anthropic Messages API |
+| `TTS_PROVIDER` / `TTS_FALLBACK_PROVIDER` | `mock` / none | `mock` or `openai` (`/audio/speech`, returned as WAV) |
+| `TTS_API_KEY` / `TTS_MODEL` / `TTS_BASE_URL` | `OPENAI_API_KEY` / `gpt-4o-mini-tts` / OpenAI | Speech credentials, model and endpoint |
+| `TTS_LANGUAGES` | `en-US,en-GB,es-ES,es-MX,fr-FR,de-DE,zh-CN` | Languages the real TTS voices are offered in |
+| `IMAGE_PROVIDER` / `IMAGE_FALLBACK_PROVIDER` | `mock` / none | `mock` or `openai` (`/images/generations`). Only generated visuals use it: the VisualAgent policy keeps photos and maps searched |
+| `IMAGE_API_KEY` / `IMAGE_MODEL` / `IMAGE_BASE_URL` | `OPENAI_API_KEY` / `gpt-image-1` / OpenAI | Image generation credentials, model and endpoint |
+| `IMAGE_SEARCH_PROVIDER` | `mock` | Image search (only the mock catalogue in this release) |
+| `SEARCH_PROVIDER` / `SEARCH_FALLBACK_PROVIDER` | `mock` / none | `mock` or `tavily` |
+| `SEARCH_API_KEY` / `SEARCH_BASE_URL` | `TAVILY_API_KEY` / `https://api.tavily.com` | Web search credentials and endpoint |
+| `SEARCH_DEPTH` / `SEARCH_INCLUDE_RAW_CONTENT` | `basic` / `true` | Tavily search depth; fetch page text so evidence quotes can be checked against it |
+| `SEARCH_INCLUDE_DOMAINS` / `SEARCH_EXCLUDE_DOMAINS` | none | Comma-separated website restrictions applied to every research query |
+| `<CAP>_TIMEOUT_SECONDS` | LLM 120, TTS 90, IMAGE 110, SEARCH 15, IMAGE_SEARCH 15 | Per-attempt timeout; every call has one |
+| `<CAP>_MAX_ATTEMPTS` | 3 (IMAGE 2) | Attempts for transient failures only |
+| `<CAP>_REQUESTS_PER_MINUTE` / `<CAP>_MAX_CONCURRENCY` | unlimited | Local, per-process rate limit; waiting emits `provider.rate_limited` |
+| `PROVIDER_BACKOFF_SECONDS` / `_MULTIPLIER` / `PROVIDER_MAX_BACKOFF_SECONDS` | `0.5` / `2.0` / `8.0` | Bounded exponential backoff; a vendor `Retry-After` is honoured up to the cap |
+| `PROVIDER_MAX_REQUEST_BYTES` / `PROVIDER_MAX_RESPONSE_BYTES` | 4 MB / 32 MB | Size limits on provider HTTP bodies |
+
+The real adapters use plain HTTP through `httpx`, an optional extra: `pip install -e ".[providers]"`. No vendor SDK is
+needed. `python scripts/run_provider_demo.py` shows the resolved configuration (keys only as set/missing);
+`--smoke` sends one minimal request to each configured real provider. `RUN_PROVIDER_SMOKE_TESTS=true pytest
+tests/smoke` does the same as tests; without credentials they are skipped.
+
 ## Model routing (`config/routing.toml`)
 
 ```toml
@@ -66,5 +104,7 @@ input_per_mtok = 3.0
 output_per_mtok = 15.0
 ```
 
-Every model referenced by a tier needs a pricing entry, and every provider must be enabled. API keys,
+Every model referenced by a tier needs a pricing entry, except a model configured through `LLM_*` variables
+without a price (its cost is reported as unknown). `LLM_PROVIDER`/`LLM_MODEL` replace every tier's chain
+(with `LLM_FALLBACK_*` as its second target), and `LLM_<ROLE>_*` add per-agent routes; the agents never change. API keys,
 model names and URLs never live in code.

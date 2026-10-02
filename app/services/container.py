@@ -22,20 +22,36 @@ from app.agents.teacher.agent import TeacherAgent
 from app.agents.video.agent import VideoAgent
 from app.agents.visual.agent import VisualAgent
 from app.artifacts.service import ArtifactService
-from app.config.routing import ConfigError, load_routing
+from app.config.providers import ProviderSettings, apply_llm_overrides
+from app.config.routing import ConfigError, RoutingConfig, load_routing
 from app.config.settings import Settings
 from app.learner.frameworks import FrameworkRegistry, default_frameworks
 from app.learner.memory import LearnerMemoryService
 from app.observability.events import EventBus
 from app.observability.logging import log_event
+from app.observability.redaction import register_secret
+from app.providers.core.http import HttpClient
+from app.providers.core.invoker import ProviderInvoker
+from app.providers.core.registry import ProviderRegistry
+from app.providers.core.selector import ProviderSelector
 from app.providers.image.base import ImageGenerationProvider
 from app.providers.image.mock import MockImageGenerationProvider
+from app.providers.image.openai import OpenAIImageGenerationProvider
 from app.providers.image_search.base import ImageSearchProvider
 from app.providers.image_search.mock import MockImageSearchProvider
+from app.providers.llm.anthropic import AnthropicLLMProvider
 from app.providers.llm.base import LLMProvider
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
+from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
 from app.providers.llm.router import ModelRouter
+from app.providers.managed import (
+    ManagedImageGenerationProvider,
+    ManagedImageSearchProvider,
+    ManagedLLMProvider,
+    ManagedSearchProvider,
+    ManagedTTSProvider,
+)
 from app.providers.presentation.base import PresentationRenderer
 from app.providers.presentation.mock import MockPresentationRenderer
 from app.providers.presentation.pptx_renderer import PptxPresentationRenderer
@@ -44,8 +60,10 @@ from app.providers.retrieval.local import LocalKnowledgeBase
 from app.providers.ranking.heuristic import HeuristicRanker
 from app.providers.search.base import SearchProvider
 from app.providers.search.mock import MockSearchProvider
+from app.providers.search.tavily import TavilySearchProvider
 from app.providers.tts.base import TTSProvider
 from app.providers.tts.mock import MockTTSProvider
+from app.providers.tts.openai import OpenAITTSProvider
 from app.providers.video.base import VideoComposer, VideoProber
 from app.providers.video.ffmpeg import FFmpegAdapter, FFmpegVideoComposer, FFprobeVideoProber
 from app.providers.video.mock import MockVideoComposer, MockVideoProber
@@ -55,6 +73,7 @@ from app.runtime.workflow.engine import WorkflowEngine
 from app.runtime.workflows.lesson_evaluation import evaluation_template
 from app.runtime.workflows.lesson_generation import LessonWorkflowOptions, lesson_template
 from app.schemas.presentation import PresentationConfig
+from app.schemas.providers import Capability
 from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
 from app.services.learners import LearnerService
@@ -97,10 +116,6 @@ PRESENTATION_RENDERER_FACTORIES = {
     "mock": lambda artifacts: MockPresentationRenderer(),
 }
 
-TTS_PROVIDER_FACTORIES = {
-    "mock": lambda settings: MockTTSProvider(),
-}
-
 def _ffmpeg(settings: Settings) -> FFmpegAdapter:
     return FFmpegAdapter(ffmpeg=settings.ffmpeg_path, ffprobe=settings.ffprobe_path,
                          timeout_seconds=settings.video_timeout_seconds)
@@ -114,9 +129,155 @@ VIDEO_COMPOSER_FACTORIES = {  # (composer, prober): a composer is always validat
     "mock": lambda settings, artifacts: (MockVideoComposer(media=artifacts.read_object), MockVideoProber()),
 }
 
+# --- Provider factories: the only place that knows concrete provider classes ------------------------------------
+# Each takes the application Settings; network providers get an HttpClient carrying their credential, the
+# capability's timeout and the request limits. Which ones are built is decided by the provider configuration.
+
+DEFAULT_BASE_URLS = {"tavily": "https://api.tavily.com"}
+
+
+def _http(settings: Settings, capability: Capability, provider: str, base_url: str, headers: dict[str, str],
+          secret: str, request_id_header: str = "X-Request-Id") -> HttpClient:
+    p = settings.providers
+    return HttpClient(provider=provider, base_url=base_url, headers=headers, secrets=(secret,),
+                      timeout_seconds=p.policies()[capability].timeout_seconds, offline=p.offline,
+                      max_request_bytes=p.provider_max_request_bytes, max_response_bytes=p.provider_max_response_bytes,
+                      request_id_header=request_id_header)
+
+
+def _credential(settings: Settings, capability: Capability, provider: str) -> str:
+    secret, _ = settings.providers.credential(capability, provider)
+    if secret is None:  # validate_runtime reports this first, with the variable names
+        raise ConfigError(f"no credential configured for {capability.value} provider '{provider}'")
+    return secret
+
+
+def _openai_headers(p: ProviderSettings, key: str) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {key}"}
+    if p.openai_organization:
+        headers["OpenAI-Organization"] = p.openai_organization
+    return headers
+
+
+def _openai_llm(settings: Settings) -> LLMProvider:
+    p, key = settings.providers, _credential(settings, Capability.LLM, "openai")
+    http = _http(settings, Capability.LLM, "openai", p.openai_base_url, _openai_headers(p, key), key,
+                 request_id_header="X-Client-Request-Id")
+    return OpenAICompatibleLLMProvider(http, native_structured_output=p.llm_native_structured_output,
+                                       max_tokens_param=p.openai_max_tokens_param)
+
+
+def _anthropic_llm(settings: Settings) -> LLMProvider:
+    p, key = settings.providers, _credential(settings, Capability.LLM, "anthropic")
+    http = _http(settings, Capability.LLM, "anthropic", p.anthropic_base_url,
+                 {"x-api-key": key, "anthropic-version": "2023-06-01"}, key, request_id_header="")
+    return AnthropicLLMProvider(http, native_structured_output=p.llm_native_structured_output)
+
+
+def _openai_tts(settings: Settings) -> TTSProvider:
+    p, key = settings.providers, _credential(settings, Capability.TTS, "openai")
+    http = _http(settings, Capability.TTS, "openai", p.tts_base_url or p.openai_base_url, _openai_headers(p, key),
+                 key, request_id_header="X-Client-Request-Id")
+    return OpenAITTSProvider(http, model=p.tts_model, languages=p.languages())
+
+
+def _openai_image(settings: Settings) -> ImageGenerationProvider:
+    p, key = settings.providers, _credential(settings, Capability.IMAGE, "openai")
+    http = _http(settings, Capability.IMAGE, "openai", p.image_base_url or p.openai_base_url,
+                 _openai_headers(p, key), key, request_id_header="X-Client-Request-Id")
+    return OpenAIImageGenerationProvider(http, model=p.image_model)
+
+
+def _tavily_search(settings: Settings) -> SearchProvider:
+    p, key = settings.providers, _credential(settings, Capability.SEARCH, "tavily")
+    http = _http(settings, Capability.SEARCH, "tavily", p.search_base_url or DEFAULT_BASE_URLS["tavily"],
+                 {"Authorization": f"Bearer {key}"}, key)
+    return TavilySearchProvider(http, search_depth=p.search_depth, include_raw_content=p.search_include_raw_content)
+
+
 LLM_PROVIDER_FACTORIES = {
     "mock": lambda settings: MockLLMProvider(default_responders()),
+    "openai": _openai_llm,
+    "anthropic": _anthropic_llm,
 }
+PROVIDER_FACTORIES = {
+    Capability.TTS: {"mock": lambda settings: MockTTSProvider(), "openai": _openai_tts},
+    Capability.IMAGE: {"mock": lambda settings: MockImageGenerationProvider(), "openai": _openai_image},
+    Capability.IMAGE_SEARCH: {
+        "mock": lambda settings: MockImageSearchProvider(settings.corpus_dir / "image_catalog.json")},
+    Capability.SEARCH: {
+        "mock": lambda settings: MockSearchProvider(settings.corpus_dir / "web_corpus.json"), "tavily": _tavily_search},
+}
+
+
+@dataclass
+class ProviderStack:
+    """The provider layer as the rest of the application sees it: managed providers per capability, plus the
+    registry, selector and invoker behind them."""
+
+    registry: ProviderRegistry
+    selector: ProviderSelector
+    invoker: ProviderInvoker
+    routing: RoutingConfig
+    llm: dict[str, ManagedLLMProvider]
+    tts: ManagedTTSProvider
+    image_generation: ManagedImageGenerationProvider
+    image_search: ManagedImageSearchProvider
+    search: ManagedSearchProvider
+
+
+def build_llm_providers(settings: Settings, routing: RoutingConfig) -> dict[str, LLMProvider]:
+    """One LLM provider per provider id the routing uses."""
+    providers = {}
+    for name in routing.providers():
+        factory = LLM_PROVIDER_FACTORIES.get(name)
+        if factory is None:
+            raise ConfigError(f"LLM provider '{name}' has no adapter (available: {sorted(LLM_PROVIDER_FACTORIES)})")
+        providers[name] = factory(settings)
+    return providers
+
+
+def build_providers(settings: Settings, events: EventBus, *, llm_providers: dict[str, LLMProvider] | None = None,
+                    injected: dict[Capability, object] | None = None) -> ProviderStack:
+    """Build, register and select every provider. `llm_providers` and `injected` replace configured providers
+    (tests and demos); they are still registered and run under the invoker like any other."""
+    p = settings.providers
+    for secret in p.secret_values():
+        register_secret(secret)
+    routing = apply_llm_overrides(load_routing(settings.routing_file), p)
+    invoker = ProviderInvoker(policies=p.policies(), events=events, offline=p.offline)
+    registry = ProviderRegistry(offline=p.offline)
+
+    raw_llm = llm_providers if llm_providers is not None else build_llm_providers(settings, routing)
+    for provider in raw_llm.values():
+        registry.register(provider, capability=Capability.LLM)
+    llm = {name: ManagedLLMProvider(provider, invoker, cost=routing.cost) for name, provider in raw_llm.items()}
+
+    chains: dict[Capability, list[str]] = {}
+    injected = injected or {}
+    for capability, factories in PROVIDER_FACTORIES.items():
+        given = injected.get(capability)
+        if given is not None:
+            registry.register(given, capability=capability, default=True)
+            chains[capability] = [given.name]
+            continue
+        chain = p.chain(capability)
+        for provider_id in chain:
+            factory = factories.get(provider_id)
+            if factory is None:
+                raise ConfigError(f"{capability.value} provider '{provider_id}' has no adapter "
+                                  f"(available: {sorted(factories)})")
+            registry.register(factory(settings), capability=capability)
+        chains[capability] = chain
+    selector = ProviderSelector(registry, chains=chains, routing=routing,
+                                models={cap: p.model(cap) for cap in Capability})
+    return ProviderStack(
+        registry=registry, selector=selector, invoker=invoker, routing=routing, llm=llm,
+        tts=ManagedTTSProvider(selector.chain(Capability.TTS), invoker),
+        image_generation=ManagedImageGenerationProvider(selector.chain(Capability.IMAGE), invoker),
+        image_search=ManagedImageSearchProvider(selector.chain(Capability.IMAGE_SEARCH)[0], invoker),
+        search=ManagedSearchProvider(selector.chain(Capability.SEARCH), invoker),
+    )
 
 
 @dataclass
@@ -125,6 +286,7 @@ class Container:
     events: EventBus
     llm_providers: dict[str, LLMProvider]
     router: ModelRouter
+    providers: ProviderStack
     tools: ToolManager
     agents: AgentRegistry
     frameworks: FrameworkRegistry
@@ -138,16 +300,6 @@ class Container:
 
     def close(self) -> None:
         dispose(self._sessions)
-
-
-def build_llm_providers(settings: Settings) -> dict[str, LLMProvider]:
-    providers = {}
-    for name in settings.llm_providers:
-        factory = LLM_PROVIDER_FACTORIES.get(name)
-        if factory is None:
-            raise ConfigError(f"LLM provider '{name}' has no adapter yet (available: {sorted(LLM_PROVIDER_FACTORIES)})")
-        providers[name] = factory(settings)
-    return providers
 
 
 def build_container(
@@ -166,9 +318,6 @@ def build_container(
 ) -> Container:
     settings = settings or Settings()
     settings.validate_runtime()
-    routing = load_routing(settings.routing_file)
-    llm = llm_providers if llm_providers is not None else build_llm_providers(settings)
-    router = ModelRouter(routing, llm)
 
     sessions = create_db(settings.resolved_database_url)
     task_repo = SqlTaskRepository(sessions)
@@ -177,22 +326,31 @@ def build_container(
     events.subscribe(event_repo.append)
     events.subscribe(log_event)
 
+    injected = {Capability.TTS: tts_provider, Capability.IMAGE: image_generation_provider,
+                Capability.IMAGE_SEARCH: image_search_provider, Capability.SEARCH: search_provider}
+    providers = build_providers(settings, events, llm_providers=llm_providers,
+                                injected={k: v for k, v in injected.items() if v is not None})
+    routing = providers.routing
+    router = ModelRouter(routing, providers.llm)
+
     frameworks = default_frameworks()
     memory = LearnerMemoryService(SqlLearnerRepository(sessions), frameworks)
     artifacts = ArtifactService(SqlArtifactRepository(sessions), FilesystemObjectStore(settings.resolved_object_store_dir))
 
     retriever = retriever or LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json")
-    search_provider = search_provider or MockSearchProvider(settings.corpus_dir / "web_corpus.json")
-    image_search = image_search_provider or MockImageSearchProvider(settings.corpus_dir / "image_catalog.json")
-    image_generation = image_generation_provider or MockImageGenerationProvider()
+    search = providers.search
+    image_search = providers.image_search
+    image_generation = providers.image_generation
     renderer = presentation_renderer or PRESENTATION_RENDERER_FACTORIES[settings.presentation_renderer](artifacts)
-    tts = tts_provider or TTS_PROVIDER_FACTORIES[settings.tts_provider](settings)
+    tts = providers.tts
     default_composer, default_prober = VIDEO_COMPOSER_FACTORIES[settings.video_composer](settings, artifacts)
     video = VideoService(artifacts, video_composer or default_composer, video_prober or default_prober,
                          ScratchSpace(settings.resolved_video_work_dir, keep_failed=settings.video_keep_failed_work))
     registry = ToolRegistry()
     for tool in (
-        SearchTool(search_provider, cache=InMemoryResearchCache() if settings.research_cache else None),
+        SearchTool(search, cache=InMemoryResearchCache() if settings.research_cache else None,
+                   include_domains=settings.providers.include_domains(),
+                   exclude_domains=settings.providers.exclude_domains()),
         RankSourcesTool(HeuristicRanker()),
         RetrievalTool(retriever),
         ConceptMapTool(retriever),
@@ -230,8 +388,8 @@ def build_container(
                   CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), VisualAgent(),
                   SlidePlannerAgent(), AudioPlannerAgent(), VideoAgent(), LearnerEvaluationAgent()):
         agents.register(agent)
-    for agent_id in routing.agent_tiers:
-        agents.get(agent_id)  # overrides must name real agents
+    for agent_id in [*routing.agent_tiers, *routing.routes]:
+        agents.get(agent_id)  # overrides and routes must name real agents
 
     options = LessonWorkflowOptions(
         diagnostic_rounds=settings.diagnostic_max_rounds,
@@ -262,10 +420,11 @@ def build_container(
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,
                                 agents=agents, tools=tools, router=router, events=events, observers=observers)
     return Container(
-        settings=settings, events=events, llm_providers=llm, router=router, tools=tools, agents=agents,
+        settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
+        tools=tools, agents=agents,
         frameworks=frameworks, memory=memory, artifacts=artifacts, orchestrator=orchestrator,
         task_service=TaskService(orchestrator, task_repo, event_repo, artifacts),
         learner_service=LearnerService(memory),
-        catalog=CatalogService(agents, registry, router, planner, frameworks),
+        catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         _sessions=sessions,
     )

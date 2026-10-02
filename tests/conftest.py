@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,16 @@ from app.services.container import Container, build_container
 # a full-HD MP4 per test. The real FFmpeg composer is exercised by tests/integration/test_video_ffmpeg.py and the
 # video demo, which select it explicitly.
 os.environ.setdefault("TA_VIDEO_COMPOSER", "mock")
+# Tests run offline on mock providers: no network provider may run and no credentials are needed. The optional real
+# provider smoke tests (RUN_PROVIDER_SMOKE_TESTS=true) are the one exception.
+# Provider choices from the developer's environment (or .env) are overridden, so the suite always runs on mocks.
+if os.environ.get("RUN_PROVIDER_SMOKE_TESTS", "").lower() != "true":
+    os.environ["TEACHING_AGENT_OFFLINE"] = "true"
+    for _key in [k for k in os.environ if re.match(r"^LLM_[A-Z0-9_]+_(PROVIDER|MODEL)$", k)]:
+        del os.environ[_key]
+    os.environ.update({"LLM_PROVIDER": "", "LLM_MODEL": "", "TTS_PROVIDER": "mock", "TTS_FALLBACK_PROVIDER": "",
+                       "IMAGE_PROVIDER": "mock", "IMAGE_FALLBACK_PROVIDER": "", "IMAGE_SEARCH_PROVIDER": "mock",
+                       "SEARCH_PROVIDER": "mock", "SEARCH_FALLBACK_PROVIDER": ""})
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "fixtures" / "demo"

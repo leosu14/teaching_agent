@@ -5,10 +5,13 @@ schemas. A provider reports only what its API returns: unknown fields stay None,
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import ClassVar, Literal
 
 from pydantic import Field
 
+from app.providers.core.base import Provider
 from app.schemas.common import Schema
+from app.schemas.providers import Capability
 from app.schemas.visual import ImageUsage
 
 
@@ -39,6 +42,9 @@ class ImageHit(Schema):
     source_type: str | None = None
     tags: list[str] = Field(default_factory=list)
     score: float | None = None
+    # "searched": the image is in the provider's own library, with its licence data; "external": the provider only
+    # indexes an image hosted by a third party, so its licence and attribution are whatever the source states.
+    origin: Literal["searched", "external"] = "searched"
     metadata: dict = Field(default_factory=dict)  # any other provider fields, verbatim
 
 
@@ -52,14 +58,8 @@ class DownloadedImage(Schema):
     media_type: str
 
 
-class ImageSearchProviderError(Exception):
-    def __init__(self, message: str, *, transient: bool = True) -> None:
-        super().__init__(message)
-        self.transient = transient
-
-
-class ImageSearchProvider(ABC):
-    name: str
+class ImageSearchProvider(Provider, ABC):
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.IMAGE_SEARCH})
 
     @abstractmethod
     async def search(self, request: ProviderImageSearchRequest) -> ImageSearchPage: ...

@@ -6,11 +6,14 @@ ignored and never trusts the declared duration (the audio validator measures the
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import ClassVar
 
 from pydantic import Field
 
+from app.providers.core.base import Provider
 from app.schemas.audio import TTSUsage, Voice
 from app.schemas.common import Schema
+from app.schemas.providers import Capability
 
 
 class ProviderSpeechRequest(Schema):
@@ -33,16 +36,11 @@ class SynthesizedSpeech(Schema):
     duration: float  # seconds, as the provider declares it
     usage: TTSUsage
     metadata: dict = Field(default_factory=dict)  # anything else the provider returned, verbatim
+    provider: str | None = None  # set by the provider layer: the provider that actually produced it (fallback)
 
 
-class TTSProviderError(Exception):
-    def __init__(self, message: str, *, transient: bool = True) -> None:
-        super().__init__(message)
-        self.transient = transient
-
-
-class TTSProvider(ABC):
-    name: str
+class TTSProvider(Provider, ABC):
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.TTS})
     formats: frozenset[str] = frozenset()
     supports_speaking_rate: bool = False
     supports_pitch: bool = False
