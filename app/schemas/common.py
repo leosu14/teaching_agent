@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -77,6 +78,33 @@ class ServiceUsageLine(Schema):
     units: dict[str, float] = Field(default_factory=dict)  # provider-reported units, e.g. images, characters, seconds
 
 
+class ProviderRequestRecord(Schema):
+    """One provider request (one attempt) made on behalf of a task, with where in the workflow it was made. Fields
+    the provider did not report stay None."""
+
+    request_id: str
+    provider: str
+    capability: str  # a Capability value: llm, tts, image, image_search, search
+    operation: str
+    model: str | None = None
+    node_id: str | None = None
+    agent_id: str | None = None
+    attempt: int = 1
+    status: Literal["ok", "failed"] = "ok"
+    error_type: str | None = None
+    vendor_request_id: str | None = None
+    latency_ms: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    characters: int | None = None
+    audio_seconds: float | None = None
+    image_count: int | None = None
+    result_count: int | None = None
+    estimated_cost_usd: float | None = None  # from configured pricing
+    actual_cost_usd: float | None = None  # reported by the provider
+    at: datetime = Field(default_factory=utcnow)
+
+
 class CostSummary(Schema):
     estimated_cost_usd: float = 0.0
     actual_cost_usd: float = 0.0
@@ -85,6 +113,7 @@ class CostSummary(Schema):
     by_agent: dict[str, CostLine] = Field(default_factory=dict)
     by_model: dict[str, CostLine] = Field(default_factory=dict)
     by_service: dict[str, ServiceUsageLine] = Field(default_factory=dict)
+    provider_requests: list[ProviderRequestRecord] = Field(default_factory=list)  # every attempt, in order
 
     def record(self, *, agent_id: str, model: str, usage: TokenUsage, cost_usd: float) -> None:
         self.llm_calls += 1

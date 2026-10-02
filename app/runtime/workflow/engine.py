@@ -11,6 +11,7 @@ from typing import Literal, Protocol
 
 from app.agents.base import AgentOutputError
 from app.agents.registry import AgentRegistry
+from app.observability.redaction import redact_text
 from app.observability.scope import ExecutionScope
 from app.providers.llm.router import AllProvidersFailed, ModelRouter
 from app.schemas.common import utcnow
@@ -20,6 +21,7 @@ from app.schemas.workflow import NodeState, NodeStatus, WorkflowState
 from app.tools.base import ToolTransientError
 from app.tools.manager import ToolManager
 from app.utils.retry import retry_async
+from app.runtime.failures import classify
 from app.runtime.workflow.nodes import (
     ConditionalNode,
     HumanApprovalNode,
@@ -104,6 +106,8 @@ class EngineOutcome:
     wait: WaitRequest | None = None
     error: str | None = None
     failed_node: str | None = None
+    category: str | None = None  # FailureCategory value
+    stage: str | None = None
 
 
 class WorkflowEngine:
@@ -147,9 +151,11 @@ class WorkflowEngine:
                 result = await self._run_node(node, state, view, scope, hooks)
             except Exception as exc:  # BaseException (process kill, cancellation) propagates untouched
                 ns.status = NodeStatus.FAILED
-                ns.error = f"{type(exc).__name__}: {exc}"
+                ns.error = redact_text(f"{type(exc).__name__}: {exc}")
                 hooks.checkpoint(state, node.id)
-                return EngineOutcome(status="failed", error=ns.error, failed_node=node.id)
+                category, stage = classify(exc, node.id)
+                return EngineOutcome(status="failed", error=ns.error, failed_node=node.id, category=category.value,
+                                     stage=stage.value)
             if result is not None:
                 return result
 
@@ -212,7 +218,7 @@ class WorkflowEngine:
                 else:
                     result = await node.execute(rt)
             except Exception as exc:
-                ns.error = f"{type(exc).__name__}: {exc}"
+                ns.error = redact_text(f"{type(exc).__name__}: {exc}")
                 scope.emit(EventType.NODE_FAILED, kind=node.kind, attempt=ns.attempts, error=ns.error[:1000])
                 raise
             elapsed = round((time.perf_counter() - started) * 1000, 3)

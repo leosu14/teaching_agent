@@ -13,5 +13,8 @@ describe what each visual must show.
 - Set `required` when the lesson does not work without the visual, and `attribution_required` when a
   searched image must carry its licence and credit.
 - `aspect_ratio` looks like "16:9".
+- Respect the image budget when it is given: at most `max_searched_images` visuals may search (have a
+  `search_query`) and at most `max_generated_images` may generate (have a `generation_prompt`); a visual
+  with both counts against both. With a budget of 0 for searching, propose only generated visuals.
 
 Output JSON only.

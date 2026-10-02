@@ -10,9 +10,11 @@ capability through the provider layer (structured LLM output, TTS, image generat
 with each call's request id and usage, a retry and a fallback on deliberately failing mock providers, the
 provider.* events, and a check that secrets are redacted.
 
-With --smoke and real providers configured (e.g. LLM_PROVIDER=anthropic LLM_MODEL=... ANTHROPIC_API_KEY=...), it
-validates that configuration and sends each configured real provider one minimal request. Without real
-configuration the smoke part is skipped, not failed.
+With --smoke and real providers configured in production mode (TEACHING_AGENT_MODE=production LLM_PROVIDER=anthropic
+LLM_MODEL=... ANTHROPIC_API_KEY=...), it validates that configuration, reports whether a production lesson run is
+possible (scripts/run_production_demo.py needs a real provider for each capability the lesson uses), and sends each
+configured real provider one minimal request. Without real configuration the smoke part is skipped, not failed.
+The smoke test checks providers in isolation; the end-to-end check is scripts/run_production_demo.py.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from pydantic import BaseModel, Field
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from app.config.production import production_readiness, required_capabilities  # noqa: E402
 from app.config.providers import MOCK, ProviderSettings  # noqa: E402
 from app.config.routing import ConfigError  # noqa: E402
 from app.config.settings import Settings  # noqa: E402
@@ -46,6 +49,7 @@ from app.providers.managed import ManagedTTSProvider  # noqa: E402
 from app.providers.search.base import ProviderSearchRequest  # noqa: E402
 from app.providers.tts.base import ProviderSpeechRequest  # noqa: E402
 from app.providers.tts.mock import MockTTSProvider  # noqa: E402
+from app.runtime.workflows.lesson_generation import PROVIDER_CAPABILITIES as LESSON_CAPABILITIES  # noqa: E402
 from app.schemas.common import ModelTier  # noqa: E402
 from app.schemas.events import Event  # noqa: E402
 from app.schemas.providers import Capability, ProviderPolicy  # noqa: E402
@@ -87,8 +91,8 @@ def heading(title: str) -> None:
 
 def mock_settings(data_dir: Path) -> Settings:
     """Offline, mock-only: explicit values win over the environment and .env."""
-    providers = ProviderSettings(teaching_agent_offline=True, llm_provider=None, llm_model=None,
-                                 llm_fallback_provider=None, llm_fallback_model=None, llm_routes={},
+    providers = ProviderSettings(teaching_agent_mode="offline", teaching_agent_offline=True, llm_provider=None,
+                                 llm_model=None, llm_fallback_provider=None, llm_fallback_model=None, llm_routes={},
                                  tts_provider=MOCK, tts_fallback_provider=None, image_provider=MOCK,
                                  image_fallback_provider=None, image_search_provider=MOCK, search_provider=MOCK,
                                  search_fallback_provider=None)
@@ -219,8 +223,15 @@ async def smoke() -> int:
         print("  skipped: no real provider is configured (set e.g. LLM_PROVIDER, LLM_MODEL and its API key)")
         return 0
     if p.offline:
-        print("  skipped: TEACHING_AGENT_OFFLINE=true")
+        reason = ("TEACHING_AGENT_OFFLINE=true" if p.teaching_agent_offline
+                  else "set TEACHING_AGENT_MODE=production to call real providers")
+        print(f"  skipped: offline mode ({reason})")
         return 0
+    problems, warnings = production_readiness(p, required_capabilities(LESSON_CAPABILITIES,
+                                                                       settings.production.budget()))
+    print("  production lesson run: " + ("ready" if not problems else "not ready"))
+    for line in [*problems, *warnings]:
+        print(f"    - {line}")
     try:
         container = build_container(Settings(data_dir=Path(tempfile.mkdtemp(prefix="provider-smoke-")),
                                              log_json=False))

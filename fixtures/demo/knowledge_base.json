@@ -67,5 +67,129 @@
     "title": "Reference: regular preterite endings",
     "text": "Regular -ar verbs take -é, -aste, -ó, -amos, -asteis, -aron in the preterite. Example: Marcó un gol en el último minuto. Practice: Translate: 'We won the match.' Answer: ganamos el partido.",
     "metadata": {"kind": "reference", "subject": "spanish", "publisher": "Course knowledge base", "language": "en"}
+  },
+  {
+    "doc_id": "es-climate-vocabulary",
+    "title": "Climate change vocabulary",
+    "text": "Key nouns for talking about climate change: el cambio climático (climate change), el calentamiento global (global warming), las emisiones (emissions), los gases de efecto invernadero (greenhouse gases), la sequía (drought), las inundaciones (floods), la energía renovable (renewable energy). B1 climate change vocabulary.",
+    "metadata": {
+      "kind": "concept",
+      "subject": "spanish",
+      "topic": "climate change",
+      "level": "B1",
+      "concept": {
+        "concept_id": "es.climate.vocabulary",
+        "name": "Climate change vocabulary",
+        "level": "B1",
+        "prerequisites": [],
+        "description": "Nouns for global warming, emissions, drought, floods and renewable energy, with articles."
+      },
+      "probes": [
+        {
+          "prompt": "How do you say 'global warming' in Spanish?",
+          "answer": "el calentamiento global",
+          "accepted": [
+            "calentamiento global"
+          ],
+          "difficulty": 0.5
+        },
+        {
+          "prompt": "Which word means 'drought': la sequía or la inundación?",
+          "answer": "la sequía",
+          "accepted": [
+            "sequía",
+            "sequia"
+          ],
+          "difficulty": 0.25
+        },
+        {
+          "prompt": "Translate: 'renewable energy'.",
+          "answer": "la energía renovable",
+          "accepted": [
+            "energía renovable",
+            "energia renovable"
+          ],
+          "difficulty": 0.7
+        }
+      ]
+    }
+  },
+  {
+    "doc_id": "es-climate-cause-effect",
+    "title": "Explaining causes and consequences",
+    "text": "Connect causes and effects: debido a (because of), por eso (that is why), provocar (to cause), como consecuencia (as a consequence). Example: Las temperaturas suben debido a las emisiones. B1 climate change grammar.",
+    "metadata": {
+      "kind": "concept",
+      "subject": "spanish",
+      "topic": "climate change",
+      "level": "B1",
+      "concept": {
+        "concept_id": "es.climate.cause_effect",
+        "name": "Causes and consequences",
+        "level": "B1",
+        "prerequisites": [
+          "es.climate.vocabulary"
+        ],
+        "description": "The connectors debido a and por eso, and the verb provocar, that link a reason to its consequence."
+      },
+      "probes": [
+        {
+          "prompt": "Complete: Las temperaturas suben ___ las emisiones. (debido a / por eso)",
+          "answer": "debido a",
+          "difficulty": 0.5
+        },
+        {
+          "prompt": "Which connector introduces a consequence: 'por eso' or 'porque'?",
+          "answer": "por eso",
+          "difficulty": 0.3
+        }
+      ]
+    }
+  },
+  {
+    "doc_id": "es-climate-necessity",
+    "title": "Saying what must be done",
+    "text": "Express necessity and recommendations with es necesario que, es importante que and hay que. After es necesario que use the present subjunctive: es necesario que reduzcamos las emisiones. Hay que takes the infinitive: hay que reciclar. B1 climate change grammar.",
+    "metadata": {
+      "kind": "concept",
+      "subject": "spanish",
+      "topic": "climate change",
+      "level": "B1",
+      "concept": {
+        "concept_id": "es.climate.necessity_subjunctive",
+        "name": "Necessity with the subjunctive",
+        "level": "B1",
+        "prerequisites": [
+          "es.climate.vocabulary"
+        ],
+        "description": "Es necesario que + present subjunctive, and hay que + infinitive, to propose solutions."
+      },
+      "probes": [
+        {
+          "prompt": "Complete: Es necesario que nosotros ___ las emisiones. (reducir)",
+          "answer": "reduzcamos",
+          "difficulty": 0.7
+        },
+        {
+          "prompt": "Which is correct: 'Hay que reciclar' or 'Hay que reciclamos'?",
+          "answer": "Hay que reciclar",
+          "accepted": [
+            "reciclar"
+          ],
+          "difficulty": 0.35
+        }
+      ]
+    }
+  },
+  {
+    "doc_id": "es-ref-subjunctive",
+    "title": "Reference: the subjunctive after expressions of necessity",
+    "text": "Expressions of necessity such as es necesario que and es importante que take the subjunctive mood. Example: Es importante que usemos menos el coche. Practice: Complete: Es necesario que tú ___ agua. (ahorrar) Answer: ahorres.\n\nHay que is followed by the infinitive. Example: Hay que proteger los bosques.",
+    "metadata": {
+      "kind": "reference",
+      "subject": "spanish",
+      "publisher": "Course knowledge base",
+      "language": "en"
+    }
   }
 ]

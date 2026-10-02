@@ -34,6 +34,8 @@ class TaskError(Schema):
     kind: str
     message: str
     node_id: str | None = None
+    category: str | None = None  # failure classification, e.g. BudgetExceededError, ProviderError, AudioError
+    stage: str | None = None  # the workflow stage the failure happened in
     at: datetime = Field(default_factory=utcnow)
 
 

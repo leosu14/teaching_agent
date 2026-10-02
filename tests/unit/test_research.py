@@ -370,7 +370,7 @@ async def test_ranking_is_deterministic_and_deduplicates_first() -> None:
 
 CONCEPTS = [ConceptRef.model_validate(d["metadata"]["concept"])
             for d in json.loads((CORPUS / "knowledge_base.json").read_text(encoding="utf-8"))
-            if d["metadata"]["kind"] == "concept"]
+            if d["metadata"]["kind"] == "concept" and d["metadata"].get("topic") == "football"]
 
 
 def research_request(**kw) -> ResearchRequest:

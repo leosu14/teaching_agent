@@ -39,7 +39,10 @@ ERROR_EXCERPT = 300
 
 
 def offline_env() -> bool:
-    return os.environ.get("TEACHING_AGENT_OFFLINE", "").strip().lower() in {"1", "true", "yes", "on"}
+    """Offline from the process environment alone: TEACHING_AGENT_OFFLINE=true or TEACHING_AGENT_MODE=offline set
+    explicitly. (A client built from settings also gets the configured mode.)"""
+    return (os.environ.get("TEACHING_AGENT_OFFLINE", "").strip().lower() in {"1", "true", "yes", "on"}
+            or os.environ.get("TEACHING_AGENT_MODE", "").strip().lower() == "offline")
 
 
 def validate_base_url(url: str) -> str:
@@ -120,7 +123,7 @@ class HttpClient:
                       params: Mapping[str, str] | None = None) -> HttpResponse:
         if self.offline or offline_env():
             raise self._error(ProviderOfflineError, "network request refused: offline mode is on "
-                                                    "(TEACHING_AGENT_OFFLINE=true)")
+                                                    "(TEACHING_AGENT_MODE=offline or TEACHING_AGENT_OFFLINE=true)")
         body = None
         if json_body is not None:
             body = json.dumps(json_body, ensure_ascii=False).encode("utf-8")

@@ -362,6 +362,9 @@ class VisualPlanningInput(Schema):
     lesson: LessonContent
     research: ResearchBundle
     max_visuals: int = Field(default=6, ge=0)
+    # The task's image budget (None: no limit). A visual counts against each source it may use, fallback included.
+    max_generated_images: int | None = Field(default=None, ge=0)
+    max_searched_images: int | None = Field(default=None, ge=0)
 
 
 class VisualRequest(Schema):
@@ -373,11 +376,14 @@ class VisualRequest(Schema):
     language: str | None = None
     max_visuals: int = Field(default=6, ge=0)
     max_candidates: int = Field(default=3, ge=1)  # searched candidates tried per visual before giving up
+    max_generated_images: int | None = Field(default=None, ge=0)
+    max_searched_images: int | None = Field(default=None, ge=0)
     parent_artifact_ids: list[str] = Field(default_factory=list)  # parents of the VISUAL_PLAN artifact
 
     def planning_input(self) -> VisualPlanningInput:
         return VisualPlanningInput(plan=self.plan, lesson=self.lesson, research=self.research,
-                                   max_visuals=self.max_visuals)
+                                   max_visuals=self.max_visuals, max_generated_images=self.max_generated_images,
+                                   max_searched_images=self.max_searched_images)
 
 
 # --- Learner memory update -----------------------------------------------------------------

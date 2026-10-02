@@ -1,8 +1,11 @@
 """Centralised provider configuration, from environment variables (and an optional .env file).
 
-Every capability defaults to the deterministic mock provider, so a fresh checkout runs offline with no credentials.
-A real provider is used only when it is named explicitly (LLM_PROVIDER, TTS_PROVIDER, IMAGE_PROVIDER,
-SEARCH_PROVIDER), and a fallback only when it is named explicitly too (<CAPABILITY>_FALLBACK_PROVIDER).
+The execution mode is explicit (TEACHING_AGENT_MODE):
+- offline (the default): mock providers only, no network at all. A fresh checkout runs with no credentials.
+- production: the providers named explicitly (LLM_PROVIDER, TTS_PROVIDER, IMAGE_PROVIDER, SEARCH_PROVIDER), with
+  their credentials. A fallback is used only when it is named explicitly too (<CAPABILITY>_FALLBACK_PROVIDER).
+The mode never changes because a credential happens to be set; a real provider in offline mode is a startup error.
+TEACHING_AGENT_OFFLINE=true is kept as a hard switch: it forces offline mode.
 
 Credentials are SecretStr: they never appear in reprs, `describe()`, events or logs.
 """
@@ -22,6 +25,7 @@ from app.schemas.common import ModelTier
 from app.schemas.providers import Capability, ProviderPolicy
 
 MOCK = "mock"
+RunMode = Literal["offline", "production"]
 
 # Provider ids each capability can be configured with, and the environment variables (in order of preference)
 # that hold the credential of each network provider. Mock providers need neither network nor credentials.
@@ -51,7 +55,8 @@ def _csv(value: str | None) -> list[str]:
 class ProviderSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
 
-    teaching_agent_offline: bool = False  # TEACHING_AGENT_OFFLINE=true: only mock providers, no network at all
+    teaching_agent_mode: RunMode = "offline"  # TEACHING_AGENT_MODE: offline (mocks only) or production
+    teaching_agent_offline: bool = False  # TEACHING_AGENT_OFFLINE=true: forces offline mode whatever the mode says
 
     # --- LLM ----------------------------------------------------------------------------------------------
     llm_provider: str | None = None  # unset: config/routing.toml decides (mock by default)
@@ -143,8 +148,18 @@ class ProviderSettings(BaseSettings):
     # --- Derived views --------------------------------------------------------------------------------------
 
     @property
+    def mode(self) -> RunMode:
+        return "offline" if self.teaching_agent_offline else self.teaching_agent_mode
+
+    @property
     def offline(self) -> bool:
-        return self.teaching_agent_offline
+        return self.mode == "offline"
+
+    def _offline_reason(self) -> str:
+        if self.teaching_agent_offline:
+            return "TEACHING_AGENT_OFFLINE=true allows only mock providers"
+        return ("offline mode (TEACHING_AGENT_MODE=offline, the default) allows only mock providers; set "
+                "TEACHING_AGENT_MODE=production to use real providers")
 
     def policies(self) -> dict[Capability, ProviderPolicy]:
         backoff = {"backoff_seconds": self.provider_backoff_seconds,
@@ -220,6 +235,8 @@ class ProviderSettings(BaseSettings):
         """Everything wrong with the provider configuration, as messages naming the variables to set. Secret values
         never appear in them."""
         problems: list[str] = []
+        if self.teaching_agent_offline and self.teaching_agent_mode == "production":
+            problems.append("TEACHING_AGENT_OFFLINE=true contradicts TEACHING_AGENT_MODE=production: unset one")
         configured: list[tuple[Capability, str, str]] = []  # (capability, provider, variable that selected it)
         for cap in Capability:
             prefix = cap.name  # LLM, TTS, IMAGE, IMAGE_SEARCH, SEARCH
@@ -240,8 +257,7 @@ class ProviderSettings(BaseSettings):
             if provider == MOCK:
                 continue
             if self.offline:
-                problems.append(f"{var}='{provider}' needs the network, but TEACHING_AGENT_OFFLINE=true allows only "
-                                "mock providers")
+                problems.append(f"{var}='{provider}' needs the network, but {self._offline_reason()}")
             if self.credential(cap, provider)[0] is None:
                 problems.append(f"{var}='{provider}' needs a credential: set {' or '.join(known[provider])}")
 
@@ -267,7 +283,7 @@ class ProviderSettings(BaseSettings):
     def describe(self) -> dict:
         """The configuration as safe-to-print data: providers, models, fallbacks and whether each credential is
         set. Never a secret value."""
-        out: dict = {"offline": self.offline, "capabilities": {}}
+        out: dict = {"mode": self.mode, "offline": self.offline, "capabilities": {}}
         for cap in Capability:
             entry: dict = {"provider": self.primary(cap) or "(config/routing.toml)", "model": self.model(cap),
                            "fallback": self.fallback(cap)}

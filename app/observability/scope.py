@@ -7,16 +7,35 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 
+from app.observability import budget as budgets
 from app.observability.events import EventBus
-from app.schemas.common import CostSummary, TokenUsage
+from app.schemas.common import CostSummary, ProviderRequestRecord, TokenUsage
 from app.schemas.events import Event
+from app.schemas.providers import Capability
+from app.schemas.usage import TaskBudget, TaskUsage
 
 
 class UsageLedger:
-    """Accumulates token usage and cost for one task. The engine persists it with every checkpoint."""
+    """Accumulates token usage, cost and every provider request for one task, and enforces the task's budget (if it
+    has one). The engine persists it with every checkpoint."""
 
-    def __init__(self, summary: CostSummary | None = None) -> None:
+    def __init__(self, summary: CostSummary | None = None, *, budget: TaskBudget | None = None) -> None:
         self.summary = summary.model_copy(deep=True) if summary else CostSummary()
+        self.budget = budget
+
+    def usage(self) -> TaskUsage:
+        return task_usage(self.summary)
+
+    def admit(self, capability: Capability, operation: str, units: dict[str, float] | None = None) -> None:
+        """Called by the provider layer before each request; raises BudgetExceededError instead of overspending."""
+        if self.budget is not None:
+            budgets.admit(self.budget, self.usage(), capability, operation, units)
+
+    def record_request(self, record: ProviderRequestRecord) -> None:
+        """Called by the provider layer after each request (successful or not)."""
+        self.summary.provider_requests.append(record)
+        if self.budget is not None and record.status == "ok":
+            budgets.check_after(self.budget, self.usage())
 
     def record(self, *, agent_id: str, model: str, usage: TokenUsage, cost_usd: float) -> None:
         self.summary.record(agent_id=agent_id, model=model, usage=usage, cost_usd=cost_usd)
@@ -26,6 +45,13 @@ class UsageLedger:
                        estimated_cost_usd: float | None = None) -> None:
         self.summary.record_service(service=service, results=results, cache_hit=cache_hit, cost_usd=cost_usd,
                                     units=units, estimated_cost_usd=estimated_cost_usd)
+
+
+def task_usage(summary: CostSummary) -> TaskUsage:
+    """TaskUsage from a task's cost summary: its provider requests plus the local video rendering time."""
+    render = sum(line.units.get("render_seconds", 0.0) for name, line in summary.by_service.items()
+                 if name.startswith("video_compose:"))
+    return TaskUsage.from_records(summary.provider_requests, video_render_seconds=render)
 
 
 @dataclass(frozen=True)

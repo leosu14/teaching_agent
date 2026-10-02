@@ -106,6 +106,14 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
             raise OutputRejected(f"visuals reference unknown lesson sections {unknown}")
         if len(output.requirements) > source.max_visuals:
             raise OutputRejected(f"{len(output.requirements)} visuals proposed; at most {source.max_visuals} allowed")
+        searched, generated = output.source_counts()
+        if source.max_searched_images is not None and searched > source.max_searched_images:
+            raise OutputRejected(f"{searched} visuals may search for an image (fallbacks included); the image budget "
+                                 f"allows {source.max_searched_images}: drop searched visuals or their search_query")
+        if source.max_generated_images is not None and generated > source.max_generated_images:
+            raise OutputRejected(f"{generated} visuals may generate an image (fallbacks included); the image budget "
+                                 f"allows {source.max_generated_images}: drop generated visuals or their "
+                                 "generation_prompt")
 
     # --- the visual loop -----------------------------------------------------------------------
 

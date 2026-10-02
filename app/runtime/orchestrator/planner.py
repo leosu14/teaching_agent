@@ -9,6 +9,7 @@ from app.agents.registry import AgentRegistry
 from app.providers.llm.router import ModelRouter
 from app.runtime.workflow.engine import WorkflowDefinition
 from app.schemas.lesson import LessonRequest
+from app.schemas.providers import Capability
 
 
 class NoWorkflowForRequest(LookupError):
@@ -30,6 +31,8 @@ class WorkflowTemplate:
     provides: frozenset[str]
     build: Callable[[LessonRequest], WorkflowDefinition]
     expected_calls: tuple[ExpectedCall, ...]
+    # The provider capabilities the workflow's agents and tools call: what a production run must configure.
+    provider_capabilities: frozenset[Capability] = frozenset({Capability.LLM})
 
 
 class WorkflowPlanner:

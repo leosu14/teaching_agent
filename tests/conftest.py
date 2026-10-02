@@ -20,9 +20,10 @@ from app.services.container import Container, build_container
 # video demo, which select it explicitly.
 os.environ.setdefault("TA_VIDEO_COMPOSER", "mock")
 # Tests run offline on mock providers: no network provider may run and no credentials are needed. The optional real
-# provider smoke tests (RUN_PROVIDER_SMOKE_TESTS=true) are the one exception.
+# provider smoke tests (RUN_PROVIDER_SMOKE_TESTS=true) and live end-to-end test (RUN_LIVE_E2E=true) are the exceptions.
 # Provider choices from the developer's environment (or .env) are overridden, so the suite always runs on mocks.
-if os.environ.get("RUN_PROVIDER_SMOKE_TESTS", "").lower() != "true":
+LIVE = any(os.environ.get(flag, "").lower() == "true" for flag in ("RUN_PROVIDER_SMOKE_TESTS", "RUN_LIVE_E2E"))
+if not LIVE:
     os.environ["TEACHING_AGENT_OFFLINE"] = "true"
     for _key in [k for k in os.environ if re.match(r"^LLM_[A-Z0-9_]+_(PROVIDER|MODEL)$", k)]:
         del os.environ[_key]

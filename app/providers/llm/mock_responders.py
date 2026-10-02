@@ -72,6 +72,7 @@ from app.schemas.lesson import (
     Verdict,
     VisualPlanningInput,
 )
+from app.schemas.visual import VisualPlanProposal
 
 LEVEL_RE = re.compile(r"\b(A1|A2|B1|B2|C1|C2)\b", re.IGNORECASE)
 TOPIC_RE = re.compile(r"\b(?:about|on|regarding)\s+(.+?)[\s.!?]*$", re.IGNORECASE)
@@ -647,7 +648,14 @@ def visuals(request: LLMRequest) -> dict:
                                  f"{(section.examples or [section.heading])[0]}",
             "aspect_ratio": "16:9", "required": True, "attribution_required": False,
         })
-    return {"requirements": requirements[:p.max_visuals],
+    within: list[dict] = []
+    for requirement in requirements:  # keep to the image budget, as a model asked to would
+        proposal = VisualPlanProposal.model_validate({"requirements": [*within, requirement]})
+        searched, generated = proposal.source_counts()
+        if ((p.max_searched_images is None or searched <= p.max_searched_images)
+                and (p.max_generated_images is None or generated <= p.max_generated_images)):
+            within.append(requirement)
+    return {"requirements": within[:p.max_visuals],
             "rationale": "One real-world picture for context and one generated diagram per section."}
 
 
@@ -686,6 +694,14 @@ def _assess(p: EvaluationInput) -> EvaluationStep:
                 question_id=f"mc_{cid}", concept_id=cid, objective=objective, kind="multiple_choice",
                 prompt=f"Which of these is an example of: {section.heading}?",
                 choices=sorted({correct, *distractors[:2]}), difficulty=0.3, expected_answer=correct,
+            ))
+        if not any(q.concept_id == cid for q in questions) and len(p.lesson.sections) > 1:
+            # A section taught without examples or an exercise: recognise which section explained it.
+            headings = sorted({s.heading for s in p.lesson.sections})
+            questions.append(AssessmentQuestion(
+                question_id=f"mc_{cid}", concept_id=cid, objective=objective, kind="multiple_choice",
+                prompt=f"Which part of the lesson explained this? {section.explanation.split('.')[0]}.",
+                choices=headings, difficulty=0.3, expected_answer=section.heading,
             ))
     plan = AssessmentPlan(
         title=f"Check: {p.lesson.title}", level=p.lesson.level,

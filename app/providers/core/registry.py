@@ -30,7 +30,8 @@ class ProviderRegistry:
             raise ConfigError(f"provider '{provider.name}' declares no capabilities")
         if self.offline and provider.requires_network:
             raise ProviderOfflineError(f"provider '{provider.name}' needs the network, but offline mode is on "
-                                       "(TEACHING_AGENT_OFFLINE=true); only mock providers may be registered",
+                                       "(TEACHING_AGENT_MODE=offline or TEACHING_AGENT_OFFLINE=true); only mock providers may be "
+                                       "registered",
                                        provider=provider.name)
         for cap in capabilities:
             if cap not in provider.capabilities:

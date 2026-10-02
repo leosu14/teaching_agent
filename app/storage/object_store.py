@@ -43,6 +43,13 @@ class FilesystemObjectStore:
     def get(self, uri: str) -> bytes:
         return self._resolve(uri).read_bytes()
 
+    def exists(self, uri: str) -> bool:
+        return self._resolve(uri).is_file()
+
+    def delete(self, uri: str) -> None:
+        """Remove an object (a corrupt one, so it can be written again). Missing objects are ignored."""
+        self._resolve(uri).unlink(missing_ok=True)
+
     def open(self, uri: str) -> BinaryIO:
         """A binary reader for an object, for streaming large media."""
         return self._resolve(uri).open("rb")

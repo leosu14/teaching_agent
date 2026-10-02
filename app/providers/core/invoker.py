@@ -5,7 +5,9 @@
 - applies the capability's local rate limit and per-attempt timeout,
 - retries timeouts, rate limits and transient unavailability with bounded exponential backoff, nothing else,
 - emits provider.request_started / request_completed / request_failed / rate_limited events, redacted,
-- records a ProviderUsage per successful call.
+- records a ProviderUsage per successful call,
+- for a call made on behalf of a task: asks the task's budget before every attempt (a request that would exceed it is
+  never sent) and records every attempt, successful or not, with its workflow node, in the task's usage ledger.
 
 Events go to the scope of the task being executed when there is one, otherwise to the application event bus.
 """
@@ -20,7 +22,7 @@ from typing import TypeVar
 
 from app.observability.events import EventBus
 from app.observability.redaction import redact, redact_text
-from app.observability.scope import current_scope
+from app.observability.scope import UsageLedger, current_scope
 from app.providers.core.base import Provider, bind_request_id, new_request_id, release_request_id
 from app.providers.core.errors import (
     ProviderError,
@@ -31,6 +33,7 @@ from app.providers.core.errors import (
     is_retryable,
 )
 from app.providers.core.ratelimit import RateLimiter
+from app.schemas.common import ProviderRequestRecord
 from app.schemas.events import EventType
 from app.schemas.providers import Capability, ProviderPolicy, ProviderUsage
 
@@ -73,19 +76,27 @@ class ProviderInvoker:
     def check_offline(self, provider: Provider) -> None:
         if self.offline and provider.requires_network:
             raise ProviderOfflineError(f"provider '{provider.name}' needs the network, but offline mode is on "
-                                       "(TEACHING_AGENT_OFFLINE=true); only mock providers may run",
+                                       "(TEACHING_AGENT_MODE=offline or TEACHING_AGENT_OFFLINE=true); only mock providers "
+                                       "may run",
                                        provider=provider.name)
 
     async def call(self, provider: Provider, capability: Capability, operation: str,
-                   fn: Callable[[], Awaitable[T]], *, usage: UsageOf, model: str | None = None) -> T:
+                   fn: Callable[[], Awaitable[T]], *, usage: UsageOf, model: str | None = None,
+                   units: dict[str, float] | None = None) -> T:
+        """Run one provider operation. `units` is what the request is known to consume before it is sent (e.g. the
+        characters of a speech request), for the task's budget."""
         self.check_offline(provider)
         policy = self.policy(capability)
         limiter = self.limiter(capability, provider.name)
         base = {"provider": provider.name, "capability": capability.value, "operation": operation, "model": model}
+        scope = current_scope()
+        ledger = scope.usage if scope is not None else None
 
         attempt = 0
         while True:
             attempt += 1
+            if ledger is not None:
+                ledger.admit(capability, operation, units)  # BudgetExceededError: nothing is sent
             request_id = new_request_id()
 
             def on_wait(reason: str, seconds: float | None) -> None:
@@ -106,6 +117,10 @@ class ProviderInvoker:
                     exc.request_id = exc_request_id
                     exc.provider = exc.provider or provider.name
                 retry = is_retryable(exc) and attempt < policy.max_attempts
+                _record(ledger, scope, ProviderRequestRecord(
+                    request_id=request_id, provider=provider.name, capability=capability.value, operation=operation,
+                    model=model, attempt=attempt, status="failed", error_type=type(exc).__name__,
+                    latency_ms=round((self._clock() - started) * 1000, 3)))
                 self.emit(EventType.PROVIDER_REQUEST_FAILED, **base, request_id=request_id, attempt=attempt,
                           error_type=type(exc).__name__, error=redact_text(str(exc))[:500],
                           status=getattr(exc, "status", None), will_retry=retry,
@@ -126,6 +141,13 @@ class ProviderInvoker:
             self.usage_log.append(record)
             self.emit(EventType.PROVIDER_REQUEST_COMPLETED, **base, request_id=request_id, attempt=attempt,
                       latency_ms=latency, usage=record.model_dump(mode="json", exclude_none=True))
+            _record(ledger, scope, ProviderRequestRecord(
+                request_id=request_id, provider=record.provider, capability=capability.value, operation=operation,
+                model=record.model or model, attempt=attempt, vendor_request_id=record.vendor_request_id,
+                latency_ms=latency, input_tokens=record.input_tokens, output_tokens=record.output_tokens,
+                characters=record.characters, audio_seconds=record.audio_seconds, image_count=record.image_count,
+                result_count=record.result_count, estimated_cost_usd=record.estimated_cost,
+                actual_cost_usd=record.actual_cost))  # BudgetExceededError when the reported usage is over a limit
             return result
 
     @staticmethod
@@ -144,3 +166,8 @@ class ProviderInvoker:
         self.emit(EventType.PROVIDER_FALLBACK, capability=capability.value, operation=operation,
                   from_provider=from_provider, to_provider=to_provider, error_type=type(error).__name__,
                   error=redact_text(str(error))[:500], request_id=getattr(error, "request_id", None))
+
+
+def _record(ledger: UsageLedger | None, scope, record: ProviderRequestRecord) -> None:
+    if ledger is not None:
+        ledger.record_request(record.model_copy(update={"node_id": scope.node_id, "agent_id": scope.agent_id}))
