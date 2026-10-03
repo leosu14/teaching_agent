@@ -1,0 +1,13 @@
+{
+  "description": "The adaptive demo learner's answers to the post-lesson check, keyed by concept and question kind. The learner learned what the lesson taught.",
+  "answers": {
+    "es.conv.opinions": {
+      "short_answer": "creo",
+      "multiple_choice": "Creo que la película es muy buena."
+    },
+    "es.conv.preterite": {
+      "short_answer": "cenamos",
+      "multiple_choice": "Ayer hablé con mi hermana."
+    }
+  }
+}

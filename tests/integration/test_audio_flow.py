@@ -254,7 +254,7 @@ async def test_presentation_failure_means_no_audio(make_container) -> None:
 
 
 async def test_required_narration_failure_fails_the_task_and_keeps_generated_audio(make_container) -> None:
-    tts = SelectiveTTS(marker="Practise:")  # the objectives slide's narration (required)
+    tts = SelectiveTTS(marker="Objectives.")  # the objectives slide's narration (required)
     container = make_container(tts_provider=tts)
     task = await run_lesson(container)
     assert task.status == TaskStatus.FAILED
@@ -276,7 +276,7 @@ async def test_required_narration_failure_fails_the_task_and_keeps_generated_aud
 
 
 async def test_required_failure_continues_when_the_policy_says_so(make_container) -> None:
-    container = make_container(tts_provider=SelectiveTTS(marker="Practise:"), audio_failure_policy="continue")
+    container = make_container(tts_provider=SelectiveTTS(marker="Objectives."), audio_failure_policy="continue")
     task = await run_lesson(container)
     assert task.status == TaskStatus.COMPLETED, task.errors
     timeline = json_of(container, arts_of(container, task)["presentation_timeline"], PresentationTimeline)
@@ -304,7 +304,7 @@ async def test_optional_narration_failure_continues_with_a_warning(make_containe
 
 @pytest.mark.parametrize("mode", ["fake", "lie"])
 async def test_invalid_audio_is_rejected_before_it_becomes_an_asset(make_container, mode) -> None:
-    container = make_container(tts_provider=SelectiveTTS(marker="Practise:", mode=mode))
+    container = make_container(tts_provider=SelectiveTTS(marker="Objectives.", mode=mode))
     task = await run_lesson(container)
     assert task.status == TaskStatus.FAILED and task.errors[-1].node_id == "audio_policy"
     narration = NarrationResult.model_validate(task.workflow.node_states["synthesize_audio"].output)
@@ -485,7 +485,8 @@ async def test_rerunning_the_timeline_reuses_the_timeline_artifact(make_containe
 
 async def test_identical_lessons_produce_identical_audio_stored_once(make_container, tmp_path) -> None:
     container = make_container()
-    first, second = await run_lesson(container), await run_lesson(container)
+    # Two learners in the same state get the same lesson (one learner's second lesson adapts to the first).
+    first, second = await run_lesson(container), await run_lesson(container, learner_id="twin-learner")
     assert first.status == second.status == TaskStatus.COMPLETED
     hashes = [sorted(a.content_hash for a in container.task_service.artifacts(t.task_id)
                      if a.type == ArtifactType.AUDIO_ASSET) for t in (first, second)]

@@ -10,6 +10,7 @@ from pydantic import Field, model_validator
 from app.schemas.common import Schema
 from app.schemas.learner import AnswerEvaluation, LearnerSnapshot, MasteryChange
 from app.schemas.lesson import ConceptRef, LearnerAnswer, LessonContent, LessonPlan, LessonRequest
+from app.schemas.pedagogy import EvaluationFeedback, NextLearningRecommendation
 
 ConceptStatus = Literal["mastered", "partial", "gap"]
 
@@ -186,6 +187,8 @@ class LearnerEvaluationReport(Schema):
     partial: list[str]
     remaining_gaps: list[str]
     recommendation: LearningRecommendation
+    feedback: EvaluationFeedback | None = None  # deterministic: read from the updated mastery state
+    next_recommendation: NextLearningRecommendation | None = None  # the pedagogical engine's next lesson
     assessment_created_at: datetime | None
     answers_submitted_at: datetime | None
     evaluated_at: datetime | None

@@ -39,3 +39,5 @@ jobs:
         run: python scripts/run_provider_demo.py --smoke
       - name: Production demo dry run (offline, checks configuration, calls nothing)
         run: python scripts/run_production_demo.py --dry-run
+      - name: Adaptive demo (the next recommendation must change with the learner's mastery)
+        run: python scripts/run_adaptive_demo.py

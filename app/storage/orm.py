@@ -49,3 +49,35 @@ class LearnerRow(Base):
     learner_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     body: Mapped[str] = mapped_column(Text)
+
+
+class LearningEvidenceRow(Base):
+    """Append-only: one immutable LearningEvidence per row, read back in recording order (seq)."""
+
+    __tablename__ = "learning_evidence"
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    evidence_id: Mapped[str] = mapped_column(String(64), unique=True)
+    learner_id: Mapped[str] = mapped_column(String(128), index=True)
+    concept_id: Mapped[str] = mapped_column(String(128), index=True)
+    source_type: Mapped[str] = mapped_column(String(32))
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    body: Mapped[str] = mapped_column(Text)
+
+
+class LearningEventRow(Base):
+    __tablename__ = "learning_events"
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(64), unique=True)
+    learner_id: Mapped[str] = mapped_column(String(128), index=True)
+    type: Mapped[str] = mapped_column(String(64), index=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    body: Mapped[str] = mapped_column(Text)
+
+
+class LearningGoalRow(Base):
+    __tablename__ = "learning_goals"
+    goal_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    learner_id: Mapped[str] = mapped_column(String(128), index=True)
+    domain: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(32))
+    body: Mapped[str] = mapped_column(Text)

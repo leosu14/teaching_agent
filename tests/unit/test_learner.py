@@ -5,9 +5,9 @@ from datetime import timedelta
 import pytest
 
 from app.learner.frameworks import CEFR, MASTERY_SCALE, UnknownFramework, default_frameworks
-from app.learner.mastery import apply_evidence, apply_exposure
+from app.learner.mastery import MasteryUpdater
 from app.learner.memory import UnknownLearner
-from app.schemas.learner import AnswerEvaluation, ConceptMastery, LearnerProfileInput, SubjectState
+from app.schemas.learner import AnswerEvaluation, ConceptMastery, LearnerProfileInput, LearningEvidence, SubjectState
 from app.schemas.lesson import ConceptEstimate, ConceptRef, DiagnosticResult, LessonOutcome, LessonRequest
 from tests.unit.helpers import NOW, scope, service
 
@@ -20,16 +20,23 @@ def test_level_frameworks_are_pluggable_and_generic() -> None:
         default_frameworks().get("elo")
 
 
-def test_evidence_and_exposure_update_mastery() -> None:
+def _evidence(correct: bool, difficulty: float, ref: str) -> LearningEvidence:
+    return LearningEvidence(evidence_id=ref, learner_id="l", concept_id="c", source_type="exercise", source_ref=ref,
+                            correctness="correct" if correct else "incorrect", score=1.0 if correct else 0.0,
+                            difficulty=difficulty, timestamp=NOW)
+
+
+def test_evidence_updates_mastery_and_exposure_only_schedules_review() -> None:
+    updater = MasteryUpdater()
     c = ConceptMastery(concept_id="c", name="c", subject="s", mastery=0.3)
-    apply_evidence(c, correct=True, difficulty=0.8, now=NOW)
+    c = updater.apply(c, _evidence(True, 0.8, "e1"))
     assert c.mastery > 0.6 and c.evidence_count == 1 and c.confidence == pytest.approx(0.4)
     high = c.mastery
-    apply_evidence(c, correct=False, difficulty=0.2, now=NOW)
-    assert c.mastery < high and c.next_review_at == NOW + timedelta(days=3 if c.mastery >= 0.5 else 1)
+    c = updater.apply(c, _evidence(False, 0.2, "e2"))
+    assert c.mastery < high and c.next_review_at == NOW + timedelta(days=1)  # a miss is reviewed soon
     before = c.mastery
-    apply_exposure(c, now=NOW)
-    assert before < c.mastery < 1 and c.exposures == 1
+    c = updater.expose(c, NOW)  # being taught is not evidence: mastery is unchanged, a review is scheduled
+    assert c.mastery == before and c.exposures == 1 and c.next_review_at is not None
 
 
 def outcome(task_id: str = "t1") -> LessonOutcome:

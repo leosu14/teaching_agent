@@ -16,11 +16,13 @@ ALLOWED: dict[str, set[str]] = {
     "providers": FOUNDATION | {"providers"},
     "storage": FOUNDATION | {"storage"},
     "learner": FOUNDATION | {"learner"},
+    "pedagogy": FOUNDATION | {"pedagogy"},
     "artifacts": FOUNDATION | {"artifacts"},
-    "tools": FOUNDATION | {"tools", "providers", "learner", "artifacts"},
+    "tools": FOUNDATION | {"tools", "providers", "learner", "pedagogy", "artifacts"},
     "agents": FOUNDATION | {"agents", "tools", "providers"},
     "runtime": FOUNDATION | {"runtime", "agents", "tools", "providers"},
-    "services": FOUNDATION | {"services", "runtime", "agents", "tools", "providers", "learner", "artifacts", "storage"},
+    "services": FOUNDATION | {"services", "runtime", "agents", "tools", "providers", "learner", "pedagogy", "artifacts",
+                              "storage"},
     "api": FOUNDATION | {"api", "services"},
 }
 # Finer rules on top of the layer order.

@@ -12,6 +12,7 @@ from app.schemas.common import CostSummary, Schema, utcnow
 from app.schemas.evaluation import LearningRecommendation
 from app.schemas.learner import MasteryChange
 from app.schemas.lesson import LessonRequest
+from app.schemas.pedagogy import EvaluationFeedback, NextLearningRecommendation
 from app.schemas.workflow import NodeStatus, WorkflowState
 
 
@@ -79,6 +80,8 @@ class TaskResult(Schema):
     score: float | None = None
     remaining_gaps: list[str] = Field(default_factory=list)
     recommendation: LearningRecommendation | None = None
+    next_recommendation: NextLearningRecommendation | None = None
+    feedback: EvaluationFeedback | None = None
     warnings: list[str] = Field(default_factory=list)
 
 

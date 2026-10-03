@@ -27,6 +27,7 @@ from app.config.routing import ConfigError, RoutingConfig, load_routing
 from app.config.settings import Settings
 from app.learner.frameworks import FrameworkRegistry, default_frameworks
 from app.learner.memory import LearnerMemoryService
+from app.pedagogy.strategy import StrategyRegistry
 from app.observability.events import EventBus
 from app.observability.logging import log_event
 from app.observability.redaction import register_secret
@@ -84,11 +85,24 @@ from app.storage.object_store import FilesystemObjectStore
 from app.storage.repositories import (
     SqlArtifactRepository,
     SqlEventRepository,
+    SqlEvidenceRepository,
+    SqlGoalRepository,
     SqlLearnerRepository,
+    SqlLearningEventRepository,
     SqlTaskRepository,
 )
 from app.tools.artifacts.tools import ReadArtifactsTool, StoreArtifactsTool
-from app.tools.learner.tools import LearnerSnapshotTool, LearnerSummaryTool, RecordEvaluationTool, RecordLessonTool
+from app.tools.knowledge.base import KnowledgeConceptsTool, RetrieverKnowledgeBase
+from app.tools.learner.tools import (
+    LearnerModelTool,
+    LearnerSnapshotTool,
+    LearnerSummaryTool,
+    LearningGoalTool,
+    RecordDiagnosticTool,
+    RecordEvaluationTool,
+    RecordLessonTool,
+)
+from app.tools.pedagogy.tools import FeedbackTool, GapAnalysisTool, PlanningTool, RecommendationTool
 from app.tools.manager import ToolManager
 from app.tools.audio.assets import AudioAssetLookupTool, AudioAssetTool
 from app.tools.audio.timeline import PresentationTimelineTool
@@ -336,7 +350,11 @@ def build_container(
     router = ModelRouter(routing, providers.llm)
 
     frameworks = default_frameworks()
-    memory = LearnerMemoryService(SqlLearnerRepository(sessions), frameworks)
+    pedagogy = settings.pedagogy_config()
+    strategies = StrategyRegistry()
+    memory = LearnerMemoryService(SqlLearnerRepository(sessions), frameworks,
+                                  evidence=SqlEvidenceRepository(sessions), events=SqlLearningEventRepository(sessions),
+                                  goals=SqlGoalRepository(sessions), config=pedagogy)
     artifacts = ArtifactService(SqlArtifactRepository(sessions), FilesystemObjectStore(settings.resolved_object_store_dir))
 
     retriever = retriever or LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json")
@@ -360,6 +378,14 @@ def build_container(
         LearnerSnapshotTool(memory),
         RecordLessonTool(memory),
         RecordEvaluationTool(memory),
+        RecordDiagnosticTool(memory),
+        LearnerModelTool(memory),
+        LearningGoalTool(memory),
+        KnowledgeConceptsTool(RetrieverKnowledgeBase(retriever)),
+        GapAnalysisTool(pedagogy),
+        PlanningTool(pedagogy, strategies),
+        RecommendationTool(pedagogy, strategies),
+        FeedbackTool(pedagogy),
         StoreArtifactsTool(artifacts),
         ReadArtifactsTool(artifacts),
         ImageSearchTool(image_search),
@@ -396,6 +422,8 @@ def build_container(
     options = LessonWorkflowOptions(
         diagnostic_rounds=settings.diagnostic_max_rounds,
         memory_confidence=settings.diagnostic_memory_confidence,
+        questioning=pedagogy.questioning,
+        lesson_minutes=settings.pedagogy_lesson_minutes,
         revision_policy=RevisionPolicy(max_revisions=settings.max_revisions,
                                        on_exhausted=settings.revision_exhausted_policy),
         research_requirement=settings.research_requirement,
@@ -422,7 +450,7 @@ def build_container(
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,
                                 agents=agents, tools=tools, router=router, events=events, observers=observers)
     task_service = TaskService(orchestrator, task_repo, event_repo, artifacts)
-    learner_service = LearnerService(memory)
+    learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,

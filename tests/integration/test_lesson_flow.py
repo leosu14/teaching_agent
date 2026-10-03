@@ -39,8 +39,9 @@ async def test_request_to_completed_lesson(container, mock_llm) -> None:
     assert task.status == TaskStatus.COMPLETED, task.errors
 
     order = task.workflow.execution_order
-    expected = ["learner_snapshot", "diagnose_1", "answers_1", "diagnose_2", "answers_2", "diagnose_3", "diagnostic",
-                "research", "research_policy", "store_research", "plan", "teach_review", "visual_gate", "visual", "visual_policy", "package_artifacts",
+    expected = ["learner_snapshot", "knowledge_graph", "load_goal", "diagnose_1", "answers_1", "diagnose_2",
+                "answers_2", "diagnose_3", "diagnostic", "record_diagnostic", "learner_model", "knowledge_gaps",
+                "pedagogical_plan", "store_pedagogy", "research", "research_policy", "store_research", "plan", "teach_review", "visual_gate", "visual", "visual_policy", "package_artifacts",
                 "store_artifacts", "presentation_gate", "slide_plan", "validate_slide_plan", "store_slide_plan",
                 "build_presentation", "render_presentation", "audio_plan", "validate_audio_plan", "store_audio_plan",
                 "synthesize_audio", "audio_policy", "audio_timeline", "video_plan", "validate_video_plan",
@@ -52,7 +53,11 @@ async def test_request_to_completed_lesson(container, mock_llm) -> None:
     assert arts["lesson"].type == ArtifactType.LESSON
     assert arts["lesson_plan"].type == ArtifactType.LESSON_PLAN
     assert arts["research_bundle"].type == ArtifactType.RESEARCH_BUNDLE and arts["research_bundle"].parent_ids == []
-    assert arts["lesson_plan"].parent_ids == [arts["research_bundle"].artifact_id]
+    assert arts["lesson_plan"].parent_ids == [arts["research_bundle"].artifact_id, arts["pedagogical_plan"].artifact_id]
+    # The adaptive chain: diagnostic evidence -> learner model -> knowledge gaps -> pedagogical plan.
+    assert arts["pedagogical_plan"].parent_ids == [arts["knowledge_gaps"].artifact_id]
+    assert arts["knowledge_gaps"].parent_ids == [arts["learner_model"].artifact_id]
+    assert arts["learner_model"].parent_ids == [arts["learning_evidence"].artifact_id]
     images = sorted(a.artifact_id for a in arts.values() if a.type == ArtifactType.IMAGE_ASSET)
     assert len(images) == 4
     assert arts["lesson"].parent_ids[:2] == [arts["lesson_plan"].artifact_id, arts["research_bundle"].artifact_id]
@@ -134,5 +139,6 @@ async def test_malformed_model_output_goes_through_validation_retry(container, m
 async def test_unknown_topic_fails_cleanly(container) -> None:
     task = await run_lesson(container, request="Create an A2 lesson about astrophysics.")
     assert task.status == TaskStatus.FAILED
-    assert task.errors and task.errors[-1].node_id == "diagnose_1"
+    # The learning goal is resolved before the diagnostic: an unknown topic fails there, before any model call.
+    assert task.errors and task.errors[-1].node_id == "load_goal"
     assert "no concepts known" in task.errors[-1].message

@@ -1,0 +1,180 @@
+[
+ {
+  "doc_id": "es-conv-preterite",
+  "title": "Preterite for completed events",
+  "text": "The preterite narrates completed past events with a clear end: ayer hablé con Ana, fui al cine. B1 conversation grammar.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "conversation",
+   "level": "B1",
+   "concept": {
+    "concept_id": "es.conv.preterite",
+    "name": "Preterite for completed events",
+    "level": "B1",
+    "prerequisites": [],
+    "description": "Narrating finished, completed actions in the past with the preterite (hablé, comí, fui)."
+   },
+   "probes": [
+    {
+     "prompt": "Complete: Ayer yo ___ con mi hermana. (hablar)",
+     "answer": "hablé",
+     "accepted": [
+      "hable"
+     ],
+     "difficulty": 0.5
+    },
+    {
+     "prompt": "Complete: El sábado ella ___ al cine. (ir)",
+     "answer": "fue",
+     "difficulty": 0.3
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "es-conv-imperfect",
+  "title": "Imperfect for descriptions and habits",
+  "text": "The imperfect describes habits and background in the past: de niño jugaba en el parque, hacía sol. B1 conversation grammar.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "conversation",
+   "level": "B1",
+   "concept": {
+    "concept_id": "es.conv.imperfect",
+    "name": "Imperfect for descriptions and habits",
+    "level": "B1",
+    "prerequisites": [],
+    "description": "Describing background, habits and ongoing past states with the imperfect (hablaba, comía, era)."
+   },
+   "probes": [
+    {
+     "prompt": "Complete: De niño yo ___ en el parque todos los días. (jugar)",
+     "answer": "jugaba",
+     "difficulty": 0.5
+    },
+    {
+     "prompt": "Complete: Cuando era pequeña, ___ mucho. (leer)",
+     "answer": "leía",
+     "accepted": [
+      "leia"
+     ],
+     "difficulty": 0.3
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "es-conv-opinions",
+  "title": "Expressing opinions",
+  "text": "Opinions in conversation: creo que, pienso que, me parece que, en mi opinión; ask with ¿qué piensas de...? B1 conversation.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "conversation",
+   "level": "B1",
+   "concept": {
+    "concept_id": "es.conv.opinions",
+    "name": "Expressing opinions",
+    "level": "B1",
+    "prerequisites": [],
+    "description": "Giving and asking for opinions with creo que, pienso que, me parece que and en mi opinión."
+   },
+   "probes": [
+    {
+     "prompt": "Give your opinion: ___ que el libro es interesante. (creer, yo)",
+     "answer": "creo",
+     "difficulty": 0.5
+    },
+    {
+     "prompt": "Ask for an opinion: ¿Qué ___ de la película? (pensar, tú)",
+     "answer": "piensas",
+     "difficulty": 0.3
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "es-conv-pret-imp",
+  "title": "Preterite and imperfect in storytelling",
+  "text": "Storytelling contrast: the imperfect sets the scene and the preterite tells what happened: llovía cuando llegué. B1 conversation.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "conversation",
+   "level": "B1",
+   "concept": {
+    "concept_id": "es.conv.preterite_imperfect",
+    "name": "Preterite and imperfect in storytelling",
+    "level": "B1",
+    "prerequisites": [
+     "es.conv.preterite",
+     "es.conv.imperfect"
+    ],
+    "description": "Contrasting preterite and imperfect when telling a story: the imperfect sets the scene, the preterite moves the plot."
+   },
+   "probes": [
+    {
+     "prompt": "Complete: ___ (llover) cuando llegué a casa.",
+     "answer": "llovía",
+     "accepted": [
+      "llovia"
+     ],
+     "difficulty": 0.55
+    },
+    {
+     "prompt": "Which form tells the event: Mientras leía, sonó / sonaba el teléfono?",
+     "answer": "sonó",
+     "accepted": [
+      "sono"
+     ],
+     "difficulty": 0.3
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "es-conv-subj-opinion",
+  "title": "Disagreeing with the subjunctive",
+  "text": "Disagreeing politely: after no creo que and no pienso que use the subjunctive: no creo que sea verdad. B1 conversation.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "conversation",
+   "level": "B1",
+   "concept": {
+    "concept_id": "es.conv.subjunctive_opinion",
+    "name": "Disagreeing with the subjunctive",
+    "level": "B1",
+    "prerequisites": [
+     "es.conv.opinions"
+    ],
+    "description": "Negated opinions (no creo que, no pienso que) take the subjunctive: no creo que sea verdad."
+   },
+   "probes": [
+    {
+     "prompt": "Complete: No creo que ___ verdad. (ser)",
+     "answer": "sea",
+     "difficulty": 0.55
+    },
+    {
+     "prompt": "Complete: No pienso que ella ___ razón. (tener)",
+     "answer": "tenga",
+     "difficulty": 0.35
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "es-ref-conversation",
+  "title": "Reference: conversation strategies",
+  "text": "Keep a conversation going with follow-up questions: ¿Y tú? ¿Qué piensas? Example: Me parece que sí, ¿y a ti?",
+  "metadata": {
+   "kind": "reference",
+   "subject": "spanish",
+   "publisher": "Course knowledge base",
+   "language": "en"
+  }
+ }
+]

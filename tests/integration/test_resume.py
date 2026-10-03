@@ -42,8 +42,9 @@ async def test_kill_after_planner_then_resume(settings) -> None:
     assert crashed.status == TaskStatus.RUNNING
     assert crashed.workflow.node_states["plan"].status.value == "COMPLETED"
     assert crashed.workflow.node_states["teach_review"].status.value == "PENDING"
-    # Only the research bundle was stored before the crash; it is part of the checkpointed past.
-    assert [a.name for a in second.task_service.artifacts(task.task_id)] == ["research_bundle"]
+    # Only the adaptive state and the research bundle were stored before the crash; they are the checkpointed past.
+    assert sorted(a.name for a in second.task_service.artifacts(task.task_id)) == [
+        "knowledge_gaps", "learner_model", "learning_evidence", "pedagogical_plan", "research_bundle"]
     cost_before = crashed.cost.actual_cost_usd
 
     resumed = await second.task_service.resume(task.task_id)
@@ -62,7 +63,8 @@ async def test_kill_after_planner_then_resume(settings) -> None:
     # Final artifacts are correct, and the cost includes both processes' work.
     arts = {a.name: a for a in second.task_service.artifacts(task.task_id)
             if not a.name.startswith(("audio_", "presentation_timeline", "video")) and a.name != "subtitles"}
-    assert set(arts) == {"research_bundle", "lesson_plan", "lesson", "narration_script", "slide_plan",
+    assert set(arts) == {"learning_evidence", "learner_model", "knowledge_gaps", "pedagogical_plan",
+                         "research_bundle", "lesson_plan", "lesson", "narration_script", "slide_plan",
                          "review_report", "visual_plan", "image_v1_photo", "image_v1_diagram",
                          "image_v2_illustration", "image_v2_diagram", "presentation"}
     assert arts["lesson"].type == ArtifactType.LESSON and arts["lesson"].version == 1

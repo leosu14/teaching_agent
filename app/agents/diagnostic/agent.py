@@ -48,6 +48,7 @@ class KnowledgeDiagnosticAgent(Agent[DiagnosticInput, DiagnosticStep]):
                 raise OutputRejected("question ids must not repeat earlier rounds")
             if any(i.question.concept_id not in concept_ids for i in output.items):
                 raise OutputRejected("questions must target the topic's concepts")
+            self._check_questioning(output, source)
         else:
             result = output.result
             assert result is not None
@@ -57,3 +58,31 @@ class KnowledgeDiagnosticAgent(Agent[DiagnosticInput, DiagnosticStep]):
                 raise OutputRejected("concept_mastery must cover exactly the topic's concepts")
             if result.starting_point not in concept_ids:
                 raise OutputRejected("starting_point must be one of the topic's concepts")
+
+    @staticmethod
+    def _check_questioning(output: DiagnosticStep, source: DiagnosticInput) -> None:
+        """The adaptive questioning policy is enforced here, deterministically: first-round questions only where
+        memory is not already confident, follow-ups only for concepts just missed (within the follow-up budget),
+        one question per concept per round, and never past the question budget."""
+        policy = source.questioning
+        asked = source.questions_per_concept()
+        total = sum(asked.values())
+        concepts = [i.question.concept_id for i in output.items]
+        if len(concepts) != len(set(concepts)):
+            raise OutputRejected("ask at most one question per concept in a round")
+        if total + len(concepts) > policy.max_questions:
+            raise OutputRejected(f"the diagnostic may ask at most {policy.max_questions} questions in total")
+        if not source.rounds:
+            allowed = set(policy.first_round([e.concept.concept_id for e in source.concepts],
+                                             source.confident_concepts()))
+            reason = "memory is already confident about the other concepts"
+        else:
+            latest = {i.question.question_id for i in source.rounds[-1].items}
+            if {e.question_id for e in output.evaluations} != latest:
+                raise OutputRejected("grade every answer of the latest round in `evaluations` before following up")
+            missed = [e.concept_id for e in output.evaluations if not e.correct]
+            allowed = set(policy.follow_ups(asked, missed, total))
+            reason = "follow-ups are only for concepts just missed, within the follow-up budget"
+        extra = sorted(set(concepts) - allowed)
+        if extra:
+            raise OutputRejected(f"do not ask about {extra}: {reason}")
