@@ -123,11 +123,20 @@ class Orchestrator:
         self._save(task)
         return await self.run(task_id)
 
+    def waiting_on_work(self, task: Task) -> bool:
+        """Whether a WAITING task waits on outside work (e.g. a video generation job), not on a person. Such a task
+        is resumed (it checks the work again) rather than given input."""
+        if task.status != TaskStatus.WAITING or task.waiting is None or task.plan is None:
+            return False
+        node = self._definition(task).all_nodes.get(task.waiting.node_id)
+        return node is not None and not isinstance(node, HumanApprovalNode)
+
     async def resume(self, task_id: str) -> Task:
         task = self._tasks.get(task_id)
-        if task.status not in RESUMABLE:
+        if task.status not in RESUMABLE and not self.waiting_on_work(task):
             raise InvalidTransition(f"task {task_id} in status {task.status.value} cannot be resumed")
         task.control = TaskControl()
+        task.waiting = None
         if task.workflow is not None:
             for ns in task.workflow.node_states.values():
                 if ns.status == NodeStatus.FAILED:
@@ -186,6 +195,18 @@ class Orchestrator:
         task.control.cancel_requested = True
         self._tasks.save(task)
         return task
+
+    async def release(self, task_id: str) -> list[str]:
+        """For a cancelled task: let the nodes it was waiting in release their outside work (cancel provider jobs).
+        Returns the node ids released. Artifacts already stored are untouched."""
+        task = self._tasks.get(task_id)
+        if task.status != TaskStatus.CANCELLED or task.plan is None or task.workflow is None:
+            return []
+        ledger = UsageLedger(task.cost, budget=TaskBudget.of(task.metadata))
+        scope = ExecutionScope(events=self._events, usage=ledger, task_id=task.task_id)
+        released = await self._engine.release(self._definition(task), task, scope, _Hooks(self, task, ledger))
+        self._save(task, ledger)
+        return released
 
     # --- internals ---------------------------------------------------------------------------
 

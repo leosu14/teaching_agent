@@ -36,6 +36,7 @@ from app.providers.core.selector import ProviderSelector
 from app.providers.llm.router import ModelRouter
 from app.runtime.orchestrator.planner import WorkflowPlanner
 from app.runtime.workflows.lesson_evaluation import LESSON_TASK
+from app.runtime.workflows.lesson_generation import GENERATED_VIDEO_CAPABILITY
 from app.runtime.workflows.lesson_generation import WORKFLOW_ID as LESSON_WORKFLOW
 from app.schemas.artifact import Artifact, ArtifactType
 from app.schemas.common import utcnow
@@ -54,6 +55,7 @@ from app.schemas.production import (
     ProductionReport,
     ProductionTask,
     ProviderChoice,
+    VideoGenerationPlan,
 )
 from app.schemas.providers import Capability, HealthStatus
 from app.schemas.task import Task, TaskStatus
@@ -131,8 +133,29 @@ class ProductionService:
         return LessonRequest(
             raw_request=f"Create a {task.level} {subject} lesson about {task.topic}.", subject=subject,
             topic=task.topic, framework_id=framework_id, target_level=task.level,
-            language_of_instruction=task.language, capabilities=list(LESSON_CAPABILITIES),
+            language_of_instruction=task.language,
+            capabilities=[*LESSON_CAPABILITIES, *([GENERATED_VIDEO_CAPABILITY] if task.generated_video else [])],
         )
+
+    def video_generation_plan(self, task: ProductionTask, budget: TaskBudget) -> VideoGenerationPlan:
+        """The generated-video part of a plan: provider, limits, an upper-bound estimate and the fallback policy.
+        Nothing is called: the price is the configured one (VIDEO_GENERATION_PRICE_PER_SECOND), never guessed."""
+        config = self._settings.generated_video_config()
+        selection = self._selector.select(Capability.VIDEO_GENERATION)
+        provider = self._registry.get(Capability.VIDEO_GENERATION, selection.provider)
+        segments = budget.max_generated_video_segments or 0
+        seconds = min(budget.max_generated_video_seconds or 0.0, segments * config.max_segment_seconds)
+        enabled = (task.generated_video and self._settings.generated_video_enabled and segments > 0
+                   and seconds >= config.min_segment_seconds)
+        price = config.price_per_second_usd if provider.requires_network else 0.0
+        return VideoGenerationPlan(
+            requested=task.generated_video, enabled=enabled, provider=selection.provider, model=selection.model,
+            real=provider.requires_network, max_segments=segments, max_seconds=budget.max_generated_video_seconds or 0.0,
+            segment_seconds=(config.min_segment_seconds, config.max_segment_seconds),
+            estimated_seconds=round(seconds if enabled else 0.0, 3),
+            estimated_cost_usd=None if price is None else round((seconds if enabled else 0.0) * price, 4),
+            max_cost_usd=budget.max_video_generation_cost_usd, required=config.required,
+            failure_policy=config.failure_policy)
 
     def _framework_for(self, level: str) -> str:
         for framework_id in self._frameworks.ids():
@@ -173,6 +196,9 @@ class ProductionService:
             "options": self._settings.model_dump(mode="json", include=WORKFLOW_SETTINGS),
             "video": self._settings.video_config().model_dump(mode="json"),
         }
+        if GENERATED_VIDEO_CAPABILITY in request.capabilities:  # other runs keep their earlier keys
+            body["generated_video"] = {"enabled": self._settings.generated_video_enabled,
+                                       "config": self._settings.generated_video_config().model_dump(mode="json")}
         digest = hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         return f"run_{digest[:32]}"
 
@@ -194,7 +220,9 @@ class ProductionService:
         request = self.lesson_request(task)  # ConfigError when the level or subject cannot be resolved
         template = self._planner.template(LESSON_WORKFLOW)
         budget = self.budget()
-        required = required_capabilities(template.provider_capabilities, budget)
+        video_generation = self.video_generation_plan(task, budget)
+        required = required_capabilities(template.provider_capabilities, budget,
+                                         generated_video=video_generation.enabled)
         readiness_problems, warnings = production_readiness(self._settings.providers, required)
         if require_production:
             problems += readiness_problems
@@ -213,7 +241,7 @@ class ProductionService:
             providers=self.provider_choices(required), llm_routes=self.llm_routes(),
             required_capabilities=sorted(c.value for c in required), budget=budget,
             estimated_llm_cost_usd=self._estimate(), knowledge_concepts=concepts,
-            run_key=self.run_key(request, task.learner_id),
+            video_generation=video_generation, run_key=self.run_key(request, task.learner_id),
         )
 
     async def _concepts(self, request: LessonRequest) -> int:

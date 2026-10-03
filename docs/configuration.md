@@ -55,6 +55,12 @@ They are validated when the container is built; errors say what to fix.
 | `TA_VIDEO_TIMEOUT_SECONDS` | `1200` | Longest an FFmpeg run may take |
 | `TA_VIDEO_WORK_DIR` / `TA_VIDEO_KEEP_FAILED_WORK` | `$TA_DATA_DIR/work` / `true` | Scratch space for composition; a failed job's directory is kept under `failed/` for diagnosis |
 
+| `TA_GENERATED_VIDEO_ENABLED` | `true` | Master switch for generated video segments. Only lessons that ask for the `video.generated_segments` capability get them either way; `false` drops the stage even for those |
+| `TA_GENERATED_VIDEO_MIN_SECONDS` / `TA_GENERATED_VIDEO_MAX_SECONDS` | `3` / `10` | Length range of one generated clip; the clip follows its slide's narration inside it, snapped to a duration the provider offers |
+| `TA_GENERATED_VIDEO_STRATEGY` | `full_frame_replace` | How a clip is shown: `full_frame_replace` (the clip fills the frame, subtitles on top) or `inset` (inside the slide card's media box). Pronunciation clips always use `inset` |
+| `TA_GENERATED_VIDEO_REQUIRED` / `TA_GENERATED_VIDEO_FAILURE_POLICY` | `false` / `fail` | Planned clips are optional by default: a failure falls back to the slide's image or the slide. With `REQUIRED=true`, `fail` fails the task and `continue` falls back with a warning |
+| `TA_GENERATED_VIDEO_POLL_INTERVAL_SECONDS` / `_POLL_TIMEOUT_SECONDS` / `_POLL_MAX_ATTEMPTS` | `5` / `600` / `120` | Generic job polling. After the timeout the task WAITs (kind `video_generation`) and resuming it polls the same jobs; a job that used every attempt fails |
+
 Defaults for the video format live only in `VideoConfig` (`app/schemas/video.py`); an unset `TA_VIDEO_*` variable keeps
 the default. FFmpeg: `apt-get install ffmpeg` (Debian/Ubuntu; CI does this), `brew install ffmpeg` (macOS).
 | `TA_LOG_LEVEL` / `TA_LOG_JSON` | `INFO` / `true` | Structured logging |
@@ -90,7 +96,11 @@ are no longer read (they only ever accepted the mocks).
 | `SEARCH_API_KEY` / `SEARCH_BASE_URL` | `TAVILY_API_KEY` / `https://api.tavily.com` | Web search credentials and endpoint |
 | `SEARCH_DEPTH` / `SEARCH_INCLUDE_RAW_CONTENT` | `basic` / `true` | Tavily search depth; fetch page text so evidence quotes can be checked against it |
 | `SEARCH_INCLUDE_DOMAINS` / `SEARCH_EXCLUDE_DOMAINS` | none | Comma-separated website restrictions applied to every research query |
-| `<CAP>_TIMEOUT_SECONDS` | LLM 120, TTS 90, IMAGE 110, SEARCH 15, IMAGE_SEARCH 15 | Per-attempt timeout; every call has one |
+| `VIDEO_GENERATION_PROVIDER` / `VIDEO_GENERATION_FALLBACK_PROVIDER` | `mock` / none | `mock` or `minimax` (MiniMax Hailuo, plain HTTP). A key alone never selects MiniMax: it needs this variable and `TEACHING_AGENT_MODE=production`. The fallback applies to submission only |
+| `VIDEO_GENERATION_API_KEY` / `VIDEO_GENERATION_MODEL` / `VIDEO_GENERATION_BASE_URL` | `MINIMAX_API_KEY` / `MiniMax-Hailuo-02` / `https://api.minimax.io/v1` | Video generation credentials, model and endpoint |
+| `VIDEO_GENERATION_PRICE_PER_SECOND` | none | USD per generated second; without it the cost is unknown and the segment and seconds limits bound spending |
+| `VIDEO_GENERATION_MAX_DOWNLOAD_BYTES` | 200 MB | Largest clip file accepted from the provider |
+| `<CAP>_TIMEOUT_SECONDS` | LLM 120, TTS 90, IMAGE 110, SEARCH 15, IMAGE_SEARCH 15, VIDEO_GENERATION 60 (per request; jobs are polled) | Per-attempt timeout; every call has one |
 | `<CAP>_MAX_ATTEMPTS` | 3 (IMAGE 2) | Attempts for transient failures only |
 | `<CAP>_REQUESTS_PER_MINUTE` / `<CAP>_MAX_CONCURRENCY` | unlimited | Local, per-process rate limit; waiting emits `provider.rate_limited` |
 | `PROVIDER_BACKOFF_SECONDS` / `_MULTIPLIER` / `PROVIDER_MAX_BACKOFF_SECONDS` | `0.5` / `2.0` / `8.0` | Bounded exponential backoff; a vendor `Retry-After` is honoured up to the cap |
@@ -105,7 +115,10 @@ tests/smoke` does the same as tests; without credentials they are skipped.
 
 `scripts/run_production_demo.py` runs a whole lesson on the real providers within a per-task budget
 (`MAX_LLM_REQUESTS`, `MAX_LLM_TOKENS`, `MAX_SEARCH_REQUESTS`, `MAX_GENERATED_IMAGES`, `MAX_SEARCHED_IMAGES`,
-`MAX_TTS_CHARACTERS`, `MAX_TTS_SECONDS`, `MAX_COST_USD`, `PRODUCTION_HEALTH_TIMEOUT_SECONDS`; no `TA_` prefix). See
+`MAX_TTS_CHARACTERS`, `MAX_TTS_SECONDS`, `MAX_COST_USD`, `PRODUCTION_HEALTH_TIMEOUT_SECONDS`; no `TA_` prefix).
+`MAX_GENERATED_VIDEO_SEGMENTS` (`2`), `MAX_GENERATED_VIDEO_SECONDS` (`20`) and `MAX_VIDEO_GENERATION_COST_USD` (none)
+bound generated video segments in every lesson that asks for them: the video strategy plans within them, and
+production tasks also enforce them before each submission. See
 [production](production.md) for the variables, defaults, the dry run, confirmation, resume and the run report.
 
 ## Model routing (`config/routing.toml`)

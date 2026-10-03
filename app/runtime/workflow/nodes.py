@@ -83,6 +83,8 @@ class NodeRuntime:
     node_state: NodeState
     checkpoint: Callable[[], None]
     run_child: Callable[[Node], Awaitable[NodeState]]
+    # Whether the task's owner asked to cancel. The engine checks between nodes; long-waiting nodes check it too.
+    cancel_requested: Callable[[], bool] = lambda: False
 
     def agent_context(self) -> AgentContext:
         return AgentContext(router=self.router, tools=self.tools, scope=self.scope)
@@ -106,6 +108,10 @@ class Node(ABC):
 
     @abstractmethod
     async def execute(self, rt: NodeRuntime) -> NodeResult: ...
+
+    async def on_cancel(self, rt: NodeRuntime) -> None:
+        """Release outside work (e.g. provider jobs) when the task is cancelled while this node waits. Default:
+        nothing to release."""
 
 
 InputBuilder = Callable[[StateView], BaseModel | dict]

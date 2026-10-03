@@ -29,7 +29,8 @@ if not LIVE:
         del os.environ[_key]
     os.environ.update({"LLM_PROVIDER": "", "LLM_MODEL": "", "TTS_PROVIDER": "mock", "TTS_FALLBACK_PROVIDER": "",
                        "IMAGE_PROVIDER": "mock", "IMAGE_FALLBACK_PROVIDER": "", "IMAGE_SEARCH_PROVIDER": "mock",
-                       "SEARCH_PROVIDER": "mock", "SEARCH_FALLBACK_PROVIDER": ""})
+                       "SEARCH_PROVIDER": "mock", "SEARCH_FALLBACK_PROVIDER": "",
+                       "VIDEO_GENERATION_PROVIDER": "mock", "VIDEO_GENERATION_FALLBACK_PROVIDER": ""})
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "fixtures" / "demo"

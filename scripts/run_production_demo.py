@@ -126,7 +126,7 @@ def print_plan(plan: ProductionPlan, *, mock: bool) -> None:
     print("\nProviders (credentials are never printed):")
     for p in plan.providers:
         flag = "required" if p.required else "not needed"
-        print(f"  {p.capability:<12} {p.provider:<9} model={p.model or '-':<24} "
+        print(f"  {p.capability:<16} {p.provider:<9} model={p.model or '-':<24} "
               f"{'real' if p.real else 'mock':<4} {flag}" + (f" fallback={','.join(p.fallbacks)}" if p.fallbacks else ""))
     routes = sorted(set(plan.llm_routes.values()))
     print(f"  LLM routes: {', '.join(routes)}")
@@ -138,6 +138,24 @@ def print_plan(plan: ProductionPlan, *, mock: bool) -> None:
           f"cost {'$%.2f' % b.max_cost_usd if b.max_cost_usd is not None else 'no limit (unit limits apply)'}")
     estimate = plan.estimated_llm_cost_usd
     print(f"  estimated LLM cost: {'$%.4f' % estimate if estimate is not None else 'unknown (models have no price)'}")
+    g = plan.video_generation
+    if g is not None:
+        print("\nVideo generation:")
+        if not g.requested:
+            print("  not requested (pass --generated-video to ask for generated segments)")
+        print(f"  provider: {g.provider}" + (f"  model={g.model}" if g.model else "")
+              + f"  {'real' if g.real else 'mock'}" + ("" if g.enabled or not g.requested else
+                                                       "  (disabled: settings or budget allow no segment)"))
+        print(f"  segments: up to {g.max_segments}, {g.segment_seconds[0]:g}-{g.segment_seconds[1]:g}s each, "
+              f"at most {g.max_seconds:g}s per lesson")
+        print(f"  estimated duration: up to {g.estimated_seconds:g}s")
+        cost = ("unknown (VIDEO_GENERATION_PRICE_PER_SECOND is not set; count and duration limits apply)"
+                if g.estimated_cost_usd is None else f"up to ${g.estimated_cost_usd:.2f}")
+        print(f"  estimated cost: {cost}"
+              + (f"  (limit ${g.max_cost_usd:.2f})" if g.max_cost_usd is not None else ""))
+        print(f"  fallback policy: {'required' if g.required else 'optional'} segments; a failed "
+              f"{'required segment fails the task' if g.required and g.failure_policy == 'fail' else 'segment continues'}"
+              f" with {g.fallback}")
     print(f"\nKnowledge base: {plan.knowledge_concepts} concepts for {plan.lesson_request.subject}/{plan.task.topic}")
     print(f"Stages ({len(plan.stages)} workflow nodes): {' -> '.join(plan.stages)}")
     for w in plan.warnings:
@@ -203,7 +221,7 @@ async def evaluate(container: Container, args: argparse.Namespace) -> int:
 async def run(container: Container, args: argparse.Namespace) -> int:
     production = container.production
     task = ProductionTask(level=args.level, topic=args.topic, language=args.language, learner_id=args.learner_id,
-                          subject=args.subject)
+                          subject=args.subject, generated_video=args.generated_video)
     plan = await production.plan(task, require_production=not args.mock)
     print_plan(plan, mock=args.mock)
     if args.dry_run:
@@ -262,6 +280,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--topic", default="Climate change", help="lesson topic (default: Climate change)")
     p.add_argument("--language", default="es", help="language of the lesson, BCP 47 (default: es)")
     p.add_argument("--subject", default=None, help="what is taught (default: the language, for a CEFR level)")
+    p.add_argument("--generated-video", action="store_true",
+                   help="ask for optional generated video segments (VIDEO_GENERATION_PROVIDER; budgets "
+                        "MAX_GENERATED_VIDEO_SEGMENTS, MAX_GENERATED_VIDEO_SECONDS, MAX_VIDEO_GENERATION_COST_USD)")
     p.add_argument("--learner-id", default="demo-user", help="learner whose memory is used and updated")
     p.add_argument("--output", type=Path, default=Path("output"), help="where production_run.json is written")
     p.add_argument("--data-dir", type=Path, default=None,

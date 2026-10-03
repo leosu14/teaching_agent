@@ -43,6 +43,11 @@ class FilesystemObjectStore:
     def get(self, uri: str) -> bytes:
         return self._resolve(uri).read_bytes()
 
+    def get_key(self, key: str) -> bytes | None:
+        """The object stored at `key`, or None (for small records whose key, not uri, is known)."""
+        path = self._path(key)
+        return path.read_bytes() if path.is_file() else None
+
     def exists(self, uri: str) -> bool:
         return self._resolve(uri).is_file()
 

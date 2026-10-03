@@ -259,5 +259,18 @@ class WorkflowEngine:
         return NodeRuntime(
             agents=self._agents, tools=self._tools, router=self._router, scope=scope, view=view,
             node_state=state.node_states[node.id], checkpoint=lambda: hooks.checkpoint(state, node.id),
-            run_child=run_child,
+            run_child=run_child, cancel_requested=lambda: hooks.control().cancel_requested,
         )
+
+    async def release(self, definition: WorkflowDefinition, task: Task, scope: ExecutionScope,
+                      hooks: EngineHooks) -> list[str]:
+        """Let every node the task was waiting in release its outside work (a cancelled task). Returns their ids."""
+        state = task.workflow or definition.initial_state()
+        view = StateView(state, task)
+        released = []
+        for node in definition.nodes:
+            if state.node_states[node.id].status == NodeStatus.WAITING and not isinstance(node, HumanApprovalNode):
+                await node.on_cancel(self._runtime(node, state, view, scope.for_node(node.id), hooks))
+                hooks.checkpoint(state, node.id)
+                released.append(node.id)
+        return released

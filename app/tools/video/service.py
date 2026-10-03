@@ -81,7 +81,8 @@ class VideoService:
     def validation_request(self, plan: VideoPlan, composed: VideoComposeResult) -> VideoValidationRequest:
         windows = []
         for seg in plan.slides:
-            if not seg.audio_refs and seg.duration > 3 * WINDOW_MARGIN:
+            mixed = seg.generated is not None and seg.generated.audio == "mixed"  # the clip's own sound plays
+            if not seg.audio_refs and not mixed and seg.duration > 3 * WINDOW_MARGIN:
                 windows.append(AudioWindow(label=f"{seg.segment_id}:silence", start_time=seg.start_time + WINDOW_MARGIN,
                                            end_time=seg.end_time - WINDOW_MARGIN, expect_sound=False))
         for t in plan.audio_tracks:
@@ -90,7 +91,8 @@ class VideoService:
                                            end_time=t.end_time - WINDOW_MARGIN, expect_sound=True))
         samples, previous = [], None
         for seg in plan.slides:
-            look = (seg.visual_ref.card.model_dump_json(), seg.visual_ref.image.checksum if seg.visual_ref.image else "")
+            look = (seg.visual_ref.card.model_dump_json(), seg.visual_ref.image.checksum if seg.visual_ref.image else "",
+                    seg.generated.checksum if seg.generated else "")
             samples.append(FrameSample(label=seg.segment_id, time=(seg.start_time + seg.end_time) / 2,
                                        expect_change=previous is not None and look != previous))
             previous = look
@@ -121,6 +123,8 @@ class VideoService:
             subtitles_burned=bool(plan.subtitle_track and plan.subtitle_track.burned_in and composed.subtitles_burned),
             transition=plan.config.transition.value, composer=composed.composer,
             render_seconds=composed.render_seconds, validation=report,
+            generated_segments=len(plan.generated_clips()),
+            generated_artifact_ids=[c.artifact_id for c in plan.generated_clips()],
         )
         return self.artifacts.store_object(
             task_id=task_id, name=request.name, type=ArtifactType.VIDEO, obj=obj, provider=composed.composer,

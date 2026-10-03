@@ -146,7 +146,8 @@ class ProviderInvoker:
                 model=record.model or model, attempt=attempt, vendor_request_id=record.vendor_request_id,
                 latency_ms=latency, input_tokens=record.input_tokens, output_tokens=record.output_tokens,
                 characters=record.characters, audio_seconds=record.audio_seconds, image_count=record.image_count,
-                result_count=record.result_count, estimated_cost_usd=record.estimated_cost,
+                result_count=record.result_count, video_seconds=record.video_seconds,
+                estimated_cost_usd=record.estimated_cost,
                 actual_cost_usd=record.actual_cost))  # BudgetExceededError when the reported usage is over a limit
             return result
 

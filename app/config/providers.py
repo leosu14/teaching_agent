@@ -2,7 +2,8 @@
 
 The execution mode is explicit (TEACHING_AGENT_MODE):
 - offline (the default): mock providers only, no network at all. A fresh checkout runs with no credentials.
-- production: the providers named explicitly (LLM_PROVIDER, TTS_PROVIDER, IMAGE_PROVIDER, SEARCH_PROVIDER), with
+- production: the providers named explicitly (LLM_PROVIDER, TTS_PROVIDER, IMAGE_PROVIDER, SEARCH_PROVIDER,
+  VIDEO_GENERATION_PROVIDER), with
   their credentials. A fallback is used only when it is named explicitly too (<CAPABILITY>_FALLBACK_PROVIDER).
 The mode never changes because a credential happens to be set; a real provider in offline mode is a startup error.
 TEACHING_AGENT_OFFLINE=true is kept as a hard switch: it forces offline mode.
@@ -35,6 +36,7 @@ KNOWN_PROVIDERS: dict[Capability, dict[str, tuple[str, ...]]] = {
     Capability.IMAGE: {MOCK: (), "openai": ("IMAGE_API_KEY", "OPENAI_API_KEY")},
     Capability.IMAGE_SEARCH: {MOCK: ()},
     Capability.SEARCH: {MOCK: (), "tavily": ("SEARCH_API_KEY", "TAVILY_API_KEY")},
+    Capability.VIDEO_GENERATION: {MOCK: (), "minimax": ("VIDEO_GENERATION_API_KEY", "MINIMAX_API_KEY")},
 }
 
 # Friendly role names for per-agent LLM routes (LLM_<ROLE>_PROVIDER / LLM_<ROLE>_MODEL). Any other role is taken
@@ -104,6 +106,15 @@ class ProviderSettings(BaseSettings):
     search_include_domains: str | None = None  # comma-separated; results are restricted to these domains
     search_exclude_domains: str | None = None
 
+    # --- Video generation (optional generated clips; asynchronous jobs) ----------------------------------------
+    video_generation_provider: str = MOCK
+    video_generation_fallback_provider: str | None = None  # submission only: a job is polled at its own provider
+    video_generation_api_key: SecretStr | None = None
+    minimax_api_key: SecretStr | None = None
+    video_generation_model: str | None = None
+    video_generation_base_url: str | None = None
+    video_generation_price_per_second: float | None = Field(default=None, ge=0)  # USD; unset: cost is "unknown"
+
     # --- Call policy: timeouts, bounded retries, local rate limits ------------------------------------------
     provider_backoff_seconds: float = Field(default=0.5, ge=0, le=60)
     provider_backoff_multiplier: float = Field(default=2.0, ge=1, le=10)
@@ -128,6 +139,11 @@ class ProviderSettings(BaseSettings):
     search_max_attempts: int = Field(default=3, ge=1, le=10)
     search_requests_per_minute: int | None = Field(default=None, ge=1)
     search_max_concurrency: int | None = Field(default=None, ge=1)
+    video_generation_timeout_seconds: float = Field(default=60.0, gt=0, le=3600)  # per request; jobs are polled
+    video_generation_max_attempts: int = Field(default=3, ge=1, le=10)
+    video_generation_requests_per_minute: int | None = Field(default=None, ge=1)
+    video_generation_max_concurrency: int | None = Field(default=None, ge=1)
+    video_generation_max_download_bytes: int = Field(default=200_000_000, ge=1024)
 
     @field_validator("*", mode="before")
     @classmethod
@@ -182,22 +198,29 @@ class ProviderSettings(BaseSettings):
                                               max_attempts=self.search_max_attempts,
                                               requests_per_minute=self.search_requests_per_minute,
                                               max_concurrency=self.search_max_concurrency, **backoff),
+            Capability.VIDEO_GENERATION: ProviderPolicy(
+                timeout_seconds=self.video_generation_timeout_seconds, max_attempts=self.video_generation_max_attempts,
+                requests_per_minute=self.video_generation_requests_per_minute,
+                max_concurrency=self.video_generation_max_concurrency, **backoff),
         }
 
     def primary(self, capability: Capability) -> str | None:
         """The configured provider id of a capability. For the LLM, None means "as config/routing.toml says"."""
         return {Capability.LLM: self.llm_provider, Capability.TTS: self.tts_provider,
                 Capability.IMAGE: self.image_provider, Capability.IMAGE_SEARCH: self.image_search_provider,
-                Capability.SEARCH: self.search_provider}[capability]
+                Capability.SEARCH: self.search_provider,
+                Capability.VIDEO_GENERATION: self.video_generation_provider}[capability]
 
     def fallback(self, capability: Capability) -> str | None:
         return {Capability.LLM: self.llm_fallback_provider, Capability.TTS: self.tts_fallback_provider,
                 Capability.IMAGE: self.image_fallback_provider, Capability.IMAGE_SEARCH: None,
-                Capability.SEARCH: self.search_fallback_provider}[capability]
+                Capability.SEARCH: self.search_fallback_provider,
+                Capability.VIDEO_GENERATION: self.video_generation_fallback_provider}[capability]
 
     def model(self, capability: Capability) -> str | None:
         return {Capability.LLM: self.llm_model, Capability.TTS: self.tts_model, Capability.IMAGE: self.image_model,
-                Capability.IMAGE_SEARCH: None, Capability.SEARCH: None}[capability]
+                Capability.IMAGE_SEARCH: None, Capability.SEARCH: None,
+                Capability.VIDEO_GENERATION: self.video_generation_model}[capability]
 
     def chain(self, capability: Capability) -> list[str]:
         """Primary then the explicitly configured fallback, for every capability but the LLM (routed by tier)."""
@@ -206,7 +229,8 @@ class ProviderSettings(BaseSettings):
     def _secret_fields(self) -> dict[str, SecretStr | None]:
         return {"OPENAI_API_KEY": self.openai_api_key, "ANTHROPIC_API_KEY": self.anthropic_api_key,
                 "TTS_API_KEY": self.tts_api_key, "IMAGE_API_KEY": self.image_api_key,
-                "SEARCH_API_KEY": self.search_api_key, "TAVILY_API_KEY": self.tavily_api_key}
+                "SEARCH_API_KEY": self.search_api_key, "TAVILY_API_KEY": self.tavily_api_key,
+                "VIDEO_GENERATION_API_KEY": self.video_generation_api_key, "MINIMAX_API_KEY": self.minimax_api_key}
 
     def secret_values(self) -> list[str]:
         return [s.get_secret_value() for s in self._secret_fields().values() if s and s.get_secret_value()]

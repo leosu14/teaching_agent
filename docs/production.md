@@ -58,6 +58,10 @@ TTS_PROVIDER=openai                # TTS_API_KEY, or OPENAI_API_KEY
 TTS_LANGUAGES=es-ES,en-US          # languages the voices are offered in; the lesson language must be one of them
 
 # Video: local FFmpeg (TA_VIDEO_COMPOSER=ffmpeg is the default)
+
+# Generated video segments (only with --generated-video; optional short clips inside the lesson video)
+VIDEO_GENERATION_PROVIDER=minimax  # MINIMAX_API_KEY (or VIDEO_GENERATION_API_KEY)
+VIDEO_GENERATION_PRICE_PER_SECOND=0.05  # optional; without it the cost is shown as unknown
 ```
 
 Every other provider variable (fallbacks, per-role LLM routes, timeouts, retries, rate limits) is documented in
@@ -101,6 +105,9 @@ exceeding it. A budget stop is never retried and never falls back to another pro
 | `MAX_TTS_CHARACTERS` | `30000` | before each synthesis, with that segment's characters |
 | `MAX_TTS_SECONDS` | `1800` | before each synthesis (stops once used up) and after each response |
 | `MAX_COST_USD` | none | before each request and after each response, against the *known* cost |
+| `MAX_GENERATED_VIDEO_SEGMENTS` | `2` | in the video segment plan and before each video generation job |
+| `MAX_GENERATED_VIDEO_SECONDS` | `20` | in the video segment plan and before each job, with that clip's seconds |
+| `MAX_VIDEO_GENERATION_COST_USD` | none | in the video segment plan, when `VIDEO_GENERATION_PRICE_PER_SECOND` is set |
 | `PRODUCTION_HEALTH_TIMEOUT_SECONDS` | `20` | per provider health check |
 
 Limits that are only known from a response (tokens, audio seconds, cost) can be overrun by at most the one request
@@ -140,6 +147,7 @@ python scripts/run_production_demo.py --level B1 --topic "Climate change" --lang
 | `--export` | Copy `lesson.mp4`, `lesson.pptx` and `lesson.vtt` into `--output` |
 | `--log-file FILE` | Structured production log (JSON lines); default stderr |
 | `--mock` | Rehearse the identical path on the offline mock providers (no confirmation needed: nothing is paid) |
+| `--generated-video` | Ask for generated video segments (`video.generated_segments`). The dry run then prints a `Video generation:` block (provider, segments, estimated seconds and cost, fallback policy) and still calls nothing; `VIDEO_GENERATION_PROVIDER` becomes a required capability |
 
 Exit codes: `0` success (or nothing to do), `1` the task failed, `2` configuration problem, `3` a required provider
 is unhealthy (nothing was generated).
@@ -260,3 +268,7 @@ Without `RUN_LIVE_E2E=true`, or in offline mode, it is skipped.
 - The cost limit covers known costs only; unpriced models are bounded by the unit limits.
 - Trace linkage is per workflow node: a node's artifacts are linked to all of that node's provider requests.
 - The real adapters are tested against faithful in-process fakes of the vendor APIs; the live test is opt-in.
+- Generated video segments: only MiniMax (16:9, 6 or 10 second clips) is implemented, and it has no cancel endpoint,
+  so a cancelled job is recorded as cancelled locally and may still finish (and bill) at MiniMax. Only the
+  `full_frame_replace` and `inset` strategies exist. `RUN_VIDEO_PROVIDER_SMOKE_TESTS=true pytest
+  tests/smoke/test_video_provider_smoke.py` generates one real clip.

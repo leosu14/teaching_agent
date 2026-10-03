@@ -264,7 +264,7 @@ def test_default_configuration_is_mock_and_valid() -> None:
     assert all(p.primary(c) in (None, "mock") for c in Capability) and p.problems() == []
     assert {c: p.chain(c) for c in Capability if c != Capability.LLM} == {
         Capability.TTS: ["mock"], Capability.IMAGE: ["mock"], Capability.IMAGE_SEARCH: ["mock"],
-        Capability.SEARCH: ["mock"]}
+        Capability.SEARCH: ["mock"], Capability.VIDEO_GENERATION: ["mock"]}
 
 
 def test_llm_overrides_replace_tiers_add_routes_and_never_invent_prices() -> None:

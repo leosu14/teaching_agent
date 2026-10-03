@@ -100,6 +100,17 @@ class EventType:
     VIDEO_VALIDATION_COMPLETED = "video.validation_completed"
     VIDEO_ARTIFACT_CREATED = "video.artifact_created"
     VIDEO_FAILED = "video.failed"
+    VIDEO_STRATEGY_COMPLETED = "video_strategy.completed"
+    VIDEO_GENERATION_SUBMITTED = "video_generation.submitted"
+    VIDEO_GENERATION_POLLED = "video_generation.polled"
+    VIDEO_GENERATION_COMPLETED = "video_generation.completed"
+    VIDEO_GENERATION_FAILED = "video_generation.failed"
+    VIDEO_GENERATION_CANCELLED = "video_generation.cancelled"
+    VIDEO_GENERATION_REUSED = "video_generation.reused"
+    VIDEO_GENERATION_WAITING = "video_generation.waiting"
+    GENERATED_VIDEO_VALIDATED = "generated_video.validated"
+    GENERATED_VIDEO_ASSET_CREATED = "generated_video.asset_created"
+    GENERATED_VIDEO_FALLBACK = "generated_video.fallback"
 
 
 class Event(Schema):

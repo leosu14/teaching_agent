@@ -27,6 +27,8 @@ from app.schemas.presentation import (
 from app.schemas.video import (
     IMAGE_MEDIA_TYPES,
     AudioTrack,
+    GeneratedClip,
+    GeneratedClipInput,
     ImageAssetInput,
     SlideCard,
     Subtitle,
@@ -54,6 +56,9 @@ def video_plan_id_for(data: VideoPlanningRequest) -> str:
         "images": sorted((i.artifact_id, i.checksum) for i in data.image_assets),
         "audio": sorted((a.artifact_id, a.checksum) for a in data.audio_assets),
         "config": data.config.model_dump(mode="json"),
+        # only plans with generated clips include them: every other plan id is unchanged
+        **({"clips": sorted((c.slide_id, c.artifact_id, c.checksum, c.strategy.value, c.audio)
+                            for c in data.generated_clips)} if data.generated_clips else {}),
     }, sort_keys=True)
     return "vp_" + hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
@@ -133,7 +138,8 @@ class VideoAgent(Agent[VideoPlanningRequest, VideoPlan]):
         scope.emit(EventType.VIDEO_PLAN_CREATED, video_plan_id=plan.video_plan_id, segments=len(plan.slides),
                    audio_tracks=len(plan.audio_tracks), image_segments=len(plan.image_artifact_ids()),
                    subtitles=len(plan.subtitle_track.subtitles) if plan.subtitle_track else 0,
-                   transition=data.config.transition.value, duration=plan.duration, valid=report.valid)
+                   transition=data.config.transition.value, duration=plan.duration, valid=report.valid,
+                   **({"generated_clips": len(plan.generated_clips())} if data.generated_clips else {}))
         # An invalid plan is returned as it is: the workflow's validation gate fails the task before composition.
         return plan
 
@@ -142,6 +148,7 @@ class VideoAgent(Agent[VideoPlanningRequest, VideoPlan]):
         slides = {s.slide_id: s for s in p.slides}
         images = {i.artifact_id: i for i in data.image_assets}
         audio = {a.artifact_id: a for a in data.audio_assets}
+        clips = {c.slide_id: c for c in data.generated_clips}
         segments: list[VideoSegment] = []
         tracks: list[AudioTrack] = []
         cues: list[Subtitle] = []
@@ -173,6 +180,7 @@ class VideoAgent(Agent[VideoPlanningRequest, VideoPlan]):
                 audio_refs=[t.track_id for t in seg_tracks],
                 subtitle_refs=[c.subtitle_id for c in cues if c.segment_ref in {t.track_id for t in seg_tracks}],
                 transition=Transition(),
+                generated=self._clip(clips.get(slide_t.slide_id), slide_t.start_time, slide_t.end_time),
             ))
         segments = self._transitions(segments, config)
         transitions = [TransitionPoint(from_segment=a.segment_id, to_segment=b.segment_id, at=b.start_time,
@@ -189,7 +197,11 @@ class VideoAgent(Agent[VideoPlanningRequest, VideoPlan]):
             transitions=transitions, planner=PLANNER,
             metadata={"presentation_id": p.presentation_id, "silent_segments": [
                 s.segment_id for s in segments if not s.audio_refs], "skipped_images": skipped_images,
-                "missing_narration": timeline.missing_segments},
+                "missing_narration": timeline.missing_segments,
+                **({"generated_clips": [c.segment_id for c in data.generated_clips],
+                    "unplaced_clips": [c.segment_id for c in data.generated_clips
+                                       if c.slide_id not in {t.slide_id for t in timeline.slides}]}
+                   if data.generated_clips else {})},
         )
 
     @staticmethod
@@ -205,6 +217,18 @@ class VideoAgent(Agent[VideoPlanningRequest, VideoPlan]):
             artifact_id=element.artifact_id, asset_id=element.asset_id, uri=element.object_uri,
             checksum=element.checksum, media_type=element.media_type, width=element.width, height=element.height,
             alt_text=element.alt_text)
+
+    @staticmethod
+    def _clip(clip: GeneratedClipInput | None, start: float, end: float) -> GeneratedClip | None:
+        """A generated clip plays from the start of its slide for its own length, cut at the slide's end: the
+        narration (and so the timeline) stays authoritative, the clip never stretches a slide."""
+        if clip is None:
+            return None
+        return GeneratedClip(
+            segment_id=clip.segment_id, artifact_id=clip.artifact_id, uri=clip.uri, checksum=clip.checksum,
+            media_type=clip.media_type, asset_duration=clip.duration, width=clip.width, height=clip.height,
+            fps=clip.fps, has_audio=clip.has_audio, strategy=clip.strategy, audio=clip.audio,
+            start_time=start, end_time=round(min(end, start + clip.duration), 3))
 
     @staticmethod
     def _transitions(segments: list[VideoSegment], config: VideoConfig) -> list[VideoSegment]:

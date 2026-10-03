@@ -55,6 +55,21 @@ def admit(budget: TaskBudget, usage: TaskUsage, capability: Capability, operatio
                             f"speech synthesis of {characters} more characters")
         if budget.max_tts_seconds is not None and usage.tts_seconds >= budget.max_tts_seconds:
             raise _exceeded("MAX_TTS_SECONDS", usage.tts_seconds, budget.max_tts_seconds, "TTS audio already used up")
+    elif capability == Capability.VIDEO_GENERATION:
+        seconds = float(units.get("seconds", 0.0))
+        cost = units.get("cost_usd")
+        if (budget.max_generated_video_segments is not None
+                and usage.video_generations + 1 > budget.max_generated_video_segments):
+            raise _exceeded("MAX_GENERATED_VIDEO_SEGMENTS", usage.video_generations + 1,
+                            budget.max_generated_video_segments, "one more generated video segment")
+        if (budget.max_generated_video_seconds is not None
+                and usage.video_generation_seconds + seconds > budget.max_generated_video_seconds + 1e-9):
+            raise _exceeded("MAX_GENERATED_VIDEO_SECONDS", round(usage.video_generation_seconds + seconds, 3),
+                            budget.max_generated_video_seconds, f"{seconds:g} more generated video seconds")
+        if (budget.max_video_generation_cost_usd is not None and cost is not None
+                and usage.video_generation_cost_usd + cost > budget.max_video_generation_cost_usd + 1e-9):
+            raise _exceeded("MAX_VIDEO_GENERATION_COST_USD", round(usage.video_generation_cost_usd + cost, 6),
+                            budget.max_video_generation_cost_usd, f"video generation costing ${cost:g}")
     if budget.max_cost_usd is not None and usage.estimated_cost_usd >= budget.max_cost_usd:
         raise _exceeded("MAX_COST_USD", usage.estimated_cost_usd, budget.max_cost_usd, "known provider cost used up")
 

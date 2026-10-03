@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.config.production import ProductionSettings
 from app.config.providers import ProviderSettings
 from app.config.routing import ConfigError
+from app.schemas.generative_video import GeneratedVideoConfig
 from app.schemas.pedagogy import (
     AdaptiveQuestioningPolicy,
     DifficultyBands,
@@ -90,6 +91,19 @@ class Settings(BaseSettings):
     video_work_dir: Path | None = None  # scratch space for composition; default: <data_dir>/work
     video_keep_failed_work: bool = True  # keep a failed composition's scratch directory for diagnosis
 
+    # Optional generated video segments (a lesson asks for them with the "video.generated_segments" capability).
+    # Budgets: MAX_GENERATED_VIDEO_SEGMENTS, MAX_GENERATED_VIDEO_SECONDS, MAX_VIDEO_GENERATION_COST_USD; the
+    # provider: VIDEO_GENERATION_PROVIDER (see app/config/providers.py). Unset values keep GeneratedVideoConfig's.
+    generated_video_enabled: bool = True
+    generated_video_min_seconds: float | None = Field(default=None, gt=0, le=60)
+    generated_video_max_seconds: float | None = Field(default=None, gt=0, le=60)
+    generated_video_required: bool = False
+    generated_video_failure_policy: Literal["fail", "continue"] = "fail"  # for required segments
+    generated_video_strategy: Literal["full_frame_replace", "inset"] = "full_frame_replace"
+    generated_video_poll_interval_seconds: float | None = Field(default=None, ge=0, le=600)
+    generated_video_poll_timeout_seconds: float | None = Field(default=None, gt=0, le=86400)
+    generated_video_poll_max_attempts: int | None = Field(default=None, ge=1, le=10000)
+
     log_level: str = "INFO"
     log_json: bool = True
 
@@ -131,6 +145,23 @@ class Settings(BaseSettings):
             config = VideoConfig.model_validate({**config.model_dump(),
                                                  "subtitles": {**config.subtitles.model_dump(), **subtitles}})
         return config
+
+    def generated_video_config(self) -> GeneratedVideoConfig:
+        """GeneratedVideoConfig: the production budget, the provider's configured price, then the overrides."""
+        budget = self.production
+        overrides = {
+            "min_segment_seconds": self.generated_video_min_seconds,
+            "max_segment_seconds": self.generated_video_max_seconds,
+            "poll_interval_seconds": self.generated_video_poll_interval_seconds,
+            "poll_timeout_seconds": self.generated_video_poll_timeout_seconds,
+            "poll_max_attempts": self.generated_video_poll_max_attempts,
+        }
+        return GeneratedVideoConfig(
+            max_segments=budget.max_generated_video_segments, max_total_seconds=budget.max_generated_video_seconds,
+            max_cost_usd=budget.max_video_generation_cost_usd,
+            price_per_second_usd=self.providers.video_generation_price_per_second,
+            required=self.generated_video_required, failure_policy=self.generated_video_failure_policy,
+            strategy=self.generated_video_strategy, **{k: v for k, v in overrides.items() if v is not None})
 
     def validate_runtime(self) -> None:
         """Startup validation: provider configuration first (every problem at once, secrets never shown), then the
