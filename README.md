@@ -45,6 +45,7 @@ python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, sel
 python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validation, build, real .pptx with the images
 python scripts/run_audio_demo.py --out-dir narration/      # audio plan, mock TTS, real WAV assets, slide timings
 python scripts/run_video_demo.py --out-dir video/          # video plan, FFmpeg composition, a real playable MP4
+python scripts/run_generative_video_demo.py --out-dir video/  # generated clips: plan, jobs, validation, MP4
 python scripts/run_provider_demo.py    # provider registry, selection, health, usage, retry, fallback (offline)
 python scripts/run_production_demo.py --dry-run  # a production lesson's plan: providers, budget, stages
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
@@ -77,6 +78,13 @@ artifacts and the PresentationTimeline it starts from, the VideoPlan slide by sl
 subtitles), its validation, the FFmpeg composition, the MP4 validation and the VIDEO artifact, then re-reads the MP4
 from the object store and prints its duration (against the timeline), resolution, frame rate, audio stream,
 subtitle status and checksum. `--width 1280 --height 720` and `--transition fade` change the output.
+`run_generative_video_demo.py` runs a science lesson (the water cycle, `fixtures/generative_video/`) that asks for
+generated video segments (`video.generated_segments`): it prints the video segment plan, why each section did or did
+not get a clip, the jobs at the mock video generation provider, the GENERATED_VIDEO_ASSET artifacts and their
+validation from the bytes, where each clip sits in the composition, and the final MP4 (duration, checksum, timeline).
+It then runs the same lesson as a new task and checks that every clip is reused from the generation ledger.
+Generated clips are optional: lessons that do not ask for them run exactly as before. See
+[architecture](docs/architecture.md#generated-video-segments).
 
 `run_provider_demo.py` forces offline mode and the mock providers, then prints the provider configuration
 (credentials only as set/missing), every registered provider with its capabilities and health, the selected provider
@@ -85,7 +93,7 @@ retry after rate limiting and an explicit fallback with their `provider.*` event
 
 Real providers are opt-in: install the `providers` extra (`pip install -e ".[providers]"`), set
 `TEACHING_AGENT_MODE=production` and e.g. `LLM_PROVIDER=anthropic LLM_MODEL=... ANTHROPIC_API_KEY=...`, `TTS_PROVIDER=openai`, `IMAGE_PROVIDER=openai`,
-`SEARCH_PROVIDER=tavily` (see [configuration](docs/configuration.md#providers)). The same agents and workflows then
+`SEARCH_PROVIDER=tavily`, `VIDEO_GENERATION_PROVIDER=minimax` (see [configuration](docs/configuration.md#providers)). The same agents and workflows then
 run on them; `run_provider_demo.py --smoke` sends each configured real provider one minimal request.
 
 `run_production_demo.py` runs one complete lesson (B1 Spanish, "Climate change" by default; any level, topic and

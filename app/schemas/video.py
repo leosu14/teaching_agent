@@ -8,6 +8,8 @@
   referenced by artifact id, object URI and checksum, never by local file name, and nothing in the plan is
   specific to a command-line tool.
 - ComposedVideo / VideoProbe / VideoValidationReport: what a composer produced and what a parser measured in it.
+- GeneratedClip: an optional GENERATED_VIDEO_ASSET shown during part of a segment (full frame or inset). Narration,
+  subtitles and timing stay exactly as the PresentationTimeline says; without clips a plan is what it always was.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from pydantic import Field, StringConstraints, model_validator
 from app.schemas.artifact import Artifact, StoredObject
 from app.schemas.audio import PresentationTimeline
 from app.schemas.common import Schema
+from app.schemas.generative_video import ClipAudio, InsertionStrategy
 from app.schemas.presentation import Presentation
 
 TIME_EPSILON = 0.0015  # seconds: timeline values are whole milliseconds; this absorbs float rounding
@@ -132,6 +135,24 @@ class AudioAssetInput(Schema):
     language: str
 
 
+class GeneratedClipInput(Schema):
+    """A GENERATED_VIDEO_ASSET as the video planner sees it: a normalised clip planned for one slide."""
+
+    segment_id: str  # the VideoSegmentPlan it fulfils
+    slide_id: str
+    artifact_id: str
+    uri: str
+    checksum: str
+    media_type: str
+    duration: float = Field(gt=0)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    fps: float = Field(gt=0)
+    has_audio: bool = False
+    strategy: InsertionStrategy = InsertionStrategy.FULL_FRAME_REPLACE
+    audio: ClipAudio = "muted"
+
+
 # --- The plan -----------------------------------------------------------------------------------
 
 
@@ -157,6 +178,31 @@ class VisualRef(Schema):
         if (self.kind == "image_asset") != (self.image is not None):
             raise ValueError("an image_asset visual has an image and a slide_card visual has none")
         return self
+
+
+class GeneratedClip(Schema):
+    """A generated clip shown from `start_time` to `end_time` (inside its segment, on the video timeline).
+    full_frame_replace: the clip fills the frame instead of the slide; inset: it plays in the slide's media box.
+    Subtitles are drawn over it as on any slide. Its own sound is muted unless `audio` is "mixed"."""
+
+    segment_id: str  # the VideoSegmentPlan id
+    artifact_id: str  # the GENERATED_VIDEO_ASSET
+    uri: str
+    checksum: str
+    media_type: str
+    asset_duration: float = Field(gt=0)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    fps: float = Field(gt=0)
+    has_audio: bool = False
+    strategy: InsertionStrategy = InsertionStrategy.FULL_FRAME_REPLACE
+    audio: ClipAudio = "muted"
+    start_time: float = Field(ge=0)
+    end_time: float = Field(gt=0)
+
+    @property
+    def duration(self) -> float:
+        return round(self.end_time - self.start_time, 3)
 
 
 class AudioTrack(Schema):
@@ -242,6 +288,7 @@ class VideoSegment(Schema):
     audio_refs: list[str] = Field(default_factory=list)  # AudioTrack ids, in playback order; empty: silence
     subtitle_refs: list[str] = Field(default_factory=list)  # Subtitle ids shown during this segment
     transition: Transition = Field(default_factory=Transition)  # into this segment
+    generated: GeneratedClip | None = None  # an optional generated clip shown during part of the segment
 
 
 class VideoPlan(Schema):
@@ -280,6 +327,9 @@ class VideoPlan(Schema):
     def audio_artifact_ids(self) -> list[str]:
         return list(dict.fromkeys(t.artifact_id for t in self.audio_tracks))
 
+    def generated_clips(self) -> list[GeneratedClip]:
+        return [s.generated for s in self.slides if s.generated is not None]
+
 
 class VideoPlanningRequest(Schema):
     """What the VideoAgent plans from: the presentation, its timeline and the asset references."""
@@ -292,6 +342,7 @@ class VideoPlanningRequest(Schema):
     timeline_checksum: str
     image_assets: list[ImageAssetInput] = Field(default_factory=list)
     audio_assets: list[AudioAssetInput] = Field(default_factory=list)
+    generated_clips: list[GeneratedClipInput] = Field(default_factory=list)  # optional GENERATED_VIDEO_ASSETs
     config: VideoConfig = Field(default_factory=VideoConfig)
 
     def validation_request(self, plan: VideoPlan, *, enforce: bool = False) -> VideoPlanValidationRequest:
@@ -299,7 +350,8 @@ class VideoPlanningRequest(Schema):
             plan=plan.model_dump(mode="json"), timeline=self.timeline,
             presentation_artifact_id=self.presentation_artifact_id, timeline_artifact_id=self.timeline_artifact_id,
             slide_ids=[s.slide_id for s in self.presentation.slides],
-            image_assets=self.image_assets, audio_assets=self.audio_assets, enforce=enforce)
+            image_assets=self.image_assets, audio_assets=self.audio_assets, generated_clips=self.generated_clips,
+            enforce=enforce)
 
 
 # --- Plan validation ----------------------------------------------------------------------------
@@ -309,6 +361,7 @@ VideoPlanIssueCode = Literal[
     "timeline_mismatch", "duration_mismatch", "unknown_image", "unsupported_image", "unknown_audio",
     "audio_outside_segment", "audio_overlap", "audio_duration_mismatch", "unknown_reference", "subtitle_timing",
     "subtitle_overlap", "invalid_transition", "unsupported_config", "reference_mismatch",
+    "unknown_generated_clip", "unsupported_strategy", "clip_timing", "clip_format",
 ]
 
 
@@ -331,6 +384,7 @@ class VideoPlanValidationRequest(Schema):
     slide_ids: list[str] = Field(default_factory=list)  # the presentation's slides, in deck order
     image_assets: list[ImageAssetInput] = Field(default_factory=list)
     audio_assets: list[AudioAssetInput] = Field(default_factory=list)
+    generated_clips: list[GeneratedClipInput] = Field(default_factory=list)
     enforce: bool = False
 
 
@@ -404,6 +458,34 @@ class AudioStreamProbe(Schema):
     sample_rate: int
     channels: int
     duration: float | None = None
+
+
+class ClipNormalization(Schema):
+    """The platform format a generated clip is converted to before composition."""
+
+    width: int = Field(ge=2)
+    height: int = Field(ge=2)
+    fps: int = Field(ge=1)
+    duration: float = Field(gt=0)  # the clip is cut to at most this long
+    codec: VideoCodec = VideoCodec.H264
+    pixel_format: Literal["yuv420p"] = "yuv420p"
+    container: VideoContainer = VideoContainer.MP4
+    keep_audio: bool = False  # muted clips carry no audio stream at all
+    audio_codec: AudioCodec = AudioCodec.AAC
+    audio_sample_rate: int = 48000
+    audio_channels: int = 2
+
+    @property
+    def media_type(self) -> str:
+        return CONTAINER_MEDIA_TYPES[self.container]
+
+
+class NormalizedClip(Schema):
+    path: str
+    media_type: str
+    normalizer: str  # name/version
+    render_seconds: float = Field(ge=0)
+    metadata: dict = Field(default_factory=dict)
 
 
 class VideoProbe(Schema):
@@ -507,6 +589,8 @@ class VideoArtifactMetadata(Schema):
     composer: str
     render_seconds: float
     validation: VideoValidationReport
+    generated_segments: int = 0  # generated clips composed into the video
+    generated_artifact_ids: list[str] = Field(default_factory=list)  # their GENERATED_VIDEO_ASSET artifacts
 
 
 class VideoStageRequest(Schema):

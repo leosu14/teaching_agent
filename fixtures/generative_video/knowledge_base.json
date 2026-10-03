@@ -1,0 +1,68 @@
+[
+ {
+  "doc_id": "sci-water-terms",
+  "title": "Water cycle key terms",
+  "text": "Key terms of the water cycle: a reservoir is any place where water is stored, such as an ocean, a lake or an aquifer. Water vapour is water in the form of a gas.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "earth science",
+   "topic": "water cycle",
+   "level": "beginner",
+   "concept": {
+    "concept_id": "sci.water.terms",
+    "name": "Water cycle key terms",
+    "level": "beginner",
+    "prerequisites": [],
+    "description": "The definitions of reservoir and water vapour used throughout the water cycle."
+   },
+   "probes": [
+    {"prompt": "What is a place where water is stored called?", "answer": "a reservoir", "accepted": ["reservoir"], "difficulty": 0.3},
+    {"prompt": "What is water in the form of a gas called?", "answer": "water vapour", "accepted": ["vapour", "water vapor", "vapor"], "difficulty": 0.25}
+   ]
+  }
+ },
+ {
+  "doc_id": "sci-water-evaporation",
+  "title": "Evaporation and condensation",
+  "text": "The sun heats water in oceans and lakes; it evaporates, rises as invisible vapour, cools higher up and condenses into the droplets that form clouds.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "earth science",
+   "topic": "water cycle",
+   "level": "intermediate",
+   "concept": {
+    "concept_id": "sci.water.evaporation",
+    "name": "Evaporation and condensation",
+    "level": "intermediate",
+    "prerequisites": ["sci.water.terms"],
+    "description": "How heat from the sun turns liquid water into vapour that rises, cools and condenses into clouds."
+   },
+   "probes": [
+    {"prompt": "What happens to water vapour when it cools high in the air?", "answer": "it condenses into droplets", "accepted": ["condenses", "it condenses", "condensation"], "difficulty": 0.5},
+    {"prompt": "What gives water the energy to evaporate?", "answer": "heat from the sun", "accepted": ["the sun", "sun", "heat"], "difficulty": 0.3}
+   ]
+  }
+ },
+ {
+  "doc_id": "sci-water-precipitation",
+  "title": "Precipitation and runoff",
+  "text": "When cloud droplets grow heavy they fall as rain, snow or hail; the water flows over the land as runoff into rivers and back to the sea.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "earth science",
+   "topic": "water cycle",
+   "level": "intermediate",
+   "concept": {
+    "concept_id": "sci.water.precipitation",
+    "name": "Precipitation and runoff",
+    "level": "intermediate",
+    "prerequisites": ["sci.water.terms"],
+    "description": "How water falls from clouds as precipitation and flows across the land back to rivers, lakes and the sea."
+   },
+   "probes": [
+    {"prompt": "Name two forms of precipitation.", "answer": "rain and snow", "accepted": ["rain, snow", "snow and rain", "rain and hail"], "difficulty": 0.25},
+    {"prompt": "What is water flowing over the land into rivers called?", "answer": "runoff", "accepted": ["surface runoff"], "difficulty": 0.5}
+   ]
+  }
+ }
+]

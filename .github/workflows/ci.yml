@@ -41,3 +41,7 @@ jobs:
         run: python scripts/run_production_demo.py --dry-run
       - name: Adaptive demo (the next recommendation must change with the learner's mastery)
         run: python scripts/run_adaptive_demo.py
+      - name: Generative video demo (mock video provider, real FFmpeg normaliser and composer)
+        run: python scripts/run_generative_video_demo.py
+      - name: Production dry run with generated video (offline, calls nothing)
+        run: python scripts/run_production_demo.py --dry-run --generated-video

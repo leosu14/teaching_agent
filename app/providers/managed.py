@@ -26,8 +26,15 @@ from app.providers.image_search.base import (
 from app.providers.llm.base import LLMProvider, LLMRequest, LLMResponse
 from app.providers.search.base import ProviderSearchRequest, SearchPage, SearchProvider
 from app.providers.tts.base import ProviderSpeechRequest, SynthesizedSpeech, TTSProvider
+from app.providers.video_generation.base import VideoGenerationProvider
 from app.schemas.audio import Voice
 from app.schemas.common import TokenUsage
+from app.schemas.generative_video import (
+    GeneratedVideoFile,
+    ProviderVideoLimits,
+    VideoGenerationJob,
+    VideoGenerationRequest,
+)
 from app.schemas.providers import Capability, HealthStatus, ProviderUsage
 
 P = TypeVar("P", bound=Provider)
@@ -233,3 +240,75 @@ class ManagedSearchProvider(_Delegating, SearchProvider):
 
         provider, page = await self._chain.run("search", lambda p: p.search(request), usage)
         return page.model_copy(update={"provider": provider.name})
+
+
+class ManagedVideoGenerationProvider(_Delegating, VideoGenerationProvider):
+    """Video generation under the invoker. Submission may fall back to the next provider of the chain on a transient
+    failure; a submitted job is then polled, downloaded and cancelled at the provider that owns it (job.provider).
+    Only submission is billed: its known seconds (and, with a configured price, its cost) are admitted against the
+    task's budget before the request is sent."""
+
+    def __init__(self, chain: Sequence[VideoGenerationProvider], invoker: ProviderInvoker, *,
+                 price_per_second: float | None = None) -> None:
+        self._chain = _Chain(chain, invoker, Capability.VIDEO_GENERATION)
+        self._invoker = invoker
+        primary = self._primary = chain[0]
+        self._by_name = {p.name: p for p in chain}
+        self.name = primary.name
+        self.model = primary.model
+        self.requires_network = primary.requires_network
+        self.supports_seed = primary.supports_seed
+        self.supports_cancel = primary.supports_cancel
+        self.supports_audio = primary.supports_audio
+        self.durations = primary.durations
+        self.max_duration = primary.max_duration
+        self.aspect_ratios = primary.aspect_ratios
+        self.price_per_second = price_per_second if primary.requires_network else 0.0
+
+    @property
+    def providers(self) -> list[VideoGenerationProvider]:
+        return list(self._chain.providers)
+
+    def limits(self) -> ProviderVideoLimits:
+        return self._primary.limits()
+
+    def estimated_cost(self, seconds: float) -> float | None:
+        return None if self.price_per_second is None else round(seconds * self.price_per_second, 6)
+
+    def _owner(self, job: VideoGenerationJob) -> VideoGenerationProvider:
+        provider = self._by_name.get(job.provider)
+        if provider is None:
+            raise ProviderError(f"video job {job.job_id} belongs to provider '{job.provider}', which is not "
+                                "configured any more", provider=job.provider, transient=False)
+        return provider
+
+    async def submit(self, request: VideoGenerationRequest, *, generation_key: str) -> VideoGenerationJob:
+        cost = self.estimated_cost(request.duration)
+
+        def usage(p: VideoGenerationProvider, job: VideoGenerationJob, request_id: str) -> ProviderUsage:
+            return ProviderUsage(provider=p.name, capability=Capability.VIDEO_GENERATION, operation="submit",
+                                 model=job.model, request_id=request_id, video_seconds=request.duration,
+                                 estimated_cost=cost if p.name == self.name else None, currency=_currency(cost))
+
+        _, job = await self._chain.run("submit", lambda p: p.submit(request, generation_key=generation_key), usage,
+                                       model=self.model, units={"seconds": request.duration, "cost_usd": cost})
+        return job
+
+    async def _on_owner(self, operation: str, job: VideoGenerationJob, fn) -> object:
+        owner = self._owner(job)
+
+        def usage(result, request_id: str) -> ProviderUsage:
+            return ProviderUsage(provider=owner.name, capability=Capability.VIDEO_GENERATION, operation=operation,
+                                 model=job.model, request_id=request_id)
+
+        return await self._invoker.call(owner, Capability.VIDEO_GENERATION, operation, lambda: fn(owner),
+                                        usage=usage, model=job.model)
+
+    async def status(self, job: VideoGenerationJob) -> VideoGenerationJob:
+        return await self._on_owner("status", job, lambda p: p.status(job))
+
+    async def download(self, job: VideoGenerationJob) -> GeneratedVideoFile:
+        return await self._on_owner("download", job, lambda p: p.download(job))
+
+    async def cancel(self, job: VideoGenerationJob) -> VideoGenerationJob:
+        return await self._on_owner("cancel", job, lambda p: p.cancel(job))

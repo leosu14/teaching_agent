@@ -334,6 +334,62 @@ Video only follows a timeline (so an approved, rendered, narrated presentation).
 `video.validation_started`, `video.validation_completed`, `video.artifact_created`, `video.failed`. Usage is recorded
 as `video_compose:<composer>` with render seconds, CPU seconds, frames and output bytes, and no cost.
 
+## Generated video segments
+
+Optional short generated clips inside the lesson video, for the sections where motion teaches better than a still.
+Only lessons whose request carries the capability `video.generated_segments` get the three extra nodes; every other
+lesson runs exactly the nodes it ran before.
+
+```
+audio_policy → video_segment_plan (visual.video_strategy) → store_video_segment_plan (VIDEO_SEGMENT_PLAN)
+→ generate_video_segments: video_generation.submit → generic poller → video_generation.status
+  → video_generation.create_asset (download → validate bytes → normalise → validate → GENERATED_VIDEO_ASSET)
+→ audio_timeline → video_plan (clips placed in their slides) → compose_video (FFmpeg) → VIDEO
+```
+
+- `VideoGenerationProvider` (`app/providers/video_generation/base.py`) is an async job interface: `submit`,
+  `status`, `download`, `cancel`, `limits` (durations, aspect ratios, seed, cancel and audio support), with statuses
+  SUBMITTED, PROCESSING, COMPLETED, FAILED and CANCELLED. `MockVideoGenerationProvider` is the default and renders a
+  real, deterministic Motion-JPEG AVI per request. `MiniMaxVideoGenerationProvider` (Hailuo) maps MiniMax's
+  task/query/file API onto it over plain HTTP; it lives only under `providers/` and is built only by the composition
+  root, when `VIDEO_GENERATION_PROVIDER=minimax` in production mode. `ManagedVideoGenerationProvider` admits each
+  submission against the task budget and records usage.
+- `VideoStrategy` (`app/tools/visual/video_strategy.py`) extends visual planning with a deterministic pedagogical
+  policy. Each lesson section gets a recorded decision: exercises, reviews, definitions, grammar and short factual
+  text stay text; processes, movement, cause and effect, procedures, comparisons over time and pronunciation score
+  from cue words (English plus the lesson language's own lexicon), visual hints and model suggestions (which only add
+  weight). A section that already has an image needs a strong case. Durations follow the slide's narration within
+  `TA_GENERATED_VIDEO_MIN/MAX_SECONDS`, snapped to what the provider offers. The budget takes the highest priority
+  clips first (urgent knowledge gaps raise priority) within `MAX_GENERATED_VIDEO_SEGMENTS`,
+  `MAX_GENERATED_VIDEO_SECONDS` and, when the price is known, `MAX_VIDEO_GENERATION_COST_USD`. Nothing is dropped
+  silently: every skip has a reason and every budget cut a warning.
+- `VideoPromptBuilder` writes every prompt in one fixed structure from cleaned lesson content (no URLs, emails,
+  internal ids, markup or instructions). A request carries the prompt and technical parameters only; no learner
+  data or id ever reaches a provider. Prompts are language-agnostic; only pronunciation clips name the language.
+- The generation node (`app/runtime/workflows/generative_video.py`) owns the waiting, not the agents. It polls with
+  the generic `poll_until` (`app/utils/polling.py`) for at most the poll timeout per run, then checkpoints the jobs
+  and puts the task in WAITING (kind `video_generation`); resuming polls the same jobs. Cancelling the task cancels
+  open jobs at the provider, or records them as cancelled locally when the provider cannot cancel, and starts none.
+- Idempotency: a generation key (request hash + provider + model) indexes a ledger in the object store
+  (`records/video-generations/<key>.json`) holding the job, the downloaded file and the normalised clip. A resume or
+  a later task asking for the same clip reuses the job, the file and the normalised clip: nothing is submitted,
+  downloaded or normalised twice.
+- `ClipValidator` (`app/tools/video/clips.py`) checks a clip from its bytes, never from the provider's claims:
+  checksum, container, video stream, decode errors, codec, duration, resolution, aspect ratio, frame rate and audio.
+  The provider file is validated, normalised by the `VideoNormalizer` (FFmpeg: scaled and letterboxed to the lesson's
+  resolution and frame rate, H.264 yuv420p MP4, muted unless kept) and validated again before it becomes a
+  `GENERATED_VIDEO_ASSET` with the VIDEO_SEGMENT_PLAN as parent.
+- Composition: the VideoAgent places a clip from the start of its slide for its own length, cut at the slide's end,
+  so the narration timeline stays authoritative. TTS and subtitles are unchanged and drawn on top; clip audio is
+  muted. `FULL_FRAME_REPLACE` fills the frame; `INSET` plays inside the slide card's media box. The VIDEO artifact's
+  parents include the clip assets.
+- Failure policy, per segment: an optional clip that fails at any stage (budget, submit, poll, download, validate,
+  normalise) falls back to the slide's image or the slide, with a `generated_video.fallback` event and a warning; a
+  required clip fails the task under `fail` and falls back under `continue`.
+
+Events: `video_strategy.completed`, `video_generation.submitted`, `.polled`, `.waiting`, `.completed`, `.failed`,
+`.cancelled`, `.reused`, `generated_video.validated`, `generated_video.asset_created`, `generated_video.fallback`.
+
 ## Providers
 
 ```
@@ -481,6 +537,6 @@ graph, per-node trace, usage). `scripts/run_production_demo.py` is a thin CLI ov
 ## Not in this release
 
 Learned mastery models (BKT / IRT) and FSRS-style scheduling (the updater and scheduler are replaceable), a
-curated multi-subject concept library, real image-search and AI video providers, MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
+curated multi-subject concept library, real image-search providers, video generation providers other than MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
 design, animations, cloud rendering, coding exercises and VS Code integration, UI, deployment. The provider and
 tool interfaces they plug into already exist.

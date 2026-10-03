@@ -52,6 +52,7 @@ from app.providers.managed import (
     ManagedLLMProvider,
     ManagedSearchProvider,
     ManagedTTSProvider,
+    ManagedVideoGenerationProvider,
 )
 from app.providers.presentation.base import PresentationRenderer
 from app.providers.presentation.mock import MockPresentationRenderer
@@ -65,9 +66,18 @@ from app.providers.search.tavily import TavilySearchProvider
 from app.providers.tts.base import TTSProvider
 from app.providers.tts.mock import MockTTSProvider
 from app.providers.tts.openai import OpenAITTSProvider
-from app.providers.video.base import VideoComposer, VideoProber
-from app.providers.video.ffmpeg import FFmpegAdapter, FFmpegVideoComposer, FFprobeVideoProber
-from app.providers.video.mock import MockVideoComposer, MockVideoProber
+from app.providers.video.base import VideoComposer, VideoNormalizer, VideoProber
+from app.providers.video.ffmpeg import (
+    FFmpegAdapter,
+    FFmpegVideoComposer,
+    FFmpegVideoNormalizer,
+    FFprobeVideoProber,
+)
+from app.providers.video.mock import MockVideoComposer, MockVideoNormalizer, MockVideoProber
+from app.providers.video_generation.base import VideoGenerationProvider
+from app.providers.video_generation.minimax import DEFAULT_BASE_URL as MINIMAX_BASE_URL
+from app.providers.video_generation.minimax import MiniMaxVideoGenerationProvider
+from app.providers.video_generation.mock import MockVideoGenerationProvider
 from app.runtime.orchestrator.orchestrator import NodeObserver, Orchestrator
 from app.runtime.orchestrator.planner import WorkflowPlanner
 from app.runtime.workflow.engine import WorkflowEngine
@@ -113,6 +123,7 @@ from app.tools.presentation.render import PresentationRenderTool
 from app.tools.presentation.validation import SlidePlanValidationTool
 from app.tools.rag.retrieve import ConceptMapTool, RetrievalTool
 from app.tools.registry import ToolRegistry
+from app.tools.video.generation import GeneratedVideoService, generation_tools
 from app.tools.video.service import VideoService
 from app.tools.video.tools import VideoArtifactTool, VideoComposeTool, VideoValidateTool
 from app.tools.video.validation import VideoPlanValidationTool
@@ -123,6 +134,7 @@ from app.tools.visual.generate import ImageGenerationTool
 from app.tools.visual.search import ImageFetchTool, ImageSearchTool
 from app.tools.visual.selection import ImageSelectionTool
 from app.tools.visual.validation import ImageValidationTool
+from app.tools.visual.video_strategy import VideoStrategyTool
 from app.tools.web.search import SearchTool
 from app.utils.workspace import ScratchSpace
 
@@ -143,12 +155,17 @@ VIDEO_COMPOSER_FACTORIES = {  # (composer, prober): a composer is always validat
         FFprobeVideoProber(_ffmpeg(settings))),
     "mock": lambda settings, artifacts: (MockVideoComposer(media=artifacts.read_object), MockVideoProber()),
 }
+# Generated clips are normalised by the same toolchain that composes and probes the video.
+VIDEO_NORMALIZER_FACTORIES = {
+    "ffmpeg": lambda settings: FFmpegVideoNormalizer(_ffmpeg(settings)),
+    "mock": lambda settings: MockVideoNormalizer(),
+}
 
 # --- Provider factories: the only place that knows concrete provider classes ------------------------------------
 # Each takes the application Settings; network providers get an HttpClient carrying their credential, the
 # capability's timeout and the request limits. Which ones are built is decided by the provider configuration.
 
-DEFAULT_BASE_URLS = {"tavily": "https://api.tavily.com"}
+DEFAULT_BASE_URLS = {"tavily": "https://api.tavily.com", "minimax": MINIMAX_BASE_URL}
 
 
 def _http(settings: Settings, capability: Capability, provider: str, base_url: str, headers: dict[str, str],
@@ -210,6 +227,15 @@ def _tavily_search(settings: Settings) -> SearchProvider:
     return TavilySearchProvider(http, search_depth=p.search_depth, include_raw_content=p.search_include_raw_content)
 
 
+def _minimax_video(settings: Settings) -> VideoGenerationProvider:
+    p, key = settings.providers, _credential(settings, Capability.VIDEO_GENERATION, "minimax")
+    http = _http(settings, Capability.VIDEO_GENERATION, "minimax",
+                 p.video_generation_base_url or DEFAULT_BASE_URLS["minimax"], {"Authorization": f"Bearer {key}"}, key,
+                 request_id_header="")
+    return MiniMaxVideoGenerationProvider(http, model=p.video_generation_model,
+                                          max_download_bytes=p.video_generation_max_download_bytes)
+
+
 LLM_PROVIDER_FACTORIES = {
     "mock": lambda settings: MockLLMProvider(default_responders()),
     "openai": _openai_llm,
@@ -222,6 +248,7 @@ PROVIDER_FACTORIES = {
         "mock": lambda settings: MockImageSearchProvider(settings.corpus_dir / "image_catalog.json")},
     Capability.SEARCH: {
         "mock": lambda settings: MockSearchProvider(settings.corpus_dir / "web_corpus.json"), "tavily": _tavily_search},
+    Capability.VIDEO_GENERATION: {"mock": lambda settings: MockVideoGenerationProvider(), "minimax": _minimax_video},
 }
 
 
@@ -239,6 +266,7 @@ class ProviderStack:
     image_generation: ManagedImageGenerationProvider
     image_search: ManagedImageSearchProvider
     search: ManagedSearchProvider
+    video_generation: ManagedVideoGenerationProvider
 
 
 def build_llm_providers(settings: Settings, routing: RoutingConfig) -> dict[str, LLMProvider]:
@@ -292,6 +320,8 @@ def build_providers(settings: Settings, events: EventBus, *, llm_providers: dict
         image_generation=ManagedImageGenerationProvider(selector.chain(Capability.IMAGE), invoker),
         image_search=ManagedImageSearchProvider(selector.chain(Capability.IMAGE_SEARCH)[0], invoker),
         search=ManagedSearchProvider(selector.chain(Capability.SEARCH), invoker),
+        video_generation=ManagedVideoGenerationProvider(selector.chain(Capability.VIDEO_GENERATION), invoker,
+                                                        price_per_second=p.video_generation_price_per_second),
     )
 
 
@@ -331,6 +361,8 @@ def build_container(
     tts_provider: TTSProvider | None = None,
     video_composer: VideoComposer | None = None,
     video_prober: VideoProber | None = None,
+    video_generation_provider: VideoGenerationProvider | None = None,
+    video_normalizer: VideoNormalizer | None = None,
 ) -> Container:
     settings = settings or Settings()
     settings.validate_runtime()
@@ -343,7 +375,8 @@ def build_container(
     events.subscribe(log_event)
 
     injected = {Capability.TTS: tts_provider, Capability.IMAGE: image_generation_provider,
-                Capability.IMAGE_SEARCH: image_search_provider, Capability.SEARCH: search_provider}
+                Capability.IMAGE_SEARCH: image_search_provider, Capability.SEARCH: search_provider,
+                Capability.VIDEO_GENERATION: video_generation_provider}
     providers = build_providers(settings, events, llm_providers=llm_providers,
                                 injected={k: v for k, v in injected.items() if v is not None})
     routing = providers.routing
@@ -364,8 +397,12 @@ def build_container(
     renderer = presentation_renderer or PRESENTATION_RENDERER_FACTORIES[settings.presentation_renderer](artifacts)
     tts = providers.tts
     default_composer, default_prober = VIDEO_COMPOSER_FACTORIES[settings.video_composer](settings, artifacts)
-    video = VideoService(artifacts, video_composer or default_composer, video_prober or default_prober,
-                         ScratchSpace(settings.resolved_video_work_dir, keep_failed=settings.video_keep_failed_work))
+    scratch = ScratchSpace(settings.resolved_video_work_dir, keep_failed=settings.video_keep_failed_work)
+    video = VideoService(artifacts, video_composer or default_composer, video_prober or default_prober, scratch)
+    generated_video = GeneratedVideoService(
+        artifacts, providers.video_generation, video_prober or default_prober,
+        video_normalizer or VIDEO_NORMALIZER_FACTORIES[settings.video_composer](settings), scratch,
+        settings.generated_video_config())
     registry = ToolRegistry()
     for tool in (
         SearchTool(search, cache=InMemoryResearchCache() if settings.research_cache else None,
@@ -407,6 +444,8 @@ def build_container(
         VideoComposeTool(video),
         VideoValidateTool(video),
         VideoArtifactTool(video),
+        VideoStrategyTool(limits=generated_video.limits),
+        *generation_tools(generated_video),
     ):
         registry.register(tool)
     tools = ToolManager(registry)
@@ -445,6 +484,8 @@ def build_container(
         audio_silent_slide_seconds=settings.audio_silent_slide_seconds,
         video_failure_policy=settings.video_failure_policy,
         video_config=settings.video_config(),
+        generated_video_enabled=settings.generated_video_enabled,
+        generated_video=settings.generated_video_config(),
     )
     planner = WorkflowPlanner([lesson_template(options), evaluation_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,

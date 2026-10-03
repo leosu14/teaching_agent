@@ -84,7 +84,7 @@ class ProviderRequestRecord(Schema):
 
     request_id: str
     provider: str
-    capability: str  # a Capability value: llm, tts, image, image_search, search
+    capability: str  # a Capability value: llm, tts, image, image_search, search, video_generation
     operation: str
     model: str | None = None
     node_id: str | None = None
@@ -100,6 +100,7 @@ class ProviderRequestRecord(Schema):
     audio_seconds: float | None = None
     image_count: int | None = None
     result_count: int | None = None
+    video_seconds: float | None = None  # generated video seconds
     estimated_cost_usd: float | None = None  # from configured pricing
     actual_cost_usd: float | None = None  # reported by the provider
     at: datetime = Field(default_factory=utcnow)
