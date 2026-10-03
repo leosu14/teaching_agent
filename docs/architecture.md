@@ -17,7 +17,10 @@ tools        do the HOW (search, retrieval, dedup + ranking, research cache, ima
 providers    replaceable adapters: LLM, search, retrieval, ranking, image generation, image search, presentation
              renderer (python-pptx), TTS, video composer + prober (FFmpeg adapter, mock); the provider core
              (registry, selector, invoker, typed errors, rate limiter, HTTP client) and the managed wrappers
-learner      level frameworks, mastery rules, LearnerMemoryService (long-term memory)
+learner      level frameworks, MasteryUpdater + review scheduler, evidence / learning-event / goal stores,
+             learner-model builder, LearnerMemoryService (long-term memory)
+pedagogy     the adaptive engine: ConceptGraph, KnowledgeBase interface, KnowledgeGapAnalyzer, PedagogicalPlanner,
+             PedagogicalStrategy (GenericStrategy), NextLessonRecommender; pure, deterministic, no I/O
 artifacts    ArtifactService: versioning, content-hash dedup, dependency graph, content-addressed media objects
 storage      SQLAlchemy/SQLite metadata repositories + filesystem object store (no business rules)
 schemas / config / observability / utils   shared foundation
@@ -58,7 +61,11 @@ all that is needed.
 
 ## Workflows
 
-- `lesson_generation`: the lesson slice above. Research runs between the diagnostic and the planner
+- `lesson_generation`: the lesson slice above. Before the diagnostic, `knowledge_graph` (`knowledge.concepts`) loads
+  the domain's concept graph and `load_goal` (`learning_goal.resolve`) the learning goal the lesson is planned
+  against. After it, `record_diagnostic` turns the graded answers into evidence, `learner_model`, `knowledge_gaps`
+  and `pedagogical_plan` compute the adaptive state, and `store_pedagogy` stores `learning_evidence` → `learner_model`
+  → `knowledge_gaps` → `pedagogical_plan` (each the parent of the next). Research runs between the diagnostic and the planner
   (`research` → `research_policy` → `store_research` → `plan`); visuals run after review
   (`teach_review` → `visual_gate` → `visual` → `visual_policy`), then the lesson artifacts are stored and the
   presentation is made (`presentation_gate` → `slide_plan` → `validate_slide_plan` → `store_slide_plan` →
@@ -66,7 +73,7 @@ all that is needed.
   `store_audio_plan` → `synthesize_audio` → `audio_policy` → `audio_timeline`) and turned into a video (`video_plan`
   → `validate_video_plan` → `store_video_plan` → `compose_video`) before `update_learner`. It stores `research_bundle` first,
   then `visual_plan` (parent: research_bundle) and one `image_<visual_id>` IMAGE_ASSET per visual (parent:
-  visual_plan), then `lesson_plan` (parent: research_bundle), `lesson` (parents: lesson_plan, research_bundle and
+  visual_plan), then `lesson_plan` (parents: research_bundle, pedagogical_plan), `lesson` (parents: lesson_plan, research_bundle and
   its image assets), `narration_script` and `review_report`, then `slide_plan` (parent: lesson) and `presentation`
   (parents: slide_plan, lesson and the image assets it places), then `audio_plan` (parents: presentation,
   slide_plan, lesson), one `audio_<segment_id>` AUDIO_ASSET per voiced segment (parent: audio_plan) and
@@ -77,8 +84,10 @@ all that is needed.
   task id in `plan.inputs`. It reads the lesson and lesson plan artifacts (`artifact.read`), takes a learner
   snapshot, asks `LearnerEvaluationAgent` for an assessment sized by objectives, taught concepts, level and
   mastery, WAITS for answers, asks the agent to grade them and recommend what's next, records the evidence
-  through `learner.record_evaluation` (idempotent per task), and stores a `LEARNER_EVALUATION` artifact whose
-  parent is the lesson. Events: `assessment.created`, `assessment.waiting`, `assessment.submitted`,
+  through `learner.record_evaluation` (idempotent per task), rebuilds the learner model, asks the pedagogical
+  engine for the next recommendation (`pedagogy.recommend`) and the feedback (`pedagogy.evaluation_feedback`), and
+  stores a `LEARNER_EVALUATION` artifact whose parent is the lesson, then `learning_evidence` (parent: the
+  evaluation), `learner_model` and `next_recommendation` (LEARNING_RECOMMENDATION). Events: `assessment.created`, `assessment.waiting`, `assessment.submitted`,
   `evaluation.started`, `evaluation.completed`, `recommendation.created`, `learner.mastery_updated`.
 
 ## Research
@@ -382,9 +391,72 @@ through the same path.
 ## Learner model
 
 Subjects carry a pluggable `LevelFramework` (`cefr`, `mastery`, more can be registered). Concepts carry
-mastery, confidence, evidence and exposure counts and a review date. The snapshot answers what the learner
-knows, probably does not know, should learn next and should review. Recording a lesson or an evaluation is
-idempotent per task, so a resumed task never applies the same evidence twice.
+mastery (0–1), confidence, evidence, correct / incorrect counts, the current incorrect streak, exposure counts and
+a review date. The snapshot answers what the learner knows, probably does not know, should learn next and should
+review. Recording a diagnostic, a lesson or an evaluation is idempotent per task, so a resumed task never applies
+the same evidence twice.
+
+History is stored, not just state: `LearningEvidence` (immutable, append-only: re-recording the same id is a no-op
+and different content under the same id is refused), `LearningEvent`s (diagnostic and evaluation completed, lesson
+completed, concept mastered or reviewed) and `LearningGoal`s, each in its own table. Any concept's state can be
+rebuilt from its evidence and exposures alone (`LearnerMemoryService.rebuild`).
+
+## Adaptive pedagogy
+
+```
+Learner → LearnerModel → Diagnostic → evidence → MasteryUpdater → Knowledge gaps → Pedagogical plan
+→ Personalised lesson → Evaluation → evidence → MasteryUpdater → Next recommendation
+```
+
+What is decided by code and what by models:
+
+| Deterministic (code, `app/learner` + `app/pedagogy`) | Model (agents) |
+|---|---|
+| Mastery from evidence (`MasteryUpdater`), confidence, review dates | Grading a free answer (a model's interpretation, recorded as evidence) |
+| Learner-model categories (mastered / developing / weak / unknown) | Diagnostic and assessment questions |
+| Knowledge gaps and their priority, the recommended action | Wording of the lesson plan, explanations and examples |
+| Target concepts, prerequisite review, introduce vs reinforce, activities, difficulty band, minutes | Exercises within the planned activity types |
+| Next recommendation and evaluation feedback | |
+
+- **Evidence.** Diagnostic and evaluation answers become `LearningEvidence` (source, correctness, score, difficulty,
+  timestamp). Only evidence moves mastery; being taught a concept counts an exposure and schedules a review only.
+  `MasteryUpdater` moves mastery toward the evidence score at a rate that grows with how informative the item was
+  (a hard success or an easy failure) and shrinks as evidence accumulates; a `manual` placement is calibrated
+  (`manual_weight`). Values stay within 0–1.
+- **Spaced review.** `IntervalReviewScheduler` sets `next_review_at` from mastery (weak / medium / strong
+  intervals), sooner after an error, longer after a correct answer that was retained over a gap. It is a protocol
+  (`ReviewScheduler`), so a different algorithm can replace it.
+- **Concept graph.** `ConceptGraph` validates prerequisites (known, no self-reference, no cycles) and keeps a stable
+  topological order; `KnowledgeBase` is the interface the engine reads concepts from (`RetrieverKnowledgeBase`
+  wraps the existing local knowledge base; no graph database).
+- **Knowledge gaps.** `KnowledgeGapAnalyzer` scopes the goal's targets plus their prerequisites, treats concepts at
+  or above `mastery_target` as mastered, and scores the rest:
+  `priority = Σ weight × factor` over the deficit, prerequisite importance, goal relevance, recent errors, recency
+  and repeated failure (weights in `PedagogyConfig.weights`). The action is `prerequisite_first` when a
+  prerequisite is below `prerequisite_threshold`, `reteach` after repeated failure, `introduce` when unassessed or
+  foundational, `reinforce` otherwise.
+- **Planning.** `PedagogicalPlanner` picks targets by priority within the time available (the request, else the
+  learner's session length): a target whose unmet prerequisites are at least `guided` is taught after reviewing
+  them; otherwise it is deferred and its deepest blocking prerequisite is taught instead. Mastered concepts are
+  only reviewed when due. Concepts taught before are reinforced, not re-introduced. The plan is validated (unique
+  roles, objectives and activities on plan concepts, prerequisites first, positive minutes that add up within the
+  time available) and its id is a hash of its content.
+- **Strategies.** `PedagogicalStrategy` turns a concept treatment into objectives and activities;
+  `GenericStrategy` (explain → practise at the learner's band → check) is the default for every domain, and a
+  domain can name another one in `PedagogyConfig.strategies`. Activity types are open (`role_play`, `coding`, ...).
+- **Difficulty bands.** foundational < 0.3 ≤ guided < 0.6 ≤ independent < 0.8 ≤ consolidation (configurable).
+- **Adaptive questioning.** `AdaptiveQuestioningPolicy`: concepts memory already knows with confidence are not
+  asked, a missed concept gets an easier follow-up, at most `max_follow_ups_per_concept` each, never more than
+  `max_questions` in total; the diagnostic stops when nothing is left to follow up. The diagnostic agent's check
+  enforces it.
+- **Teacher.** The teacher receives the plan brief, the learner context and the gaps; its check enforces the plan's
+  objectives, one objective per section of its own concept, a typed section purpose (`explanation`, `example`,
+  `guided_practice`, `free_practice`, `review`, `assessment`) and no section on a concept outside the plan.
+- **Privacy.** Providers get a pseudonymous learner context (level, preferences, the planned concepts' state), never
+  the learner id, display name or full history; the learner id appears only in stored artifacts and events.
+- **Failures.** Learner state changes only in `record_diagnostic` and `update_mastery`/`update_learner`, from
+  validated, graded answers. A failed model call, review or evaluation leaves mastery as it was (the evaluation
+  can be resumed); nothing is invented to fill a gap.
 
 ## Cost and observability
 
@@ -408,6 +480,7 @@ graph, per-node trace, usage). `scripts/run_production_demo.py` is a thin CLI ov
 
 ## Not in this release
 
-Real image-search and AI video providers, MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
+Learned mastery models (BKT / IRT) and FSRS-style scheduling (the updater and scheduler are replaceable), a
+curated multi-subject concept library, real image-search and AI video providers, MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
 design, animations, cloud rendering, coding exercises and VS Code integration, UI, deployment. The provider and
 tool interfaces they plug into already exist.

@@ -54,9 +54,9 @@ def container(settings: Settings, mock_llm: MockLLMProvider):
     c.close()
 
 
-def add_demo_learner(container: Container) -> str:
-    container.learner_service.upsert(LEARNER["learner_id"], LearnerProfileInput.model_validate(LEARNER["profile"]))
-    return LEARNER["learner_id"]
+def add_demo_learner(container: Container, learner_id: str = LEARNER["learner_id"]) -> str:
+    container.learner_service.upsert(learner_id, LearnerProfileInput.model_validate(LEARNER["profile"]))
+    return learner_id
 
 
 def answers_for(task: Task) -> DiagnosticAnswers:
@@ -67,8 +67,9 @@ def answers_for(task: Task) -> DiagnosticAnswers:
                                       for q in sheet.questions])
 
 
-async def run_lesson(container: Container, request: str = LEARNER["request"]) -> Task:
-    learner_id = add_demo_learner(container)
+async def run_lesson(container: Container, request: str = LEARNER["request"],
+                     learner_id: str = LEARNER["learner_id"]) -> Task:
+    learner_id = add_demo_learner(container, learner_id)
     task = await container.task_service.create_and_run(request=request, learner_id=learner_id, user_id="u1")
     while task.status == TaskStatus.WAITING:
         task = await container.task_service.submit_assessment(task.task_id, answers_for(task))

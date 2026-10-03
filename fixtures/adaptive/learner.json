@@ -1,0 +1,27 @@
+{
+  "_comment": "A B1 Spanish learner with a calibrated placement. Each placed concept has two practice results and then a manual placement (the last word, so mastery equals the placement score). Timestamps are days before the demo runs.",
+  "learner_id": "adaptive-learner",
+  "profile": {
+    "display_name": "Adaptive demo learner",
+    "subjects": [
+      {"subject": "spanish", "framework_id": "cefr", "target_level": "B1", "estimated_level": "B1",
+       "objectives": ["Improve conversational Spanish"]}
+    ],
+    "preferences": {"language_of_instruction": "en", "session_minutes": 30, "explanation_style": "examples-first"}
+  },
+  "goal": {
+    "goal_id": "goal_conversational_spanish",
+    "domain": "spanish",
+    "description": "Improve conversational Spanish",
+    "target_concepts": ["es.conv.opinions", "es.conv.preterite", "es.conv.imperfect",
+                        "es.conv.preterite_imperfect", "es.conv.subjunctive_opinion"],
+    "target_level": "B1",
+    "priority": 1
+  },
+  "placement": [
+    {"concept_id": "es.conv.preterite", "days_ago": 12, "practice": [["correct", 0.4], ["incorrect", 0.5]], "placement": 0.52},
+    {"concept_id": "es.conv.opinions", "days_ago": 12, "practice": [["incorrect", 0.3], ["incorrect", 0.5]], "placement": 0.20},
+    {"concept_id": "es.conv.imperfect", "days_ago": 12, "practice": [["correct", 0.5], ["correct", 0.6]], "placement": 0.78}
+  ],
+  "request": "Create a B1 lesson about conversation."
+}

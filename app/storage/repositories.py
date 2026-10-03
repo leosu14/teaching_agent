@@ -7,9 +7,17 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.schemas.artifact import Artifact
 from app.schemas.events import Event
-from app.schemas.learner import LearnerProfile
+from app.schemas.learner import EvidenceConflict, LearnerProfile, LearningEvent, LearningEvidence, LearningGoal
 from app.schemas.task import Task
-from app.storage.orm import ArtifactRow, EventRow, LearnerRow, TaskRow
+from app.storage.orm import (
+    ArtifactRow,
+    EventRow,
+    LearnerRow,
+    LearningEventRow,
+    LearningEvidenceRow,
+    LearningGoalRow,
+    TaskRow,
+)
 
 
 class NotFound(KeyError):
@@ -106,3 +114,72 @@ class SqlLearnerRepository:
         with self._sessions.begin() as s:
             s.merge(LearnerRow(learner_id=profile.learner_id, updated_at=profile.updated_at,
                                body=profile.model_dump_json()))
+
+
+class SqlEvidenceRepository:
+    """Append-only evidence store: rows are inserted, never updated."""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def add(self, evidence: LearningEvidence) -> bool:
+        with self._sessions.begin() as s:
+            row = s.scalars(select(LearningEvidenceRow).where(
+                LearningEvidenceRow.evidence_id == evidence.evidence_id)).first()
+            if row is not None:
+                if LearningEvidence.model_validate_json(row.body) != evidence:
+                    raise EvidenceConflict(
+                        f"evidence {evidence.evidence_id} is already recorded with different content")
+                return False
+            s.add(LearningEvidenceRow(evidence_id=evidence.evidence_id, learner_id=evidence.learner_id,
+                                      concept_id=evidence.concept_id, source_type=evidence.source_type,
+                                      timestamp=evidence.timestamp, body=evidence.model_dump_json()))
+            return True
+
+    def for_learner(self, learner_id: str, concept_id: str | None = None) -> list[LearningEvidence]:
+        query = select(LearningEvidenceRow).where(LearningEvidenceRow.learner_id == learner_id)
+        if concept_id is not None:
+            query = query.where(LearningEvidenceRow.concept_id == concept_id)
+        with self._sessions() as s:
+            return [LearningEvidence.model_validate_json(r.body)
+                    for r in s.scalars(query.order_by(LearningEvidenceRow.seq))]
+
+
+class SqlLearningEventRepository:
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def add(self, event: LearningEvent) -> bool:
+        with self._sessions.begin() as s:
+            if s.scalars(select(LearningEventRow.seq).where(LearningEventRow.event_id == event.event_id)).first():
+                return False
+            s.add(LearningEventRow(event_id=event.event_id, learner_id=event.learner_id, type=event.type,
+                                   at=event.at, body=event.model_dump_json()))
+            return True
+
+    def for_learner(self, learner_id: str) -> list[LearningEvent]:
+        with self._sessions() as s:
+            rows = s.scalars(select(LearningEventRow).where(LearningEventRow.learner_id == learner_id)
+                             .order_by(LearningEventRow.seq))
+            return [LearningEvent.model_validate_json(r.body) for r in rows]
+
+
+class SqlGoalRepository:
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def save(self, goal: LearningGoal) -> None:
+        with self._sessions.begin() as s:
+            s.merge(LearningGoalRow(goal_id=goal.goal_id, learner_id=goal.learner_id, domain=goal.domain,
+                                    status=goal.status, body=goal.model_dump_json()))
+
+    def get(self, goal_id: str) -> LearningGoal | None:
+        with self._sessions() as s:
+            row = s.get(LearningGoalRow, goal_id)
+            return LearningGoal.model_validate_json(row.body) if row else None
+
+    def for_learner(self, learner_id: str) -> list[LearningGoal]:
+        with self._sessions() as s:
+            rows = s.scalars(select(LearningGoalRow).where(LearningGoalRow.learner_id == learner_id)
+                             .order_by(LearningGoalRow.goal_id))
+            return [LearningGoal.model_validate_json(r.body) for r in rows]

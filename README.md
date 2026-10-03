@@ -9,8 +9,9 @@ This release is the **text-lesson vertical slice** with research, visuals, a pre
 lesson video, fully deterministic on mock providers (the video is composed locally with FFmpeg):
 
 ```
-Request → Task → Request Interpreter → Learner Snapshot → Diagnostic (adaptive, can WAIT for answers)
-→ Research (queries → search → dedup/rank → evidence → cited ResearchBundle) → Curriculum Plan → Teacher ⇄ Reviewer (revision loop)
+Request → Task → Request Interpreter → Learner Snapshot → Concept Graph → Learning Goal
+→ Diagnostic (adaptive, only what memory does not know; can WAIT for answers) → Learning Evidence → Learner Model
+→ Knowledge Gaps → Pedagogical Plan (deterministic) → Research (queries → search → dedup/rank → evidence → cited ResearchBundle) → Curriculum Plan → Teacher ⇄ Reviewer (revision loop)
 → Visual (approved lessons only: visual plan → image search / generation → selection → validation → IMAGE_ASSET) → Artifact Storage
 → Slide Planning → SlideDeckPlan validation → Presentation Build → Presentation Render (approved lessons only: PPTX → PRESENTATION)
 → Audio Planning → AudioPlan validation → TTS → audio validation → AUDIO_ASSET → PresentationTimeline (rendered presentations only)
@@ -22,8 +23,15 @@ A completed lesson can then be evaluated (the post-lesson learning loop):
 
 ```
 Completed lesson → Learner Evaluation (assessment) → WAITING for answers → Learner Evaluation (grading)
-→ Learner Memory (mastery) → remaining gaps + next-learning recommendation → LEARNER_EVALUATION artifact → COMPLETED
+→ Learning Evidence → deterministic mastery update → Learner Model → next-lesson recommendation (re-planned from the
+new state) + feedback → LEARNER_EVALUATION, LEARNING_EVIDENCE, LEARNER_MODEL, LEARNING_RECOMMENDATION → COMPLETED
 ```
+
+The **adaptive pedagogical engine** (`app/pedagogy/`) decides what to teach from the learner's state, not from
+the request alone: evidence updates mastery by code (never by a model), knowledge gaps are prioritised by
+deterministic rules over the concept prerequisite graph, and a `PedagogicalPlan` fixes the target concepts,
+prerequisite review, introduction vs reinforcement, activities, difficulty and timing. Models only word the plan
+and the lesson. See [architecture](docs/architecture.md#adaptive-pedagogy).
 
 ## Run it
 
@@ -31,6 +39,7 @@ Completed lesson → Learner Evaluation (assessment) → WAITING for answers →
 pip install -e ".[dev]"                # plus ffmpeg + ffprobe on PATH (apt-get install ffmpeg / brew install ffmpeg)
 python scripts/run_demo.py          # one command that proves the slice works
 python scripts/run_evaluation_demo.py  # lesson, then its evaluation, mastery before/after, recommendation
+python scripts/run_adaptive_demo.py    # learner model -> gaps -> plan -> lesson -> evaluation -> new recommendation
 python scripts/run_research_demo.py    # the lesson's research: queries, results, sources, evidence, citations
 python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, selection, generation, validation, assets
 python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validation, build, real .pptx with the images
@@ -46,6 +55,11 @@ uvicorn app.api.main:app --reload   # the same services over HTTP
 parents, the learner's mastery changes, token usage, and estimated vs actual cost. `run_evaluation_demo.py`
 runs that lesson, generates the assessment, shows the task WAITING, submits the fixture learner's answers and
 prints the evaluation, mastery before and after, remaining gaps and the next recommendation.
+`run_adaptive_demo.py` starts from a B1 Spanish learner with a placement (preterite 0.52, opinions 0.20, imperfect
+0.78; `fixtures/adaptive/`) and the goal "Improve conversational Spanish": it prints the learner model and the first
+recommendation, runs an adaptive lesson (the diagnostic asks only about the unknown concepts), prints the knowledge
+gaps, the pedagogical plan, the lesson objectives and section purposes, evaluates the lesson, prints mastery before
+and after, the feedback and the next recommendation, and exits 1 unless the recommendation changed.
 `run_research_demo.py` runs the lesson and shows its research: the request, generated queries, mock search
 results (with duplicates), selected and rejected sources, extracted evidence, citations, the stored
 ResearchBundle, and how each lesson section's citations resolve to evidence and sources.

@@ -1,0 +1,13 @@
+{
+  "_comment": "Simulated diagnostic answers keyed by concept id, one object per round. Placed concepts are known with confidence and are not asked again.",
+  "rounds": [
+    {
+      "es.conv.preterite_imperfect": "lloviò cuando",
+      "es.conv.subjunctive_opinion": "es"
+    },
+    {
+      "es.conv.preterite_imperfect": "sonó",
+      "es.conv.subjunctive_opinion": "tiene"
+    }
+  ]
+}

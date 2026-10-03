@@ -48,7 +48,8 @@ def test_lesson_task_over_http(client: TestClient) -> None:
     assert fetched["cost"]["actual_cost_usd"] > 0 and fetched["cost"]["estimated_cost_usd"] > 0
 
     artifacts = client.get(f"/tasks/{task['task_id']}/artifacts").json()
-    assert {a["type"] for a in artifacts} == {"RESEARCH_BUNDLE", "VISUAL_PLAN", "IMAGE_ASSET",
+    assert {a["type"] for a in artifacts} == {"LEARNING_EVIDENCE", "LEARNER_MODEL", "KNOWLEDGE_GAPS",
+                                             "PEDAGOGICAL_PLAN", "RESEARCH_BUNDLE", "VISUAL_PLAN", "IMAGE_ASSET",
                                                 "LESSON_PLAN", "LESSON", "SCRIPT", "SLIDE_PLAN", "REPORT", "PRESENTATION",
                                                 "AUDIO_PLAN", "AUDIO_ASSET", "PRESENTATION_TIMELINE",
                                                 "VIDEO_PLAN", "SUBTITLE", "VIDEO"}
@@ -110,7 +111,10 @@ def test_lesson_evaluation_over_http(client: TestClient) -> None:
     assert result["remaining_gaps"] == ["es.football.opinions"]
     assert result["recommendation"]["action"] == "reteach"
 
-    [artifact] = client.get(f"/tasks/{task['task_id']}/artifacts").json()
+    artifacts = client.get(f"/tasks/{task['task_id']}/artifacts").json()
+    assert {a["type"] for a in artifacts} == {"LEARNER_EVALUATION", "LEARNING_EVIDENCE", "LEARNER_MODEL",
+                                              "LEARNING_RECOMMENDATION"}
+    artifact = next(a for a in artifacts if a["type"] == "LEARNER_EVALUATION")
     assert artifact["type"] == "LEARNER_EVALUATION"
     assert artifact["metadata"]["score"] == 0.5
     assert artifact["metadata"]["remaining_gaps"] == ["es.football.opinions"]

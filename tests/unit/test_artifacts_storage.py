@@ -13,7 +13,10 @@ from app.storage.repositories import (
     NotFound,
     SqlArtifactRepository,
     SqlEventRepository,
+    SqlEvidenceRepository,
+    SqlGoalRepository,
     SqlLearnerRepository,
+    SqlLearningEventRepository,
     SqlTaskRepository,
 )
 from tests.unit.helpers import scope
@@ -95,3 +98,36 @@ def test_repositories_round_trip(sessions) -> None:
     assert learners.get("l") is None
     learners.save(LearnerProfile(learner_id="l", display_name="L"))
     assert learners.get("l").display_name == "L"
+
+
+def test_learner_history_repositories(sessions) -> None:
+    from datetime import timedelta
+
+    from app.schemas.learner import EvidenceConflict, LearningEvent, LearningEvidence, LearningGoal
+    from tests.unit.helpers import NOW
+
+    def ev(ref: str, at, concept: str = "c1") -> LearningEvidence:
+        return LearningEvidence(evidence_id=LearningEvidence.id_for("l1", "exercise", ref, concept), learner_id="l1",
+                                concept_id=concept, source_type="exercise", source_ref=ref, correctness="correct",
+                                score=1.0, difficulty=0.5, timestamp=at)
+
+    evidence = SqlEvidenceRepository(sessions)
+    later, earlier = ev("b", NOW + timedelta(hours=1)), ev("a", NOW, "c2")
+    assert evidence.add(later) and evidence.add(earlier)
+    assert evidence.add(later) is False  # append-only, idempotent
+    with pytest.raises(EvidenceConflict):
+        evidence.add(later.model_copy(update={"difficulty": 0.9}))
+    assert evidence.for_learner("l1") == [later, earlier]  # recording order
+    assert evidence.for_learner("l1", "c2") == [earlier] and evidence.for_learner("other") == []
+
+    events = SqlLearningEventRepository(sessions)
+    e = LearningEvent.create("l1", "lesson_completed", NOW, key="t1", subject="spanish", concept_ids=["c1"])
+    assert events.add(e) and not events.add(e)
+    assert events.for_learner("l1") == [e]
+
+    goals = SqlGoalRepository(sessions)
+    goal = LearningGoal(goal_id="g1", learner_id="l1", domain="spanish", target_concepts=["c1"])
+    goals.save(goal)
+    goals.save(goal.model_copy(update={"status": "achieved"}))
+    assert goals.get("g1").status == "achieved" and goals.get("missing") is None
+    assert [g.goal_id for g in goals.for_learner("l1")] == ["g1"]

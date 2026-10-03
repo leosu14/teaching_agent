@@ -16,6 +16,14 @@ They are validated when the container is built; errors say what to fix.
 | `TA_REVISION_EXHAUSTED_POLICY` | `fail` | `fail` or `accept_with_warnings` when the budget is used |
 | `TA_DIAGNOSTIC_MAX_ROUNDS` | `2` | Adaptive diagnostic question rounds |
 | `TA_DIAGNOSTIC_MEMORY_CONFIDENCE` | `0.6` | Confidence above which the diagnostic trusts memory instead of asking |
+| `TA_DIAGNOSTIC_MAX_QUESTIONS` | `12` | Adaptive questioning: most diagnostic questions in total |
+| `TA_DIAGNOSTIC_MAX_FOLLOW_UPS` | `1` | Adaptive questioning: follow-up questions per missed concept |
+| `TA_PEDAGOGY_BAND_GUIDED` | `0.3` | Difficulty bands: mastery from which a concept is `guided` (below: `foundational`) |
+| `TA_PEDAGOGY_BAND_INDEPENDENT` | `0.6` | Mastery from which a concept is `independent` |
+| `TA_PEDAGOGY_BAND_CONSOLIDATION` | `0.8` | Mastery from which a concept is `consolidation` |
+| `TA_PEDAGOGY_MASTERY_TARGET` | `0.8` | Mastery at which a concept counts as mastered (no longer a gap; spaced review only) |
+| `TA_PEDAGOGY_MAX_TARGET_CONCEPTS` | `2` | Most new target concepts per lesson |
+| `TA_PEDAGOGY_LESSON_MINUTES` | unset | Time a lesson is planned for; unset uses the learner's `session_minutes` (else 30) |
 | `TA_RESEARCH_REQUIREMENT` | `mandatory` | `mandatory`: a failed research fails the lesson task; `optional`: continue with an empty bundle and a warning |
 | `TA_RESEARCH_MAX_RESULTS` | `5` | Results requested per search query |
 | `TA_RESEARCH_MAX_SOURCES` | `6` | Sources kept after ranking |

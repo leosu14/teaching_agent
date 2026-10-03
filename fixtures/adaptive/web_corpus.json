@@ -1,0 +1,52 @@
+[
+ {
+  "url": "https://grammar-reference.example.org/b1/preterite",
+  "title": "Spanish preterite for completed events in conversation",
+  "snippet": "Use the preterite for completed actions with a clear end in Spanish conversation.",
+  "publisher": "Open Grammar Reference",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "The preterite narrates completed actions with a clear end point, such as ayer, el sábado or anoche. Example: Ayer hablé con mi hermana. Practice: Complete: Anoche nosotros ___ en un restaurante. (cenar) Answer: cenamos.\n\nIrregular preterite forms like fui, hice and tuve are frequent in finished actions. Example: El verano pasado fui a México."
+ },
+ {
+  "url": "https://grammar-reference.example.org/b1/imperfect",
+  "title": "Spanish imperfect for descriptions and habits in conversation",
+  "snippet": "Use the imperfect for habits, descriptions and background in Spanish conversation.",
+  "publisher": "Open Grammar Reference",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "The imperfect describes habits and repeated past actions, often with siempre or todos los días. Example: De niño jugaba en el parque todos los días. Practice: Complete: Cuando vivía en Madrid, ___ en metro. (viajar, yo) Answer: viajaba.\n\nThe imperfect also gives descriptions of people, weather and time in the past. Example: Era tarde y hacía frío."
+ },
+ {
+  "url": "https://grammar-reference.example.org/b1/opinions",
+  "title": "Expressing opinions in Spanish conversation",
+  "snippet": "Creo que, pienso que and me parece que introduce opinions in Spanish conversation.",
+  "publisher": "Conversation Skills Hub",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2023-11-12",
+  "content": "To give opinions, use creo que, pienso que or me parece que followed by the indicative. Example: Creo que la película es muy buena. Practice: Complete: ___ que el libro es interesante. (creer, yo) Answer: creo.\n\nTo ask for opinions, use ¿qué piensas de...? or ¿qué te parece...? Example: ¿Qué te parece el plan?"
+ },
+ {
+  "url": "https://grammar-reference.example.org/b1/storytelling",
+  "title": "Preterite and imperfect together in storytelling",
+  "snippet": "Contrast the imperfect scene with preterite events when telling a story in Spanish.",
+  "publisher": "Open Grammar Reference",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "In storytelling the imperfect sets the scene and the preterite tells what happened next, the contrasting events of the story. Example: Llovía cuando llegué a casa. Practice: Complete: Mientras yo leía, ___ el teléfono. (sonar) Answer: sonó.\n\nBackground versus events: interrupted actions use the imperfect for the background and the preterite for the interruption in a story. Example: Dormía cuando sonó la alarma."
+ },
+ {
+  "url": "https://grammar-reference.example.org/b1/subjunctive-opinions",
+  "title": "Disagreeing with no creo que and the subjunctive",
+  "snippet": "Negated opinions such as no creo que take the subjunctive in Spanish.",
+  "publisher": "Conversation Skills Hub",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-01-20",
+  "content": "Disagreeing with negated opinions: after no creo que or no pienso que, the verb takes the subjunctive. Example: No creo que sea verdad. Practice: Complete: No pienso que ella ___ razón. (tener) Answer: tenga.\n\nSubjunctive forms after negated verbs of opinion express doubt or disagreeing politely. Example: No me parece que sea buena idea."
+ }
+]

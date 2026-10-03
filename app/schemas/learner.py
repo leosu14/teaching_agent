@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
+from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, ConfigDict, Field, model_validator
 
 from app.schemas.common import Schema, utcnow
+
+
+# What a model sees instead of a learner id: providers never receive internal learner identifiers.
+ANONYMOUS_LEARNER = "learner"
 
 
 class AnswerEvaluation(Schema):
@@ -20,14 +26,24 @@ class AnswerEvaluation(Schema):
 
 
 class ConceptMastery(Schema):
+    """The canonical mastery state of one concept: a normalised 0-1 estimate and the evidence behind it. Labels such
+    as "weak" or "mastered" are derived from it for presentation, never stored as the state. Only the deterministic
+    MasteryUpdater (app/learner/mastery.py) writes it, from LearningEvidence."""
+
     concept_id: str
     name: str
     subject: str
     mastery: float = Field(default=0.0, ge=0, le=1)
     confidence: float = Field(default=0.0, ge=0, le=1)
-    evidence_count: int = 0
-    exposures: int = 0
-    last_evidence_at: datetime | None = None
+    evidence_count: int = Field(default=0, ge=0)
+    correct_count: int = Field(default=0, ge=0)
+    incorrect_count: int = Field(default=0, ge=0)
+    incorrect_streak: int = Field(default=0, ge=0)  # consecutive incorrect evidence, most recent last
+    exposures: int = Field(default=0, ge=0)
+    # Older profiles stored this as `last_evidence_at`; both names are accepted.
+    last_assessed_at: datetime | None = Field(default=None,
+                                              validation_alias=AliasChoices("last_assessed_at", "last_evidence_at"))
+    last_updated_at: datetime | None = None
     next_review_at: datetime | None = None
 
 
@@ -140,6 +156,10 @@ class LearnerSnapshot(Schema):
     recent_mistakes: list[MistakeRecord]
     preferences: LearnerPreferences
 
+    def for_provider(self) -> LearnerSnapshot:
+        """The snapshot as a model may see it: the learner's state without their internal identifier."""
+        return self.model_copy(update={"learner_id": ANONYMOUS_LEARNER})
+
     def has_evidence_for(self, concept_ids: list[str], min_confidence: float) -> bool:
         by_id = {c.concept_id: c for c in self.concept_mastery}
         return bool(concept_ids) and all(
@@ -153,6 +173,7 @@ class MasteryUpdate(Schema):
     subject: str
     estimated_level: str | None
     changes: list[MasteryChange]
+    evidence: list[LearningEvidence] = Field(default_factory=list)  # the evidence this update applied
 
 
 class LearnerProgress(Schema):
@@ -164,3 +185,151 @@ class LearnerProgress(Schema):
     weak: list[str]
     due_for_review: list[str]
     average_mastery: float
+
+
+# --- Evidence, learning events and goals -----------------------------------------------------------------------------
+
+EvidenceSource = Literal["diagnostic", "lesson", "evaluation", "exercise", "manual"]
+Correctness = Literal["correct", "partial", "incorrect"]
+
+
+def stable_id(prefix: str, *parts: str) -> str:
+    """A deterministic id: the same parts always give the same id, so recording is idempotent."""
+    return f"{prefix}_{hashlib.sha256(chr(31).join(parts).encode('utf-8')).hexdigest()[:20]}"
+
+
+class EvidenceConflict(ValueError):
+    """Evidence is immutable: the same id was recorded before with different content."""
+
+
+class LearningEvidence(Schema):
+    """One observation of a learner on one concept. Immutable once recorded; mastery is derived from it.
+
+    Assessment-agnostic: a diagnostic answer, an exercise, a post-lesson evaluation or a manual placement all
+    become the same record. `score` is the normalised result (0-1); `difficulty` weights how informative it is."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_id: str = Field(min_length=1)
+    learner_id: str = Field(min_length=1)
+    concept_id: str = Field(min_length=1)
+    source_type: EvidenceSource
+    source_ref: str = Field(min_length=1)  # e.g. "<task id>/<question id>"
+    correctness: Correctness
+    score: float = Field(ge=0, le=1)
+    difficulty: float = Field(default=0.5, ge=0, le=1)
+    timestamp: datetime
+    metadata: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _score_matches_correctness(self) -> LearningEvidence:
+        if self.correctness == "correct" and self.score < 0.5:
+            raise ValueError("correct evidence needs a score of at least 0.5")
+        if self.correctness == "incorrect" and self.score >= 0.5:
+            raise ValueError("incorrect evidence needs a score below 0.5")
+        if self.correctness == "partial" and not 0 < self.score < 1:
+            raise ValueError("partial evidence needs a score strictly between 0 and 1")
+        return self
+
+    @staticmethod
+    def id_for(learner_id: str, source_type: str, source_ref: str, concept_id: str) -> str:
+        return stable_id("ev", learner_id, source_type, source_ref, concept_id)
+
+    @classmethod
+    def from_answer(cls, learner_id: str, source_type: EvidenceSource, task_id: str, evaluation: AnswerEvaluation,
+                    at: datetime) -> LearningEvidence:
+        """A graded answer (diagnostic or evaluation) as evidence. The grading is the agent's interpretation; the
+        number it becomes and every mastery update after it are computed by code."""
+        ref = f"{task_id}/{evaluation.question_id}"
+        return cls(evidence_id=cls.id_for(learner_id, source_type, ref, evaluation.concept_id), learner_id=learner_id,
+                   concept_id=evaluation.concept_id, source_type=source_type, source_ref=ref,
+                   correctness="correct" if evaluation.correct else "incorrect",
+                   score=1.0 if evaluation.correct else 0.0, difficulty=evaluation.difficulty, timestamp=at,
+                   metadata={"task_id": task_id, "question_id": evaluation.question_id})
+
+
+LearningEventType = Literal["diagnostic_completed", "lesson_completed", "evaluation_completed", "concept_mastered",
+                            "concept_reviewed", "exercise_completed"]
+
+
+class LearningEvent(Schema):
+    """An entry of the learner's learning history. History is append-only: the current state is derived from
+    events and evidence, never the only thing kept."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    event_id: str
+    learner_id: str
+    type: LearningEventType
+    at: datetime
+    subject: str | None = None
+    task_id: str | None = None
+    concept_ids: list[str] = Field(default_factory=list)
+    data: dict = Field(default_factory=dict)
+
+    @classmethod
+    def create(cls, learner_id: str, type: LearningEventType, at: datetime, *, key: str, subject: str | None = None,
+               task_id: str | None = None, concept_ids: list[str] | None = None, data: dict | None = None
+               ) -> LearningEvent:
+        return cls(event_id=stable_id("lev", learner_id, type, key), learner_id=learner_id, type=type, at=at,
+                   subject=subject, task_id=task_id, concept_ids=concept_ids or [], data=data or {})
+
+
+GoalStatus = Literal["active", "achieved", "paused", "abandoned"]
+
+
+class LearningGoal(Schema):
+    """What the learner is working towards: lessons are planned against a goal, not just a topic."""
+
+    goal_id: str = Field(min_length=1)
+    learner_id: str = Field(min_length=1)
+    domain: str = Field(min_length=1)
+    target_level: str | None = None
+    target_concepts: list[str] = Field(min_length=1)
+    deadline: datetime | None = None
+    priority: int = Field(default=3, ge=1, le=5)  # 1 = highest
+    status: GoalStatus = "active"
+    description: str = ""
+
+    @model_validator(mode="after")
+    def _unique_targets(self) -> LearningGoal:
+        if len(set(self.target_concepts)) != len(self.target_concepts):
+            raise ValueError("target concepts must be unique")
+        return self
+
+
+class ReviewIntervals(Schema):
+    """Base review intervals (days) by mastery: below `weak_below` -> weak, below `strong_from` -> medium."""
+
+    weak_below: float = Field(default=0.5, ge=0, le=1)
+    strong_from: float = Field(default=0.8, ge=0, le=1)
+    weak_days: float = Field(default=1, gt=0)
+    medium_days: float = Field(default=3, gt=0)
+    strong_days: float = Field(default=7, gt=0)
+    retention_multiplier: float = Field(default=2.0, ge=1)  # a success after a long gap stretches the interval
+    max_days: float = Field(default=60, gt=0)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> ReviewIntervals:
+        if self.weak_below > self.strong_from:
+            raise ValueError("weak_below must not exceed strong_from")
+        return self
+
+
+class MasteryConfig(Schema):
+    """Parameters of the deterministic mastery update. Successes on hard items and failures on easy ones move the
+    estimate more; the step shrinks as evidence accumulates so the estimate stabilises."""
+
+    prior_mastery: float = Field(default=0.3, ge=0, le=1)
+    base_rate: float = Field(default=0.35, gt=0, le=1)
+    informativeness_rate: float = Field(default=0.3, ge=0, le=1)
+    rate_decay: float = Field(default=0.15, ge=0)
+    confidence_base: float = Field(default=0.6, gt=0, lt=1)  # confidence = 1 - base ** evidence_count
+    manual_weight: float = Field(default=1.0, ge=0, le=1)  # how far a manual placement moves mastery to its score
+    review: ReviewIntervals = Field(default_factory=ReviewIntervals)
+
+    @model_validator(mode="after")
+    def _bounded_rate(self) -> MasteryConfig:
+        if self.base_rate + self.informativeness_rate > 1:
+            raise ValueError("base_rate + informativeness_rate must not exceed 1 (mastery would overshoot)")
+        return self

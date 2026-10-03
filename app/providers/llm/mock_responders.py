@@ -205,24 +205,31 @@ def diagnose(request: LLMRequest) -> dict:
         return DiagnosticStep(status="complete", concepts=concepts, result=result).model_dump(mode="json")
 
     if not p.rounds:
+        # Probe only what memory does not already cover with confidence, within the question budget.
+        wanted = set(p.questioning.first_round(ids, p.confident_concepts()))
         items = []
         for entry in p.concepts:
-            if not entry.probes:
+            if not entry.probes or entry.concept.concept_id not in wanted:
                 continue
             probe = min(entry.probes, key=lambda pr: abs(pr.difficulty - 0.5))
             items.append(_item(p.round_number, entry.concept.concept_id, probe))
-        return DiagnosticStep(status="ask", concepts=concepts, items=items).model_dump(mode="json")
+        if items:
+            return DiagnosticStep(status="ask", concepts=concepts, items=items).model_dump(mode="json")
 
     evaluations = _evaluate(p)
-    latest_ids = {i.question.question_id for i in p.rounds[-1].items}
+    latest_ids = {i.question.question_id for i in p.rounds[-1].items} if p.rounds else set()
     latest = [e for e in evaluations if e.question_id in latest_ids]
 
-    if len(p.rounds) < p.max_rounds:
-        # Adapt: for each concept missed in the last round, ask an easier question not yet asked.
+    if p.rounds and len(p.rounds) < p.max_rounds:
+        # Adapt: for each concept missed in the last round (and with follow-up budget left), ask an easier
+        # question not yet asked.
         asked = {normalize(i.question.prompt) for r in p.rounds for i in r.items}
+        per_concept = p.questions_per_concept()
+        allowed = set(p.questioning.follow_ups(per_concept, [e.concept_id for e in latest if not e.correct],
+                                               sum(per_concept.values())))
         followups = []
         for ev in latest:
-            if ev.correct:
+            if ev.correct or ev.concept_id not in allowed:
                 continue
             entry = next(e for e in p.concepts if e.concept.concept_id == ev.concept_id)
             easier = sorted(
@@ -343,36 +350,33 @@ def research(request: LLMRequest) -> dict:
 
 
 def plan(request: LLMRequest) -> dict:
+    """Words the deterministic pedagogical plan: its concepts, reviews, sequence and time are taken as given."""
     p = PlannerInput.model_validate(request.input_payload)
-    known = set(p.diagnostic.known)
-    gaps = [cid for cid in p.diagnostic.gaps]
-    order = gaps + [c.concept_id for c in p.concepts if c.concept_id not in gaps and c.concept_id not in known]
-    if not order:
-        order = [c.concept_id for c in p.concepts]
+    brief = p.pedagogical_plan
     names = {c.concept_id: c.name for c in p.concepts}
     facts_by_concept: dict[str, list[KeyFinding]] = defaultdict(list)
     for fact in p.research.key_findings:
         facts_by_concept[fact.target_id].append(fact)
 
+    order = [*brief.prerequisite_concepts, *brief.target_concepts]
+    weak = {c.concept_id for c in p.learner.concepts if c.band in ("foundational", "guided", "unknown")}
+    rationale = {"introduce": "New for this learner: introduce it.",
+                 "reinforce": "Partly known: reinforce it with guided practice.",
+                 "review": "A prerequisite that is not yet secure: review it first."}
+    strategy = {"introduce": "Worked examples, then guided practice.",
+                "reinforce": "Brief recap, then practice.",
+                "review": "Quick retrieval practice."}
     planned = [
-        PlannedConcept(
-            concept_id=cid,
-            name=names[cid],
-            rationale="Identified as a gap by the diagnostic." if cid in gaps else "Not yet secure; consolidate.",
-            strategy="Worked examples, then guided practice." if cid in gaps else "Brief recap, then practice.",
-            examples=[f.example for f in facts_by_concept[cid] if f.example][:2],
-        )
+        PlannedConcept(concept_id=cid, name=names.get(cid, brief.treatment(cid).name),
+                       rationale=rationale[brief.treatment(cid).mode], strategy=strategy[brief.treatment(cid).mode],
+                       examples=[f.example for f in facts_by_concept[cid] if f.example][:2])
         for cid in order
     ]
-    review = [cid for cid in p.snapshot.due_for_review if cid not in order and cid in names]
-    sequence = [PlanStep(step_id="st1", concept_id=None, activity="warm_up", minutes=3)]
-    for cid in review:
-        sequence.append(PlanStep(step_id=f"st{len(sequence) + 1}", concept_id=cid, activity="review", minutes=3))
-    for cid in order:
-        sequence.append(PlanStep(step_id=f"st{len(sequence) + 1}", concept_id=cid, activity="explain",
-                                 minutes=6 if cid in gaps else 4))
-        sequence.append(PlanStep(step_id=f"st{len(sequence) + 1}", concept_id=cid, activity="practice", minutes=4))
-    sequence.append(PlanStep(step_id=f"st{len(sequence) + 1}", concept_id=None, activity="assess", minutes=5))
+    by_id = {a.activity_id: a for a in brief.activities}
+    kinds = {"prerequisite_review": "review", "spaced_review": "review", "instruction": "explain",
+             "practice": "practice", "assessment": "assess"}
+    sequence = [PlanStep(step_id=f"st{s.order}", concept_id=by_id[s.activity_id].concept_ids[0],
+                         activity=kinds[s.phase], minutes=s.minutes) for s in brief.sequencing]
 
     exercises = []
     for cid in order:
@@ -385,16 +389,17 @@ def plan(request: LLMRequest) -> dict:
     lesson_plan = LessonPlan(
         title=f"{p.request.topic.title()} ({p.diagnostic.estimated_level})",
         level=p.diagnostic.estimated_level,
-        objectives=[f"Practise: {names[cid]}" for cid in order],
-        prerequisites=sorted({pre for c in p.concepts if c.concept_id in order for pre in c.prerequisites}),
+        objectives=[o.description for o in brief.lesson_objectives],
+        prerequisites=list(brief.prerequisite_concepts),
         concepts=planned,
-        review_concepts=review,
+        review_concepts=list(brief.review_concepts),
         sequence=sequence,
         estimated_minutes=sum(s.minutes for s in sequence),
-        teaching_strategy="Start from the diagnosed gaps, teach with examples first, practise each concept immediately.",
+        teaching_strategy="Follow the pedagogical plan: prerequisites first, examples before practice, check each "
+                          "objective at the end.",
         exercises=exercises,
-        assessment=[f"Check question on {names[cid]}" for cid in order],
-        remediation=[f"If missed, revisit {names[cid]} with simpler examples" for cid in gaps],
+        assessment=[f"Check question on {names.get(cid, cid)}" for cid in brief.target_concepts],
+        remediation=[f"If missed, revisit {names.get(cid, cid)} with simpler examples" for cid in order if cid in weak],
         extensions=[f"Apply {p.request.topic} in a short free-response task"],
     )
     return lesson_plan.model_dump(mode="json")
@@ -408,18 +413,26 @@ def make_teacher(first_draft_defects: bool) -> Responder:
         p = TeacherInput.model_validate(request.input_payload)
         research = p.research
 
+        brief = p.pedagogical_plan
+        purpose = {"introduce": "explanation", "reinforce": "guided_practice", "review": "review"}
+        # The plan's concepts, then any spaced review the pedagogical plan explicitly asks for.
+        concepts = [(c.concept_id, c.name, c.rationale) for c in p.plan.concepts] + [
+            (cid, brief.treatment(cid).name, "Spaced review.") for cid in p.plan.review_concepts
+            if cid in brief.review_concepts]
         sections = []
-        for concept in p.plan.concepts:
-            facts = research.findings_for(concept.concept_id)[:3]
-            explanation = " ".join(f.statement for f in facts) or concept.rationale
+        for concept_id, name, rationale in concepts:
+            facts = research.findings_for(concept_id)[:3]
+            explanation = " ".join(f.statement for f in facts) or rationale
             examples = [f.example for f in facts if f.example]
-            narration = f"{concept.name}. {explanation}"
+            narration = f"{name}. {explanation}"
             if examples:
                 narration += f" For example: {examples[0]}"
             sections.append(LessonSection(
-                section_id=f"sec_{concept.concept_id}",
-                concept_id=concept.concept_id,
-                heading=concept.name,
+                section_id=f"sec_{concept_id}",
+                concept_id=concept_id,
+                purpose=purpose[brief.treatment(concept_id).mode],
+                objective_ids=[o.objective_id for o in brief.objectives_for(concept_id)],
+                heading=name,
                 explanation=explanation,
                 examples=examples,
                 narration=narration,
@@ -444,6 +457,7 @@ def make_teacher(first_draft_defects: bool) -> Responder:
         content = LessonContent(
             title=p.plan.title,
             level=p.plan.level,
+            objectives=brief.lesson_objectives,
             introduction=f"In this lesson you will work on: {names}.",
             sections=sections,
             exercises=exercises,

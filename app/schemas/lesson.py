@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from app.schemas.common import Schema
+from app.schemas.concepts import ConceptRef
+from app.schemas.pedagogy import AdaptiveQuestioningPolicy, KnowledgeGap, LearnerContext, LearningObjective, PlanBrief
 from app.schemas.learner import AnswerEvaluation, LearnerSnapshot, LearnerSummary
 from app.schemas.research import Citation, ResearchBundle
 from app.schemas.visual import ImageOrigin, VisualType
@@ -36,14 +38,6 @@ class InterpreterInput(Schema):
 
 
 # --- Knowledge concepts ------------------------------------------------------------------
-
-
-class ConceptRef(Schema):
-    concept_id: str
-    name: str
-    level: str | None = None
-    prerequisites: list[str] = Field(default_factory=list)
-    description: str = ""
 
 
 class ProbeSpec(Schema):
@@ -116,6 +110,19 @@ class DiagnosticInput(Schema):
     round_number: int = Field(default=1, ge=1)
     max_rounds: int = Field(default=2, ge=1)
     memory_confidence_threshold: float = Field(default=0.6, ge=0, le=1)
+    questioning: AdaptiveQuestioningPolicy = Field(default_factory=AdaptiveQuestioningPolicy)
+
+    def confident_concepts(self) -> set[str]:
+        """Concepts memory already covers with enough evidence and confidence: not worth asking about again."""
+        return {c.concept_id for c in self.snapshot.concept_mastery
+                if c.evidence_count > 0 and c.confidence >= self.memory_confidence_threshold}
+
+    def questions_per_concept(self) -> dict[str, int]:
+        asked: dict[str, int] = {}
+        for r in self.rounds:
+            for item in r.items:
+                asked[item.question.concept_id] = asked.get(item.question.concept_id, 0) + 1
+        return asked
 
 
 class DiagnosticStep(Schema):
@@ -181,8 +188,11 @@ class PlannedExercise(Schema):
 
 
 class PlannerInput(Schema):
+    """The curriculum planner words the deterministic pedagogical plan; it never chooses the concepts."""
+
     request: LessonRequest
-    snapshot: LearnerSnapshot
+    learner: LearnerContext
+    pedagogical_plan: PlanBrief
     diagnostic: DiagnosticResult
     research: ResearchBundle
     concepts: list[ConceptRef]
@@ -233,9 +243,14 @@ class SectionVisual(Schema):
     description: str
 
 
+SectionPurpose = Literal["explanation", "example", "guided_practice", "free_practice", "review", "assessment"]
+
+
 class LessonSection(Schema):
     section_id: str
     concept_id: str
+    purpose: SectionPurpose = "explanation"  # the section's pedagogical purpose
+    objective_ids: list[str] = Field(default_factory=list)  # the lesson objectives this section serves
     heading: str
     explanation: str = Field(min_length=1)
     examples: list[str] = Field(default_factory=list)
@@ -265,6 +280,8 @@ class CheckQuestion(Schema):
 class LessonContent(Schema):
     title: str
     level: str
+    # Explicit objectives (from the pedagogical plan); sections reference them by id.
+    objectives: list[LearningObjective] = Field(default_factory=list)
     introduction: str
     sections: list[LessonSection] = Field(min_length=1)
     exercises: list[Exercise] = Field(default_factory=list)
@@ -280,6 +297,17 @@ class LessonContent(Schema):
         if len(ids) != len(set(ids)):
             raise ValueError("section ids must be unique")
         return sections
+
+    @model_validator(mode="after")
+    def _objectives_resolve(self) -> LessonContent:
+        known = {o.objective_id for o in self.objectives}
+        if len(known) != len(self.objectives):
+            raise ValueError("objective ids must be unique")
+        for s in self.sections:
+            unknown = sorted(set(s.objective_ids) - known)
+            if unknown:
+                raise ValueError(f"section {s.section_id} references unknown objectives {unknown}")
+        return self
 
 
 # --- Review ------------------------------------------------------------------------------
@@ -337,10 +365,15 @@ class RevisionContext(Schema):
 
 
 class TeacherInput(Schema):
+    """What the teacher model sees: the plan and its pedagogical structure, the minimum learner context and the
+    gaps being taught. No learner id, history or raw answers."""
+
     request: LessonRequest
     plan: LessonPlan
     research: ResearchBundle
-    snapshot: LearnerSnapshot
+    pedagogical_plan: PlanBrief
+    learner: LearnerContext
+    gaps: list[KnowledgeGap] = Field(default_factory=list)
     revision: RevisionContext | None = None
 
 
@@ -387,6 +420,16 @@ class VisualRequest(Schema):
 
 
 # --- Learner memory update -----------------------------------------------------------------
+
+
+class DiagnosticOutcome(Schema):
+    """What learner memory records from a finished diagnostic: its graded answers become LearningEvidence."""
+
+    task_id: str
+    learner_id: str
+    request: LessonRequest
+    diagnostic: DiagnosticResult
+    concepts: list[ConceptRef]
 
 
 class LessonOutcome(Schema):

@@ -11,6 +11,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.config.production import ProductionSettings
 from app.config.providers import ProviderSettings
 from app.config.routing import ConfigError
+from app.schemas.pedagogy import (
+    AdaptiveQuestioningPolicy,
+    DifficultyBands,
+    PedagogyConfig,
+    PlannerConfig,
+)
 from app.schemas.video import VideoConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +44,15 @@ class Settings(BaseSettings):
     revision_exhausted_policy: Literal["fail", "accept_with_warnings"] = "fail"
     diagnostic_max_rounds: int = Field(default=2, ge=1, le=5)
     diagnostic_memory_confidence: float = Field(default=0.6, ge=0, le=1)
+    diagnostic_max_questions: int = Field(default=12, ge=1, le=50)  # adaptive questioning budget per diagnostic
+    diagnostic_max_follow_ups: int = Field(default=1, ge=0, le=5)  # follow-up questions per missed concept
+    # Adaptive pedagogy (see PedagogyConfig): difficulty bands, the mastery target and the lesson time budget.
+    pedagogy_band_guided: float = Field(default=0.3, gt=0, lt=1)
+    pedagogy_band_independent: float = Field(default=0.6, gt=0, lt=1)
+    pedagogy_band_consolidation: float = Field(default=0.8, gt=0, lt=1)
+    pedagogy_mastery_target: float = Field(default=0.8, gt=0, le=1)
+    pedagogy_max_target_concepts: int = Field(default=2, ge=1, le=10)
+    pedagogy_lesson_minutes: int | None = Field(default=None, ge=5, le=240)  # unset: the learner's session length
     research_requirement: Literal["mandatory", "optional"] = "mandatory"
     research_max_results: int = Field(default=5, ge=1, le=50)
     research_max_sources: int = Field(default=6, ge=1, le=50)
@@ -89,6 +104,19 @@ class Settings(BaseSettings):
     @property
     def resolved_video_work_dir(self) -> Path:
         return self.video_work_dir or self.data_dir / "work"
+
+    def questioning_policy(self) -> AdaptiveQuestioningPolicy:
+        return AdaptiveQuestioningPolicy(max_questions=self.diagnostic_max_questions,
+                                         max_follow_ups_per_concept=self.diagnostic_max_follow_ups)
+
+    def pedagogy_config(self) -> PedagogyConfig:
+        """PedagogyConfig with the configured overrides; everything else keeps its single default."""
+        return PedagogyConfig(
+            bands=DifficultyBands(guided=self.pedagogy_band_guided, independent=self.pedagogy_band_independent,
+                                  consolidation=self.pedagogy_band_consolidation),
+            mastery_target=self.pedagogy_mastery_target,
+            planner=PlannerConfig(max_target_concepts=self.pedagogy_max_target_concepts),
+            questioning=self.questioning_policy())
 
     def video_config(self) -> VideoConfig:
         """VideoConfig with the configured overrides; everything unset keeps its single default in VideoConfig."""

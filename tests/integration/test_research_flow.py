@@ -104,11 +104,16 @@ async def test_research_artifact_is_linked_and_stored_before_planning(make_conta
     assert bundle_art.task_id == task.task_id and bundle_art.parent_ids == []
     assert bundle_art.metadata["status"] == "complete" and bundle_art.metadata["citations"] > 0
     assert bundle_art.artifact_id in task.artifact_ids
-    assert arts["lesson_plan"].parent_ids == [bundle_art.artifact_id]
+    assert arts["lesson_plan"].parent_ids == [bundle_art.artifact_id, arts["pedagogical_plan"].artifact_id]
     assert bundle_art.artifact_id in arts["lesson"].parent_ids
     lineage = [a.name for a in container.artifacts.lineage(arts["slide_plan"].artifact_id)]
     assert lineage[:3] == ["lesson", "lesson_plan", "research_bundle"]
-    assert lineage[-1] == "visual_plan" and all(n.startswith("image_") for n in lineage[3:-1])  # the lesson's visuals
+    images = [n for n in lineage if n.startswith("image_")]
+    assert lineage[3:3 + len(images)] == images  # the lesson's visuals
+    # ...then the pedagogical decisions the lesson plan was worded from, back to the diagnostic evidence.
+    assert [n for n in lineage[3 + len(images):] if n != "visual_plan"] == [
+        "pedagogical_plan", "knowledge_gaps", "learner_model", "learning_evidence"]
+    assert "visual_plan" in lineage
     events = container.task_service.events(task.task_id)
     created = next(i for i, e in enumerate(events) if e.type == "artifact.created"
                    and e.data["artifact_type"] == "RESEARCH_BUNDLE")
@@ -161,7 +166,9 @@ async def test_mandatory_research_failure_fails_the_task(make_container) -> None
     # The failed bundle is inspectable in the checkpoint; nothing was invented or stored.
     bundle = ResearchBundle.model_validate(task.workflow.node_states["research"].output)
     assert bundle.status == "failed" and bundle.sources == [] and bundle.errors
-    assert container.task_service.artifacts(task.task_id) == []
+    # Only the deterministic learner state computed before research was stored; no research or lesson artifact.
+    assert {a.name for a in container.task_service.artifacts(task.task_id)} == {
+        "learning_evidence", "learner_model", "knowledge_gaps", "pedagogical_plan"}
     assert "research.failed" in [e.type for e in container.task_service.events(task.task_id)]
 
 

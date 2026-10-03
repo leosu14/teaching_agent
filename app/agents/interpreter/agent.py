@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.agents.base import Agent, AgentContext, AgentSpec
 from app.schemas.common import ModelTier
-from app.schemas.learner import LearnerSummary
+from app.schemas.learner import ANONYMOUS_LEARNER, LearnerSummary
 from app.schemas.lesson import InterpreterInput, InterpretRequest, LessonRequest
 
 
@@ -25,5 +25,7 @@ class RequestInterpreterAgent(Agent[InterpretRequest, LessonRequest]):
     async def run(self, data: InterpretRequest, ctx: AgentContext) -> LessonRequest:
         summary = await self.use_tool("learner.summary", {"learner_id": data.learner_id}, ctx)
         assert isinstance(summary, LearnerSummary)
-        payload = InterpreterInput(request=data.request, learner=summary)
+        # The model needs the learner's subjects, levels and preferences, not who they are.
+        payload = InterpreterInput(request=data.request, learner=summary.model_copy(
+            update={"learner_id": ANONYMOUS_LEARNER, "display_name": ""}))
         return await self.generate(payload, ctx, source=payload)

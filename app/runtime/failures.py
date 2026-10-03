@@ -36,6 +36,13 @@ class FailureCategory(str, Enum):
 STAGES: tuple[tuple[str, FailureCategory], ...] = (
     ("interpret_request", FailureCategory.PLANNING),
     ("learner_snapshot", FailureCategory.LEARNER),
+    ("knowledge_graph", FailureCategory.LEARNER),
+    ("load_goal", FailureCategory.LEARNER),
+    ("record_diagnostic", FailureCategory.LEARNER),
+    ("learner_model", FailureCategory.LEARNER),
+    ("knowledge_gaps", FailureCategory.PLANNING),
+    ("pedagogical_plan", FailureCategory.PLANNING),
+    ("store_pedagogy", FailureCategory.PLANNING),
     ("diagnos", FailureCategory.PLANNING),
     ("answers_", FailureCategory.PLANNING),
     ("research", FailureCategory.RESEARCH),
@@ -64,6 +71,8 @@ STAGES: tuple[tuple[str, FailureCategory], ...] = (
     ("assess", FailureCategory.EVALUATION),
     ("evaluate", FailureCategory.EVALUATION),
     ("store_evaluation", FailureCategory.EVALUATION),
+    ("next_recommendation", FailureCategory.EVALUATION),
+    ("feedback", FailureCategory.EVALUATION),
 )
 
 

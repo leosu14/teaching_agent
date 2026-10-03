@@ -1,7 +1,9 @@
-"""Lesson-generation workflow template (the first vertical slice).
+"""Lesson-generation workflow template: the adaptive lesson.
 
-snapshot -> adaptive diagnostic (ask / wait for answers / re-assess, up to N rounds) -> research
--> research policy -> research artifact -> plan -> teach/review/revise loop -> visuals (only for an approved
+snapshot -> concept graph -> learning goal -> adaptive diagnostic (ask / wait for answers / re-assess, up to N
+rounds) -> diagnostic evidence -> learner model -> knowledge gaps -> pedagogical plan -> adaptive artifacts ->
+research -> research policy -> research artifact -> lesson plan (worded from the pedagogical plan) ->
+teach/review/revise loop -> visuals (only for an approved
 lesson) -> visual policy -> lesson artifacts -> slide planning -> slide plan validation -> presentation build ->
 presentation render (only for an approved lesson) -> audio planning -> audio plan validation -> TTS, audio validation
 and AUDIO_ASSETs -> audio policy -> presentation timeline (only after the presentation is rendered) -> video planning
@@ -39,10 +41,11 @@ from app.schemas.audio import (
     TimelineRequest,
     TimelineResult,
 )
-from app.schemas.learner import LearnerSnapshot, MasteryUpdate
+from app.schemas.learner import LearnerSnapshot, LearningGoal, MasteryChange, MasteryUpdate
 from app.schemas.lesson import (
     DiagnosticAnswers,
     DiagnosticInput,
+    DiagnosticOutcome,
     DiagnosticQuestionSheet,
     DiagnosticRound,
     DiagnosticStep,
@@ -67,6 +70,16 @@ from app.schemas.presentation import (
     SlidePlanningRequest,
     SlidePlanValidationReport,
 )
+from app.schemas.pedagogy import (
+    AdaptiveQuestioningPolicy,
+    ConceptSet,
+    GapAnalysisRequest,
+    KnowledgeGapSet,
+    LearnerModel,
+    PedagogicalPlan,
+    PlanningRequest,
+    learner_context,
+)
 from app.schemas.research import ResearchBundle
 from app.schemas.providers import Capability
 from app.schemas.task import ArtifactSummary, TaskResult
@@ -85,6 +98,7 @@ from app.schemas.visual import VisualResult
 from app.schemas.workflow import NodeStatus, ReviewOutcome, RevisionPolicy, RevisionRequest
 
 WORKFLOW_ID = "lesson_generation"
+GOAL_KEY = "learning_goal_id"  # Task.metadata key naming the goal to plan against (default: resolved per topic)
 # Provider capabilities the lesson's agents and tools call (what a production run must configure).
 PROVIDER_CAPABILITIES = frozenset({Capability.LLM, Capability.SEARCH, Capability.IMAGE, Capability.IMAGE_SEARCH,
                                    Capability.TTS})
@@ -94,6 +108,8 @@ PROVIDER_CAPABILITIES = frozenset({Capability.LLM, Capability.SEARCH, Capability
 class LessonWorkflowOptions:
     diagnostic_rounds: int = 2
     memory_confidence: float = 0.6
+    questioning: AdaptiveQuestioningPolicy = field(default_factory=AdaptiveQuestioningPolicy)
+    lesson_minutes: int | None = None  # time available for a lesson; None: the learner's preferred session length
     revision_policy: RevisionPolicy = field(default_factory=RevisionPolicy)
     research_requirement: ResearchRequirement = "mandatory"
     research_max_results: int = 5
@@ -119,6 +135,46 @@ class LessonWorkflowOptions:
 def _request(v: StateView) -> LessonRequest:
     assert v.task.plan is not None
     return v.task.plan.lesson_request
+
+
+def _concepts(v: StateView) -> ConceptSet:
+    return v.output("knowledge_graph", ConceptSet)
+
+
+def _topic_concept_ids(v: StateView) -> list[str]:
+    topic = _request(v).topic.casefold()  # the knowledge base matches topics case-insensitively too
+    return [c.concept_id for c in _concepts(v).concepts if (c.topic or "").casefold() == topic]
+
+
+def _goal(v: StateView) -> LearningGoal:
+    return v.output("load_goal", LearningGoal)
+
+
+def _model(v: StateView) -> LearnerModel:
+    return v.output("learner_model", LearnerModel)
+
+
+def _pedagogical_plan(v: StateView) -> PedagogicalPlan:
+    return v.output("pedagogical_plan", PedagogicalPlan)
+
+
+def _pedagogy_artifact_id(v: StateView, key: str) -> str:
+    return v.output("store_pedagogy", StoredArtifacts).by_key[key]
+
+
+def merge_changes(*updates: MasteryUpdate) -> list[MasteryChange]:
+    """One change per concept across consecutive updates: the first `before`, the last `after`, every reason."""
+    merged: dict[str, MasteryChange] = {}
+    for update in updates:
+        for c in update.changes:
+            prev = merged.get(c.concept_id)
+            if prev is None:
+                merged[c.concept_id] = c
+            else:
+                reasons = list(dict.fromkeys([*prev.reason.split(", "), *c.reason.split(", ")]))
+                merged[c.concept_id] = MasteryChange(concept_id=c.concept_id, before=prev.before, after=c.after,
+                                                     reason=", ".join(reasons))
+    return list(merged.values())
 
 
 def _review(v: StateView) -> ReviewOutcome:
@@ -302,7 +358,15 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                 "learner_id": v.task.learner_id, "subject": _request(v).subject,
                 "framework_id": _request(v).framework_id, "target_level": _request(v).target_level,
             },
-        )
+        ),
+        ToolNode(id="knowledge_graph", tool="knowledge.concepts", permissions=frozenset({"knowledge:read"}),
+                 depends_on=("learner_snapshot",), build_input=lambda v: {"domain": _request(v).subject}),
+        ToolNode(id="load_goal", tool="learning_goal.resolve", permissions=frozenset({"learner:read"}),
+                 depends_on=("knowledge_graph",),
+                 build_input=lambda v: {
+                     "learner_id": v.task.learner_id, "domain": _request(v).subject, "topic": _request(v).topic,
+                     "topic_concepts": _topic_concept_ids(v),
+                     "target_level": _request(v).target_level, "goal_id": v.task.metadata.get(GOAL_KEY)}),
     ]
 
     def diagnostic_input(round_number: int):
@@ -313,8 +377,9 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                 for k in range(1, round_number)
             ]
             return DiagnosticInput(
-                request=_request(v), snapshot=v.output("learner_snapshot", LearnerSnapshot), rounds=history,
-                round_number=round_number, max_rounds=rounds, memory_confidence_threshold=options.memory_confidence,
+                request=_request(v), snapshot=v.output("learner_snapshot", LearnerSnapshot).for_provider(),
+                rounds=history, round_number=round_number, max_rounds=rounds,
+                memory_confidence_threshold=options.memory_confidence, questioning=options.questioning,
             )
         return build
 
@@ -330,7 +395,8 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
     for r in range(1, rounds + 1):
         nodes += [
             AgentNode(id=f"diagnose_{r}", agent="knowledge_diagnostic", build_input=diagnostic_input(r),
-                      depends_on=("learner_snapshot",) if r == 1 else (f"answers_{r - 1}",)),
+                      depends_on=("learner_snapshot",) if r == 1 else (f"answers_{r - 1}",),
+                      after=("load_goal",) if r == 1 else ()),
             ConditionalNode(id=f"diagnostic_gate_{r}", depends_on=(f"diagnose_{r}",), predicate=asks(r),
                             when_true=(f"answers_{r}",)),
             HumanApprovalNode(id=f"answers_{r}", depends_on=(f"diagnostic_gate_{r}",), wait_kind="diagnostic_answers",
@@ -353,9 +419,11 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
     def teacher_input(v: StateView, revision: RevisionRequest | None) -> TeacherInput:
         plan = v.output("plan", LessonPlan)
         focus = [c.concept_id for c in plan.concepts] + plan.review_concepts
+        pedagogy = _pedagogical_plan(v)
         return TeacherInput(
             request=_request(v), plan=plan, research=_research(v).focused(focus),
-            snapshot=v.output("learner_snapshot", LearnerSnapshot),
+            pedagogical_plan=pedagogy.brief(), learner=_learner_context(v),
+            gaps=v.output("knowledge_gaps", KnowledgeGapSet).for_concepts(pedagogy.concept_ids()),
             revision=None if revision is None else RevisionContext(
                 revision_number=revision.revision_number, issues=revision.issues,
                 previous=LessonContent.model_validate(revision.previous),
@@ -370,7 +438,31 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
     nodes += [
         TransformNode(id="diagnostic", fn=final_diagnostic, depends_on=("diagnose_1",),
                       after=tuple(diagnose_ids[1:]) + tuple(f"answers_{r}" for r in range(1, rounds + 1))),
-        AgentNode(id="research", agent="research", depends_on=("diagnostic",),
+        # Deterministic learner state: the diagnostic's graded answers become evidence, mastery is updated from it
+        # by code, and the gaps and the pedagogical plan are computed from the resulting learner model.
+        ToolNode(id="record_diagnostic", tool="learner.record_diagnostic", permissions=frozenset({"learner:write"}),
+                 depends_on=("diagnostic",),
+                 build_input=lambda v: DiagnosticOutcome(
+                     task_id=v.task.task_id, learner_id=v.task.learner_id, request=_request(v),
+                     diagnostic=diagnostic(v).result, concepts=diagnostic(v).concepts)),
+        ToolNode(id="learner_model", tool="learner.model", permissions=frozenset({"learner:read"}),
+                 depends_on=("record_diagnostic",),
+                 build_input=lambda v: {
+                     "learner_id": v.task.learner_id, "domain": _request(v).subject,
+                     "framework_id": _request(v).framework_id, "target_level": _request(v).target_level,
+                     "concept_ids": [c.concept_id for c in _concepts(v).concepts]}),
+        ToolNode(id="knowledge_gaps", tool="pedagogy.analyze_gaps", permissions=frozenset({"learner:read"}),
+                 depends_on=("learner_model", "load_goal"),
+                 build_input=lambda v: GapAnalysisRequest(model=_model(v), goal=_goal(v),
+                                                          concepts=_concepts(v).concepts)),
+        ToolNode(id="pedagogical_plan", tool="pedagogy.plan", permissions=frozenset({"learner:read"}),
+                 depends_on=("knowledge_gaps",),
+                 build_input=lambda v: PlanningRequest(
+                     model=_model(v), gaps=v.output("knowledge_gaps", KnowledgeGapSet), goal=_goal(v),
+                     concepts=_concepts(v).concepts, available_minutes=options.lesson_minutes)),
+        ToolNode(id="store_pedagogy", tool="artifact.store", permissions=frozenset({"artifact:write"}),
+                 depends_on=("pedagogical_plan",), build_input=_pedagogy_batch),
+        AgentNode(id="research", agent="research", depends_on=("store_pedagogy",),
                   build_input=lambda v: ResearchRequest(
                       request=_request(v), diagnostic=diagnostic(v).result, concepts=diagnostic(v).concepts,
                       max_results_per_query=options.research_max_results, max_sources=options.research_max_sources,
@@ -382,8 +474,8 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                  depends_on=("research_policy",), build_input=_research_batch),
         AgentNode(id="plan", agent="curriculum_planner", depends_on=("store_research",),
                   build_input=lambda v: PlannerInput(
-                      request=_request(v), snapshot=v.output("learner_snapshot", LearnerSnapshot),
-                      diagnostic=diagnostic(v).result, research=_research(v), concepts=diagnostic(v).concepts)),
+                      request=_request(v), learner=_learner_context(v), pedagogical_plan=_pedagogical_plan(v).brief(),
+                      diagnostic=diagnostic(v).result, research=_research(v), concepts=_plan_concepts(v))),
         ReviewNode(id="teach_review", depends_on=("plan",), generator="teacher", reviewer="content_reviewer",
                    candidate_model=LessonContent, build_generator_input=teacher_input,
                    build_reviewer_input=reviewer_input, policy=options.revision_policy),
@@ -465,6 +557,54 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                               description="Diagnose, research, plan, teach with review, illustrate, store, plan, "
                                           "build and render the presentation, narrate it, time it, compose the "
                                           "video, remember.")
+
+
+def _learner_context(v: StateView):
+    return learner_context(_model(v), _pedagogical_plan(v).brief(),
+                           v.output("learner_snapshot", LearnerSnapshot).framework_levels)
+
+
+def _plan_concepts(v: StateView):
+    """The topic's concepts plus any concept the pedagogical plan brought in from the goal's prerequisites."""
+    topic = v.output("diagnostic", DiagnosticStep).concepts
+    known = {c.concept_id for c in topic}
+    by_id = {c.concept_id: c for c in _concepts(v).concepts}
+    return [*topic, *(by_id[c].ref() for c in _pedagogical_plan(v).concept_ids() if c not in known)]
+
+
+def _pedagogy_batch(v: StateView) -> ArtifactBatch:
+    """Diagnostic -> LearningEvidence -> LearnerModel -> KnowledgeGapSet -> PedagogicalPlan."""
+    evidence = v.output("record_diagnostic", MasteryUpdate).evidence
+    model, gaps, plan = _model(v), v.output("knowledge_gaps", KnowledgeGapSet), _pedagogical_plan(v)
+    drafts = []
+    if evidence:
+        drafts.append(ArtifactDraft(
+            key="learning_evidence", name="learning_evidence", type=ArtifactType.LEARNING_EVIDENCE,
+            media_type="application/json", content=_json_list(evidence),
+            metadata={"source": "diagnostic", "items": len(evidence),
+                      "concepts": sorted({e.concept_id for e in evidence})}))
+    drafts += [
+        ArtifactDraft(key="learner_model", name="learner_model", type=ArtifactType.LEARNER_MODEL,
+                      media_type="application/json", content=_json(model),
+                      parent_keys=["learning_evidence"] if evidence else [],
+                      metadata={"domain": model.domain, "mastered": model.mastered_concepts,
+                                "developing": model.developing_concepts, "weak": model.weak_concepts,
+                                "evidence": model.evidence_count}),
+        ArtifactDraft(key="knowledge_gaps", name="knowledge_gaps", type=ArtifactType.KNOWLEDGE_GAPS,
+                      media_type="application/json", content=_json(gaps), parent_keys=["learner_model"],
+                      metadata={"gap_set_id": gaps.gap_set_id, "goal_id": gaps.goal_id,
+                                "gaps": [g.concept.concept_id for g in gaps.gaps]}),
+        ArtifactDraft(key="pedagogical_plan", name="pedagogical_plan", type=ArtifactType.PEDAGOGICAL_PLAN,
+                      media_type="application/json", content=_json(plan), parent_keys=["knowledge_gaps"],
+                      metadata={"plan_id": plan.plan_id, "targets": plan.target_concepts,
+                                "prerequisites": plan.prerequisite_concepts, "reviews": plan.review_concepts,
+                                "minutes": plan.estimated_duration, "strategy": plan.strategy_id}),
+    ]
+    return ArtifactBatch(drafts=drafts)
+
+
+def _json_list(items) -> str:
+    return "[\n" + ",\n".join(i.model_dump_json(indent=2) for i in items) + "\n]"
 
 
 def _research_batch(v: StateView) -> ArtifactBatch:
@@ -553,10 +693,14 @@ def _package(v: StateView) -> ArtifactBatch:
     return ArtifactBatch(drafts=[
         ArtifactDraft(key="lesson_plan", name="lesson_plan", type=ArtifactType.LESSON_PLAN,
                       media_type="application/json", content=_json(v.output("plan", LessonPlan)),
-                      parent_ids=[research_artifact], metadata={"objectives": len(v.output("plan", LessonPlan).objectives)}),
+                      parent_ids=[research_artifact, _pedagogy_artifact_id(v, "pedagogical_plan")],
+                      metadata={"objectives": len(v.output("plan", LessonPlan).objectives),
+                                "pedagogical_plan_id": _pedagogical_plan(v).plan_id}),
         ArtifactDraft(key="lesson", name="lesson", type=ArtifactType.LESSON, media_type="application/json",
                       content=_json(lesson), parent_keys=["lesson_plan"], parent_ids=[research_artifact, *image_ids],
                       metadata={"title": lesson.title, "level": lesson.level, "sections": len(lesson.sections),
+                                "objectives": [o.objective_id for o in lesson.objectives],
+                                "section_purposes": {s.section_id: s.purpose for s in lesson.sections},
                                 "research_id": research.research_id, "research_status": research.status,
                                 "references": len(lesson.references), "visuals": len(image_ids),
                                 "visual_status": visuals.status if visuals else "skipped",
@@ -578,7 +722,8 @@ def _lesson_outcome(v: StateView) -> LessonOutcome:
         task_id=v.task.task_id, learner_id=v.task.learner_id, request=_request(v), diagnostic=step.result,
         concepts=step.concepts, lesson_title=_lesson(v).title,
         taught_concept_ids=[c.concept_id for c in plan.concepts],
-        artifact_ids=[_research_artifact_id(v), *_visual_artifact_ids(v),
+        artifact_ids=[*(a.artifact_id for a in v.output("store_pedagogy", StoredArtifacts).artifacts),
+                      _research_artifact_id(v), *_visual_artifact_ids(v),
                       *(a.artifact_id for a in stored.artifacts), *_presentation_artifact_ids(v),
                       *(a.artifact_id for a in _audio_artifacts(v)), *(a.artifact_id for a in _video_artifacts(v))],
     )
@@ -615,6 +760,7 @@ def _video_artifacts(v: StateView) -> list[Artifact]:
 
 
 def _summarize(v: StateView) -> TaskResult:
+    pedagogy = v.output("store_pedagogy", StoredArtifacts)
     research = v.output("store_research", StoredArtifacts)
     visuals = _visuals(v)
     stored = v.output("store_artifacts", StoredArtifacts)
@@ -627,9 +773,10 @@ def _summarize(v: StateView) -> TaskResult:
         title=_lesson(v).title,
         artifacts=[ArtifactSummary(artifact_id=a.artifact_id, type=a.type, name=a.name, version=a.version,
                                    uri=a.uri, parent_ids=a.parent_ids)
-                   for a in [*research.artifacts, *(visuals.artifacts if visuals else []), *stored.artifacts,
+                   for a in [*pedagogy.artifacts, *research.artifacts, *(visuals.artifacts if visuals else []),
+                             *stored.artifacts,
                              *presentation_artifacts, *_audio_artifacts(v), *_video_artifacts(v)]],
-        mastery_changes=update.changes,
+        mastery_changes=merge_changes(v.output("record_diagnostic", MasteryUpdate), update),
         review_verdict=review.final_review.verdict.value if review.status == "approved" else review.status,
         revisions=review.revisions,
         estimated_level=update.estimated_level,
@@ -642,9 +789,10 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
     rounds = options.diagnostic_rounds
     return WorkflowTemplate(
         id=WORKFLOW_ID,
-        description="Personalised text lesson with diagnostic, research, review loop, visuals, a presentation and "
-                    "its narration and the video.",
-        provides=frozenset({"lesson.text", "lesson.review", "lesson.visuals", "slides.plan", "presentation.pptx",
+        description="Adaptive lesson: diagnostic evidence, learner model, knowledge gaps and a deterministic "
+                    "pedagogical plan, then research, a reviewed lesson, visuals, a presentation, its narration and "
+                    "the video.",
+        provides=frozenset({"lesson.text", "learner.model", "pedagogy.plan", "lesson.review", "lesson.visuals", "slides.plan", "presentation.pptx",
                             "audio.narration", "presentation.timeline", "video.mp4"}),
         build=lambda request: build_lesson_workflow(request, options),
         provider_capabilities=PROVIDER_CAPABILITIES,

@@ -114,7 +114,9 @@ async def test_answers_complete_the_evaluation(container) -> None:
 async def test_evaluation_artifact(container) -> None:
     lesson, task = await start_evaluation(container)
     done = await container.task_service.submit_answers(task.task_id, evaluation_answers_for(task))
-    [summary] = done.result.artifacts
+    summary = next(a for a in done.result.artifacts if a.name == "learner_evaluation")
+    assert [a.name for a in done.result.artifacts] == ["learner_evaluation", "learning_evidence", "learner_model",
+                                                        "next_recommendation"]
     assert summary.type == ArtifactType.LEARNER_EVALUATION and summary.name == "learner_evaluation"
     lesson_artifact = container.artifacts.find(lesson.task_id, "lesson")
     assert summary.parent_ids == [lesson_artifact.artifact_id]
