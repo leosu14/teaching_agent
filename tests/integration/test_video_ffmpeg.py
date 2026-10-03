@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from array import array
+from pathlib import Path
 
 import pytest
 
@@ -18,15 +19,18 @@ from app.providers.video.ffmpeg import (
     FFmpegCommand,
     FFmpegError,
     FFmpegVideoComposer,
+    FFmpegVideoNormalizer,
     FFprobeVideoProber,
 )
-from app.schemas.video import FrameSample, TransitionType, VideoPlan
+from app.providers.video_generation.mock import render_clip
+from app.schemas.generative_video import InsertionStrategy, VideoGenerationRequest
+from app.schemas.video import ClipNormalization, FrameSample, GeneratedClipInput, TransitionType, VideoPlan
 from app.storage.db import create_db, dispose
 from app.storage.object_store import FilesystemObjectStore
 from app.storage.repositories import SqlArtifactRepository
 from app.tools.video.service import VideoService
 from app.utils.workspace import ScratchSpace
-from tests.video_fixtures import CLIPS, build_scenario
+from tests.video_fixtures import CLIPS, SMALL, build_scenario
 
 PROBER = FFprobeVideoProber()
 
@@ -221,3 +225,47 @@ def test_composer_refuses_inputs_that_do_not_match_their_checksums(rig) -> None:
     tampered.slides[0].visual_ref.image.checksum = "0" * 64
     with pytest.raises(VideoCompositionError, match="checksum"):
         rig.service().compose(tampered, "k")
+
+
+def _generated_clip(rig, slide_id: str, strategy: InsertionStrategy) -> GeneratedClipInput:
+    """A provider clip (the mock provider's Motion-JPEG AVI) through the real FFmpeg normaliser, stored like an asset."""
+    workspace = rig.root / f"norm_{slide_id}"
+    workspace.mkdir()
+    raw = workspace / "raw.avi"
+    raw.write_bytes(render_clip(VideoGenerationRequest(prompt="Educational clip of evaporation.", duration=2.0,
+                                                       width=1920, height=1080, fps=24, seed=1)))
+    target = ClipNormalization(width=SMALL.width, height=SMALL.height, fps=SMALL.fps, duration=1.5)
+    normalized = FFmpegVideoNormalizer().normalize(raw, PROBER.probe(raw), target, workspace)
+    probe = PROBER.probe(Path(normalized.path))
+    assert (probe.video.codec, probe.video.width, probe.video.height, probe.audio) == ("h264", 320, 180, [])
+    obj = rig.artifacts.put_object(Path(normalized.path).read_bytes(), "video/mp4")
+    return GeneratedClipInput(segment_id=f"gv_{slide_id}", slide_id=slide_id, artifact_id=f"art_gv_{slide_id}",
+                              uri=obj.uri, checksum=obj.checksum, media_type="video/mp4", duration=probe.duration,
+                              width=320, height=180, fps=10, strategy=strategy)
+
+
+def test_generated_clips_replace_the_frame_or_sit_inset_and_keep_narration_and_duration(rig, default_video) -> None:
+    plain_plan, _, _, plain = default_video
+    clips = [_generated_clip(rig, "s2", InsertionStrategy.FULL_FRAME_REPLACE),
+             _generated_clip(rig, "s3", InsertionStrategy.INSET)]
+    request = rig.scenario.request.model_copy(update={"generated_clips": clips})
+    plan = VideoAgent().plan(request)
+    assert len(plan.generated_clips()) == 2
+    service = rig.service()
+    composed = service.compose(plan, service.composition_key(plan))
+    local = rig.root / "generated.mp4"
+    rig.artifacts.copy_object_to(composed.object.uri, local)
+    report = service.validate(plan, composed)
+    assert report.valid, report.errors
+    assert abs(PROBER.probe(local).duration - plain_plan.duration) <= 0.1  # clips never stretch the timeline
+    times = [FrameSample(label=str(t), time=t) for t in (1.5, 3.7, 4.8, 5.7)]
+    clip, base = PROBER.frame_stats(local, times), PROBER.frame_stats(plain, times)
+    assert clip["3.7"].differs_from(base["3.7"]) and clip["3.7"].stddev > 5  # the full-frame clip plays
+    assert not clip["4.8"].differs_from(base["4.8"])  # and the slide comes back when it ends
+    assert clip["5.7"].differs_from(base["5.7"])  # the inset clip is inside the slide card
+    assert not clip["1.5"].differs_from(base["1.5"])  # slides without a clip are untouched
+    # the clip is muted: the narration track is the same as without clips
+    with_clips, without = pcm(local), pcm(plain)
+    for _, _, start, end, _, _ in CLIPS:
+        assert peak_db(window(with_clips, start + 0.1, end - 0.1)) > -20
+    assert peak_db(window(with_clips, 3.05, 4.95)) < -50 and len(with_clips) == pytest.approx(len(without), abs=800)

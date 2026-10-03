@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from app.observability.scope import ExecutionScope
 from app.providers.video.base import VideoProbeError, VideoProber
 from app.schemas.events import EventType
+from app.schemas.generative_video import IMPLEMENTED_STRATEGIES
 from app.schemas.video import (
     IMAGE_MEDIA_TYPES,
     TIME_EPSILON,
@@ -65,8 +66,10 @@ class VideoPlanValidator:
             return VideoPlanValidationReport(valid=False, video_plan_id=request.plan.get("video_plan_id"),
                                              errors=errors, checks=["schema"], validator=self.name)
         errors = self._check(plan, request)
+        checks = [*PLAN_CHECKS, "generated_clips"] if plan.generated_clips() or request.generated_clips \
+            else PLAN_CHECKS
         return VideoPlanValidationReport(valid=not errors, video_plan_id=plan.video_plan_id, errors=errors,
-                                         checks=PLAN_CHECKS, validator=self.name, plan=plan)
+                                         checks=checks, validator=self.name, plan=plan)
 
     def _check(self, plan: VideoPlan, req: VideoPlanValidationRequest) -> list[VideoPlanIssue]:
         errors: list[VideoPlanIssue] = []
@@ -204,6 +207,35 @@ class VideoPlanValidator:
                         issue("unknown_reference", f"subtitle {ref} does not exist", s.segment_id, "subtitle_refs")
         elif any(s.subtitle_refs for s in plan.slides):
             issue("unknown_reference", "segments reference subtitles but the plan has no subtitle track")
+
+        # Generated clips: known, matching GENERATED_VIDEO_ASSETs in the platform format, an implemented insertion
+        # strategy, inside their segment and never longer than the clip itself.
+        clips = {c.artifact_id: c for c in req.generated_clips}
+        for s in plan.slides:
+            clip = s.generated
+            if clip is None:
+                continue
+            known_clip = clips.get(clip.artifact_id)
+            if known_clip is None or (known_clip.checksum, known_clip.uri, known_clip.slide_id) != (
+                    clip.checksum, clip.uri, s.slide_id):
+                issue("unknown_generated_clip", f"clip {clip.artifact_id} is not a matching GENERATED_VIDEO_ASSET "
+                      "for this slide", s.segment_id, "generated")
+            if clip.strategy not in IMPLEMENTED_STRATEGIES:
+                issue("unsupported_strategy", f"insertion strategy {clip.strategy.value} is not implemented",
+                      s.segment_id, "generated.strategy")
+            if (clip.width, clip.height) != (config.width, config.height) or abs(clip.fps - config.fps) > 0.01 or \
+                    clip.media_type != config.media_type:
+                issue("clip_format", "the clip is not normalised to the video's resolution, frame rate and "
+                      "container", s.segment_id, "generated")
+            if clip.audio == "mixed" and not clip.has_audio:
+                issue("clip_format", "the clip's sound is mixed but the clip has no audio stream", s.segment_id,
+                      "generated.audio")
+            if clip.start_time < s.start_time - TIME_EPSILON or clip.end_time > s.end_time + TIME_EPSILON or \
+                    clip.end_time <= clip.start_time:
+                issue("clip_timing", "the clip lies outside its segment", s.segment_id, "generated")
+            elif clip.duration > clip.asset_duration + TIME_EPSILON:
+                issue("clip_timing", f"the clip plays for {clip.duration:.3f}s but is {clip.asset_duration:.3f}s "
+                      "long", s.segment_id, "generated")
 
         # Transitions.
         if plan.slides[0].transition.type != TransitionType.CUT:

@@ -7,6 +7,7 @@ artifacts can point at the same object.
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 from pathlib import Path
 from typing import BinaryIO, Protocol
@@ -32,6 +33,9 @@ EXTENSIONS = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
     "video/mp4": ".mp4",
     "text/vtt": ".vtt",
+    "video/x-msvideo": ".avi",
+    "video/webm": ".webm",
+    "video/quicktime": ".mov",
 }
 CHUNK = 1 << 20
 
@@ -54,6 +58,8 @@ class ObjectStore(Protocol):
     def put_file_if_absent(self, key: str, source: Path) -> tuple[str, bool]: ...
 
     def get(self, uri: str) -> bytes: ...
+
+    def get_key(self, key: str) -> bytes | None: ...
 
     def open(self, uri: str) -> BinaryIO: ...
 
@@ -112,6 +118,29 @@ class ArtifactService:
         uri, created = self._store.put_file_if_absent(key, path)
         return StoredObject(uri=uri, checksum=digest, media_type=media_type, size_bytes=path.stat().st_size,
                             reused=not created, key=key)
+
+    def put_record(self, namespace: str, key: str, record: dict) -> str:
+        """Write (or replace) a small JSON record outside any task, e.g. the generation ledger, which lets a later
+        task find work an earlier one already paid for. Records hold references and ids, never content."""
+        if not key.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(f"invalid record key {key}")
+        return self._store.put(f"records/{namespace}/{key}.json",
+                               json.dumps(record, sort_keys=True).encode("utf-8"))
+
+    def read_record(self, namespace: str, key: str) -> dict | None:
+        if not key.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(f"invalid record key {key}")
+        data = self._store.get_key(f"records/{namespace}/{key}.json")
+        if data is None:
+            return None
+        try:
+            record = json.loads(data)
+        except json.JSONDecodeError:
+            return None
+        return record if isinstance(record, dict) else None
+
+    def object_exists(self, uri: str) -> bool:
+        return self._store.exists(uri)
 
     def read_object(self, uri: str) -> bytes:
         return self._store.get(uri)

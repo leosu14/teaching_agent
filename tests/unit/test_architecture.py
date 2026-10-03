@@ -194,3 +194,25 @@ def test_provider_selection_is_built_in_the_composition_root_only() -> None:
         text = path.read_text(encoding="utf-8")
         found += [f"{path.relative_to(APP.parent)}: {b}" for b in builders if b in text]
     assert found == [f"app/{COMPOSITION_ROOT}: {b}" for b in builders]
+
+
+def test_video_generation_vendors_stay_in_the_provider_layer() -> None:
+    # Tools, the workflow and services see the generic VideoGenerationProvider interface at most (agents and the API
+    # not even that); the
+    # MiniMax adapter (and every concrete video generation provider) is known to the composition root alone.
+    concrete = ("app.providers.video_generation.minimax", "app.providers.video_generation.mock")
+    for layer in ("agents", "tools", "runtime", "services", "api"):
+        for module in concrete:
+            assert violations_for(layer, module, [], f"app/{layer}/x.py:1"), (layer, module)
+        if layer in {"tools", "runtime", "services"}:
+            assert not violations_for(layer, "app.providers.video_generation.base", [], f"app/{layer}/x.py:1")
+    assert not violations_for("services", concrete[0], [], f"app/{COMPOSITION_ROOT}:1")
+    users = []
+    for path in sorted(APP.rglob("*.py")):
+        rel = path.relative_to(APP)
+        if rel.parts[0] == "providers" or str(rel) == COMPOSITION_ROOT:
+            continue
+        users += [f"app/{rel}:{line}" for module, _names, line in imports(path)
+                  if module.startswith(concrete) or "minimax" in module.lower()]
+        assert "minimax" not in path.read_text(encoding="utf-8").lower() or rel.parts[0] == "config", rel
+    assert users == []

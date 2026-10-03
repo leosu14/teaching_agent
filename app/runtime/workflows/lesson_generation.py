@@ -6,7 +6,9 @@ research -> research policy -> research artifact -> lesson plan (worded from the
 teach/review/revise loop -> visuals (only for an approved
 lesson) -> visual policy -> lesson artifacts -> slide planning -> slide plan validation -> presentation build ->
 presentation render (only for an approved lesson) -> audio planning -> audio plan validation -> TTS, audio validation
-and AUDIO_ASSETs -> audio policy -> presentation timeline (only after the presentation is rendered) -> video planning
+and AUDIO_ASSETs -> audio policy -> optional generated video segments (only for a lesson that asks for them: video strategy, segment plan, generation
+jobs, validated and normalised GENERATED_VIDEO_ASSETs) -> presentation timeline (only after the presentation is
+rendered) -> video planning
 -> video plan validation -> video composition, MP4 validation and the VIDEO artifact (only after the timeline) ->
 learner memory.
 """
@@ -28,6 +30,7 @@ from app.runtime.workflow.nodes import (
     TransformNode,
 )
 from app.runtime.workflows.audio import AudioFailurePolicy, NarrationNode, apply_audio_policy
+from app.runtime.workflows.generative_video import GenerativeVideoNode
 from app.runtime.workflows.research_policy import ResearchRequirement, apply_research_policy
 from app.runtime.workflows.video import VideoFailurePolicy, VideoNode
 from app.runtime.workflows.visual_policy import VisualFailurePolicy, apply_visual_policy
@@ -40,6 +43,12 @@ from app.schemas.audio import (
     NarrationResult,
     TimelineRequest,
     TimelineResult,
+)
+from app.schemas.generative_video import (
+    GeneratedVideoConfig,
+    GeneratedVideoResult,
+    GeneratedVideoStageRequest,
+    VideoSegmentPlanSet,
 )
 from app.schemas.learner import LearnerSnapshot, LearningGoal, MasteryChange, MasteryUpdate
 from app.schemas.lesson import (
@@ -92,16 +101,21 @@ from app.schemas.video import (
     VideoPlanningRequest,
     VideoPlanValidationReport,
     VideoResult,
+    GeneratedClipInput,
     VideoStageRequest,
 )
+from app.schemas.video_strategy import GapSignal, VideoStrategyRequest
 from app.schemas.visual import VisualResult
 from app.schemas.workflow import NodeStatus, ReviewOutcome, RevisionPolicy, RevisionRequest
 
 WORKFLOW_ID = "lesson_generation"
 GOAL_KEY = "learning_goal_id"  # Task.metadata key naming the goal to plan against (default: resolved per topic)
 # Provider capabilities the lesson's agents and tools call (what a production run must configure).
+# Video generation is only called for a lesson that asks for generated segments (see required_capabilities).
 PROVIDER_CAPABILITIES = frozenset({Capability.LLM, Capability.SEARCH, Capability.IMAGE, Capability.IMAGE_SEARCH,
-                                   Capability.TTS})
+                                   Capability.TTS, Capability.VIDEO_GENERATION})
+# A lesson request opts into generated video segments by asking for this capability.
+GENERATED_VIDEO_CAPABILITY = "video.generated_segments"
 
 
 @dataclass(frozen=True)
@@ -130,6 +144,8 @@ class LessonWorkflowOptions:
     audio_silent_slide_seconds: float = 3.0
     video_failure_policy: VideoFailurePolicy = "fail"  # fail: video is required; continue: optional, warn
     video_config: VideoConfig = field(default_factory=VideoConfig)
+    generated_video_enabled: bool = True  # False: generated segments are never made, even when a lesson asks
+    generated_video: GeneratedVideoConfig = field(default_factory=GeneratedVideoConfig)
 
 
 def _request(v: StateView) -> LessonRequest:
@@ -281,25 +297,99 @@ def _timeline(v: StateView) -> TimelineResult | None:
     return v.maybe("audio_timeline", TimelineResult)
 
 
+def _image_inputs(v: StateView) -> list[ImageAssetInput]:
+    visuals = _visuals(v)
+    return [ImageAssetInput(artifact_id=a.artifact_id, asset_id=a.asset_id, uri=a.uri, checksum=a.checksum,
+                            media_type=a.media_type, width=a.width, height=a.height, alt_text=a.description)
+            for a in (visuals.assets if visuals else [])]
+
+
+def wants_generated_video(request: LessonRequest, options: LessonWorkflowOptions) -> bool:
+    return options.generated_video_enabled and GENERATED_VIDEO_CAPABILITY in request.capabilities
+
+
+def _generated_video_config(v: StateView, options: LessonWorkflowOptions) -> GeneratedVideoConfig:
+    """The configured limits, tightened by the task's budget (a production task carries one)."""
+    config = options.generated_video
+    budget = TaskBudget.of(v.task.metadata)
+    if budget is None:
+        return config
+    update: dict = {}
+    if budget.max_generated_video_segments is not None:
+        update["max_segments"] = min(config.max_segments, budget.max_generated_video_segments)
+    if budget.max_generated_video_seconds is not None:
+        update["max_total_seconds"] = min(config.max_total_seconds, budget.max_generated_video_seconds)
+    if budget.max_video_generation_cost_usd is not None:
+        update["max_cost_usd"] = (budget.max_video_generation_cost_usd if config.max_cost_usd is None
+                                  else min(config.max_cost_usd, budget.max_video_generation_cost_usd))
+    return config.model_copy(update=update)
+
+
+def _video_strategy(v: StateView, options: LessonWorkflowOptions) -> VideoStrategyRequest:
+    """The approved lesson, its pedagogy (gaps carry no learner data), the slide plan, the images it has and how
+    long each slide is narrated. The provider's limits are added by the strategy tool."""
+    visuals = _visuals(v)
+    narration = _narration(v)
+    seconds: dict[str, float] = {}
+    for a in (narration.assets if narration else []):
+        seconds[a.slide_id] = round(seconds.get(a.slide_id, 0.0) + a.duration, 3)
+    return VideoStrategyRequest(
+        lesson=_lesson(v), lesson_artifact_id=_lesson_artifact_id(v), pedagogical_plan=_pedagogical_plan(v).brief(),
+        gaps=GapSignal.from_gaps(v.output("knowledge_gaps", KnowledgeGapSet)), deck=_deck(v),
+        visual_plan=visuals.plan if visuals else None, image_assets=_image_inputs(v), narration_seconds=seconds,
+        language=_request(v).language_of_instruction, config=_generated_video_config(v, options),
+        video=options.video_config)
+
+
+def _segment_plan(v: StateView) -> VideoSegmentPlanSet:
+    return v.output("video_segment_plan", VideoSegmentPlanSet)
+
+
+def _segment_plan_artifact_id(v: StateView) -> str:
+    return v.output("store_video_segment_plan", StoredArtifacts).by_key["video_segment_plan"]
+
+
+def _generated(v: StateView) -> GeneratedVideoResult | None:
+    """The generated clips after the failure policy; None when the lesson did not ask for any."""
+    return v.maybe("generate_video_segments", GeneratedVideoResult)
+
+
+def _clip_inputs(v: StateView) -> list[GeneratedClipInput]:
+    generated = _generated(v)
+    if generated is None or not generated.assets:
+        return []
+    plan = _segment_plan(v)
+    out = []
+    for asset in generated.assets:
+        segment = plan.segment(asset.segment_id)
+        out.append(GeneratedClipInput(
+            segment_id=asset.segment_id, slide_id=segment.slide_id, artifact_id=asset.artifact_id, uri=asset.uri,
+            checksum=asset.checksum, media_type=asset.media_type, duration=asset.duration, width=asset.width,
+            height=asset.height, fps=asset.fps, has_audio=asset.has_audio, strategy=segment.insertion_strategy,
+            audio=segment.audio))
+    return out
+
+
+def _clip_artifact_ids(v: StateView) -> list[str]:
+    return [c.artifact_id for c in _clip_inputs(v)]
+
+
 def _video_planning(v: StateView, options: LessonWorkflowOptions) -> VideoPlanningRequest:
     """The presentation, its timeline and the IMAGE_ASSET and AUDIO_ASSET references; never file paths."""
     timeline = _timeline(v)
     narration = _narration(v)
     assert timeline is not None and narration is not None
-    visuals = _visuals(v)
     meta = {a.artifact_id: a.metadata for a in narration.artifacts}
     return VideoPlanningRequest(
         task_id=v.task.task_id, presentation=v.output("build_presentation", Presentation),
         presentation_artifact_id=_presentation_artifact_id(v), timeline=timeline.timeline,
         timeline_artifact_id=timeline.artifact.artifact_id, timeline_checksum=timeline.artifact.content_hash,
-        image_assets=[ImageAssetInput(artifact_id=a.artifact_id, asset_id=a.asset_id, uri=a.uri, checksum=a.checksum,
-                                      media_type=a.media_type, width=a.width, height=a.height,
-                                      alt_text=a.description) for a in (visuals.assets if visuals else [])],
+        image_assets=_image_inputs(v),
         audio_assets=[AudioAssetInput(artifact_id=a.artifact_id, segment_id=a.segment_id, slide_id=a.slide_id,
                                       uri=a.uri, checksum=a.checksum, media_type=a.media_type, duration=a.duration,
                                       text=meta[a.artifact_id]["text"], language=meta[a.artifact_id]["language"])
                       for a in narration.assets],
-        config=options.video_config,
+        generated_clips=_clip_inputs(v), config=options.video_config,
     )
 
 
@@ -316,6 +406,11 @@ def _video_plan_artifact_id(v: StateView) -> str:
 
 def _video(v: StateView) -> VideoResult | None:
     return v.maybe("compose_video", VideoResult)
+
+
+def _generated_video_warnings(v: StateView) -> list[str]:
+    generated = _generated(v)
+    return generated.warnings if generated else []
 
 
 def _video_warnings(v: StateView) -> list[str]:
@@ -435,6 +530,21 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                              research=_research(v), content=candidate,
                              revision_number=revision_number)
 
+    # Optional generated video segments: only in the workflow of a lesson that asks for them (any other lesson runs
+    # exactly the nodes it always did), after the narration (the strategy sizes clips to it) and before the
+    # timeline. Agents never wait on a provider: the generation node does.
+    generated_video_nodes: list[Node] = [
+        ToolNode(id="video_segment_plan", tool="visual.video_strategy", depends_on=("audio_policy",),
+                 build_input=lambda v: _video_strategy(v, options)),
+        ToolNode(id="store_video_segment_plan", tool="artifact.store", permissions=frozenset({"artifact:write"}),
+                 depends_on=("video_segment_plan",), build_input=_segment_plan_batch),
+        GenerativeVideoNode(id="generate_video_segments", depends_on=("store_video_segment_plan",),
+                            build_input=lambda v: GeneratedVideoStageRequest(
+                                plan=_segment_plan(v), plan_artifact_id=_segment_plan_artifact_id(v),
+                                config=_generated_video_config(v, options))),
+    ] if wants_generated_video(request, options) else []
+    generated_video_ids = tuple(n.id for n in generated_video_nodes)
+
     nodes += [
         TransformNode(id="diagnostic", fn=final_diagnostic, depends_on=("diagnose_1",),
                       after=tuple(diagnose_ids[1:]) + tuple(f"answers_{r}" for r in range(1, rounds + 1))),
@@ -529,8 +639,9 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
         TransformNode(id="audio_policy", depends_on=("synthesize_audio",),
                       fn=lambda v: apply_audio_policy(v.output("synthesize_audio", NarrationResult),
                                                       options.audio_failure_policy)),
+        *generated_video_nodes,
         ToolNode(id="audio_timeline", tool="audio.timeline", permissions=frozenset({"artifact:write"}),
-                 depends_on=("audio_policy",),
+                 depends_on=("audio_policy",), after=generated_video_ids,
                  build_input=lambda v: TimelineRequest(
                      plan=_audio_plan(v), narration=v.output("audio_policy", NarrationResult),
                      slide_ids=[s.slide_id for s in _deck(v).slides],
@@ -548,7 +659,8 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
         VideoNode(id="compose_video", depends_on=("store_video_plan",), policy=options.video_failure_policy,
                   build_input=lambda v: VideoStageRequest(
                       plan=_video_plan(v), parent_ids=[_video_plan_artifact_id(v), _video_plan(v).timeline_ref,
-                                                       _video_plan(v).presentation_ref])),
+                                                       _video_plan(v).presentation_ref,
+                                                       *(c.artifact_id for c in _video_plan(v).generated_clips())])),
         ToolNode(id="update_learner", tool="learner.record_lesson", permissions=frozenset({"learner:write"}),
                  depends_on=("store_artifacts",), after=("render_presentation", "audio_timeline", "compose_video"),
                  build_input=_lesson_outcome),
@@ -645,8 +757,11 @@ def _video_plan_batch(v: StateView) -> ArtifactBatch:
     plan = _video_plan(v)
     drafts = [ArtifactDraft(
         key="video_plan", name="video_plan", type=ArtifactType.VIDEO_PLAN, media_type="application/json",
-        content=_json(plan), parent_ids=[plan.timeline_ref, plan.presentation_ref, *plan.image_artifact_ids()],
+        content=_json(plan), parent_ids=[plan.timeline_ref, plan.presentation_ref, *plan.image_artifact_ids(),
+                                         *(c.artifact_id for c in plan.generated_clips())],
         metadata={"video_plan_id": plan.video_plan_id, "segments": len(plan.slides),
+                  **({"generated_clips": [c.artifact_id for c in plan.generated_clips()]}
+                     if plan.generated_clips() else {}),
                   "audio_tracks": len(plan.audio_tracks), "duration": plan.duration,
                   "width": plan.resolution.width, "height": plan.resolution.height, "fps": plan.fps,
                   "transition": plan.config.transition.value, "timeline_ref": plan.timeline_ref,
@@ -661,6 +776,20 @@ def _video_plan_batch(v: StateView) -> ArtifactBatch:
                       "cues": len(plan.subtitle_track.subtitles), "source": plan.subtitle_track.source,
                       "burned_in": plan.subtitle_track.burned_in}))
     return ArtifactBatch(drafts=drafts)
+
+
+def _segment_plan_batch(v: StateView) -> ArtifactBatch:
+    plan = _segment_plan(v)
+    return ArtifactBatch(drafts=[ArtifactDraft(
+        key="video_segment_plan", name="video_segment_plan", type=ArtifactType.VIDEO_SEGMENT_PLAN,
+        media_type="application/json", content=_json(plan),
+        parent_ids=[_lesson_artifact_id(v), _slide_plan_artifact_id(v), _pedagogy_artifact_id(v, "pedagogical_plan")],
+        metadata={"plan_id": plan.plan_id, "provider": plan.provider, "strategy": plan.strategy,
+                  "segments": [s.segment_id for s in plan.segments], "seconds": plan.budget.seconds,
+                  "estimated_cost_usd": plan.budget.estimated_cost_usd, "cost_known": plan.budget.cost_known,
+                  "decisions": {d.lesson_section_id: d.skip_reason or f"selected:{d.purpose.value}"
+                                for d in plan.decisions if d.selected or d.skip_reason}},
+    )])
 
 
 def _render_request(v: StateView) -> PresentationRenderRequest:
@@ -725,7 +854,9 @@ def _lesson_outcome(v: StateView) -> LessonOutcome:
         artifact_ids=[*(a.artifact_id for a in v.output("store_pedagogy", StoredArtifacts).artifacts),
                       _research_artifact_id(v), *_visual_artifact_ids(v),
                       *(a.artifact_id for a in stored.artifacts), *_presentation_artifact_ids(v),
-                      *(a.artifact_id for a in _audio_artifacts(v)), *(a.artifact_id for a in _video_artifacts(v))],
+                      *(a.artifact_id for a in _audio_artifacts(v)),
+                      *(a.artifact_id for a in _generated_video_artifacts(v)),
+                      *(a.artifact_id for a in _video_artifacts(v))],
     )
 
 
@@ -752,6 +883,13 @@ def _audio_artifacts(v: StateView) -> list[Artifact]:
     return [*plan, *narration.artifacts, timeline.artifact]
 
 
+def _generated_video_artifacts(v: StateView) -> list[Artifact]:
+    """The video segment plan and every GENERATED_VIDEO_ASSET, when the lesson asked for generated clips."""
+    plan = v.maybe("store_video_segment_plan", StoredArtifacts)
+    generated = _generated(v)
+    return [*(plan.artifacts if plan else []), *(generated.artifacts if generated else [])]
+
+
 def _video_artifacts(v: StateView) -> list[Artifact]:
     """The video plan, its subtitles and the VIDEO artifact, once they exist."""
     plan = v.maybe("store_video_plan", StoredArtifacts)
@@ -775,13 +913,14 @@ def _summarize(v: StateView) -> TaskResult:
                                    uri=a.uri, parent_ids=a.parent_ids)
                    for a in [*pedagogy.artifacts, *research.artifacts, *(visuals.artifacts if visuals else []),
                              *stored.artifacts,
-                             *presentation_artifacts, *_audio_artifacts(v), *_video_artifacts(v)]],
+                             *presentation_artifacts, *_audio_artifacts(v), *_generated_video_artifacts(v),
+                             *_video_artifacts(v)]],
         mastery_changes=merge_changes(v.output("record_diagnostic", MasteryUpdate), update),
         review_verdict=review.final_review.verdict.value if review.status == "approved" else review.status,
         revisions=review.revisions,
         estimated_level=update.estimated_level,
         warnings=[*_research(v).warnings, *_visual_warnings(v), *_presentation_warnings(v), *_audio_warnings(v),
-                  *_video_warnings(v)],
+                  *_generated_video_warnings(v), *_video_warnings(v)],
     )
 
 
@@ -793,7 +932,8 @@ def lesson_template(options: LessonWorkflowOptions) -> WorkflowTemplate:
                     "pedagogical plan, then research, a reviewed lesson, visuals, a presentation, its narration and "
                     "the video.",
         provides=frozenset({"lesson.text", "learner.model", "pedagogy.plan", "lesson.review", "lesson.visuals", "slides.plan", "presentation.pptx",
-                            "audio.narration", "presentation.timeline", "video.mp4"}),
+                            "audio.narration", "presentation.timeline", "video.mp4",
+                            GENERATED_VIDEO_CAPABILITY}),
         build=lambda request: build_lesson_workflow(request, options),
         provider_capabilities=PROVIDER_CAPABILITIES,
         expected_calls=(

@@ -18,7 +18,8 @@ from app.schemas.usage import TaskBudget
 
 # The variable that selects each capability's provider, for messages.
 PROVIDER_VARS = {Capability.LLM: "LLM_PROVIDER", Capability.TTS: "TTS_PROVIDER", Capability.IMAGE: "IMAGE_PROVIDER",
-                 Capability.IMAGE_SEARCH: "IMAGE_SEARCH_PROVIDER", Capability.SEARCH: "SEARCH_PROVIDER"}
+                 Capability.IMAGE_SEARCH: "IMAGE_SEARCH_PROVIDER", Capability.SEARCH: "SEARCH_PROVIDER",
+                 Capability.VIDEO_GENERATION: "VIDEO_GENERATION_PROVIDER"}
 
 
 class ProductionSettings(BaseSettings):
@@ -37,6 +38,11 @@ class ProductionSettings(BaseSettings):
     max_tts_characters: int = Field(default=30_000, ge=1)
     max_tts_seconds: float = Field(default=1800.0, gt=0)
     max_cost_usd: float | None = Field(default=None, ge=0)
+    # Generated video segments (optional; only lessons that ask for them). They apply to every lesson, not only to
+    # production tasks: the video strategy plans within them, and production tasks also enforce them per request.
+    max_generated_video_segments: int = Field(default=2, ge=0, le=20)
+    max_generated_video_seconds: float = Field(default=20.0, ge=0, le=600)
+    max_video_generation_cost_usd: float | None = Field(default=None, ge=0)  # None: no cost limit (counts still do)
     production_health_timeout_seconds: float = Field(default=20.0, gt=0, le=300)
 
     @field_validator("*", mode="before")
@@ -52,12 +58,19 @@ class ProductionSettings(BaseSettings):
             max_search_requests=self.max_search_requests, max_generated_images=self.max_generated_images,
             max_searched_images=self.max_searched_images, max_tts_characters=self.max_tts_characters,
             max_tts_seconds=self.max_tts_seconds, max_cost_usd=self.max_cost_usd,
+            max_generated_video_segments=self.max_generated_video_segments,
+            max_generated_video_seconds=self.max_generated_video_seconds,
+            max_video_generation_cost_usd=self.max_video_generation_cost_usd,
         )
 
 
-def required_capabilities(workflow_capabilities: frozenset[Capability], budget: TaskBudget) -> set[Capability]:
-    """The provider capabilities a run needs: what the workflow uses, minus what its budget switches off."""
+def required_capabilities(workflow_capabilities: frozenset[Capability], budget: TaskBudget,
+                          *, generated_video: bool = False) -> set[Capability]:
+    """The provider capabilities a run needs: what the workflow uses, minus what its budget switches off. Video
+    generation is only needed by a lesson that asks for generated segments, with a budget that allows one."""
     needed = set(workflow_capabilities)
+    if not generated_video or not budget.max_generated_video_segments or not budget.max_generated_video_seconds:
+        needed.discard(Capability.VIDEO_GENERATION)
     if budget.max_generated_images == 0:
         needed.discard(Capability.IMAGE)
     if budget.max_searched_images == 0:

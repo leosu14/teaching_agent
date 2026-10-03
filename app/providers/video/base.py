@@ -7,6 +7,10 @@ service, and it has no LLM cost. Which command-line tool (if any) does the work 
 see only `compose(plan, workspace) -> ComposedVideo`.
 
 A VideoProber measures a file with a real container parser, so validation never trusts a file name or extension.
+
+A VideoNormalizer converts a generated clip (whatever a video generation provider returned) into the platform's
+format (codec, container, resolution, frame rate, audio or none), so the composer only ever sees platform-standard
+clips and never anything vendor-specific.
 """
 
 from __future__ import annotations
@@ -16,7 +20,15 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 
-from app.schemas.video import AudioWindow, ComposedVideo, FrameSample, VideoPlan, VideoProbe
+from app.schemas.video import (
+    AudioWindow,
+    ClipNormalization,
+    ComposedVideo,
+    FrameSample,
+    NormalizedClip,
+    VideoPlan,
+    VideoProbe,
+)
 
 MediaReader = Callable[[str], bytes]  # object uri -> bytes
 
@@ -50,6 +62,24 @@ class VideoProber(ABC):
     @abstractmethod
     def frame_stats(self, path: Path, samples: list[FrameSample]) -> dict[str, FrameStats]:
         """A small fingerprint of the frame shown at each sample time."""
+
+    def decode_errors(self, path: Path) -> list[str]:
+        """Errors met when decoding every frame of the file (empty: it decodes cleanly). Probers that cannot decode
+        report nothing; the FFmpeg prober decodes the whole file."""
+        return []
+
+
+class VideoNormalizationError(Exception):
+    pass
+
+
+class VideoNormalizer(ABC):
+    name: str  # name/version: part of a generated asset's identity
+
+    @abstractmethod
+    def normalize(self, source: Path, probe: VideoProbe, target: ClipNormalization,
+                  workspace: Path) -> NormalizedClip:
+        """Write the platform-format version of `source` (already probed) into `workspace`."""
 
 
 class FrameStats:

@@ -15,6 +15,14 @@ whole number of frames (rounded on the global timeline, so pieces add up to exac
 frames). Pieces are concatenated per slide, faded where the plan says so, and concatenated again. Narration is
 placed at its timeline position over a silent bed of exactly the timeline's length and mixed without
 normalisation; nothing is concatenated blindly, and silence stays silence.
+
+A segment with a generated clip is also split where the clip starts and ends. A piece inside the clip's window is
+the clip's own frames (trimmed by frame number) over the slide background (full_frame_replace) or inside the
+card's media box (inset), with the piece's subtitle drawn on top from a transparent layer. The clip's sound is
+mixed in only when the plan asks for it. A plan without clips produces exactly the command it always did.
+
+`FFmpegVideoNormalizer` converts a generated clip to the platform format (H.264 yuv420p in MP4 at the configured
+resolution and frame rate, letterboxed, cut to its planned length, no audio stream unless its sound is kept).
 """
 
 from __future__ import annotations
@@ -33,17 +41,23 @@ from app.providers.video.base import (
     MediaReader,
     VideoComposer,
     VideoCompositionError,
+    VideoNormalizationError,
+    VideoNormalizer,
     VideoProbeError,
     VideoProber,
     read_media,
 )
 from app.providers.video.frames import FrameRenderer, png_bytes
+from app.schemas.generative_video import InsertionStrategy
 from app.schemas.video import (
     AudioCodec,
     AudioStreamProbe,
     AudioWindow,
+    ClipNormalization,
     ComposedVideo,
     FrameSample,
+    GeneratedClip,
+    NormalizedClip,
     TransitionType,
     VideoCodec,
     VideoConfig,
@@ -155,11 +169,13 @@ class FFmpegAdapter:
 
 @dataclass(frozen=True)
 class Piece:
-    """A still frame held for `frames` frames."""
+    """A still frame held for `frames` frames, or (with `clip_offset`) that many frames of the segment's generated
+    clip starting at its frame `clip_offset`."""
 
     segment: int
     frames: int
     subtitle: str | None
+    clip_offset: int | None = None
 
 
 def frame_at(t: float, fps: int) -> int:
@@ -167,16 +183,22 @@ def frame_at(t: float, fps: int) -> int:
 
 
 def pieces_for(plan: VideoPlan) -> list[list[Piece]]:
-    """Per segment, the stills that make it up: split wherever the burned-in subtitle changes."""
+    """Per segment, the stills (and clip stretches) that make it up: split wherever the burned-in subtitle changes
+    and where a generated clip starts or ends."""
     fps = plan.fps
     out: list[list[Piece]] = []
     style = plan.config.subtitles
     for index, seg in enumerate(plan.slides):
         cues = plan.subtitles_for(seg) if style.enabled else []
-        cuts = sorted({seg.start_time, seg.end_time,
-                       *(min(max(c.start_time, seg.start_time), seg.end_time) for c in cues),
-                       *(min(max(c.end_time, seg.start_time), seg.end_time) for c in cues)})
-        pieces = []
+        clip = seg.generated
+
+        def clamp(t: float) -> float:
+            return min(max(t, seg.start_time), seg.end_time)
+
+        cuts = sorted({seg.start_time, seg.end_time, *(clamp(c.start_time) for c in cues),
+                       *(clamp(c.end_time) for c in cues),
+                       *((clamp(clip.start_time), clamp(clip.end_time)) if clip is not None else ())})
+        pieces: list[Piece] = []
         for a, b in zip(cuts, cuts[1:]):
             frames = frame_at(b, fps) - frame_at(a, fps)
             if frames <= 0:
@@ -184,10 +206,17 @@ def pieces_for(plan: VideoPlan) -> list[list[Piece]]:
             mid = (a + b) / 2
             cue = next((c for c in cues if c.start_time <= mid < c.end_time), None)
             text = cue.text if cue else None
-            if pieces and pieces[-1].subtitle == text:  # merge stills that look the same
-                pieces[-1] = Piece(index, pieces[-1].frames + frames, text)
+            offset = None
+            if clip is not None and clip.start_time <= mid < clip.end_time:
+                offset = frame_at(a, fps) - frame_at(clip.start_time, fps)
+            prev = pieces[-1] if pieces else None
+            if prev is not None and prev.subtitle == text and prev.clip_offset is None and offset is None:
+                pieces[-1] = Piece(index, prev.frames + frames, text)  # merge stills that look the same
+            elif (prev is not None and prev.subtitle == text and prev.clip_offset is not None and offset is not None
+                  and prev.clip_offset + prev.frames == offset):
+                pieces[-1] = Piece(index, prev.frames + frames, text, prev.clip_offset)  # one stretch of the clip
             else:
-                pieces.append(Piece(index, frames, text))
+                pieces.append(Piece(index, frames, text, offset))
         if not pieces:
             raise FFmpegError(f"segment {seg.segment_id} is shorter than one frame")
         out.append(pieces)
@@ -228,10 +257,22 @@ class FFmpegVideoComposer(VideoComposer):
         graph: list[str] = []
         slide_labels = []
         stills: dict[tuple[int, str | None], Path] = {}
+        clip_files: dict[int, Path] = {}
+        layers: dict[str, Path] = {}
         for index, (seg, pieces) in enumerate(zip(plan.slides, layout)):
-            base = renderer.card(seg.visual_ref.card, self._image(seg), (seg.order, len(plan.slides)))
+            clip = seg.generated
+            image = self._image(seg)
+            inset = clip is not None and clip.strategy == InsertionStrategy.INSET
+            base = renderer.card(seg.visual_ref.card, image, (seg.order, len(plan.slides)),
+                                 reserve_media_box=inset and image is None)
             labels = []
             for piece in pieces:
+                if piece.clip_offset is not None:
+                    assert clip is not None
+                    labels.append(self._clip_piece(
+                        piece, index, clip, base, renderer, plan, inputs, graph, clip_files, layers, frames_dir,
+                        workspace))
+                    continue
                 key = (index, piece.subtitle)
                 if key not in stills:
                     still = frames_dir / f"s{index:03d}_{len(stills):04d}.png"
@@ -272,6 +313,17 @@ class FFmpegVideoComposer(VideoComposer):
                          f"aformat=sample_fmts=fltp:channel_layouts={layout_name},"
                          f"adelay=delays={delay}:all=1[a{k}]")
             mix.append(f"[a{k}]")
+        for index, seg in enumerate(plan.slides):
+            clip = seg.generated
+            if clip is None or clip.audio != "mixed" or not clip.has_audio:
+                continue
+            n = len(inputs)
+            inputs.append(((), clip_files[index]))
+            delay = round(clip.start_time * 1000)
+            graph.append(f"[{n}:a]atrim=duration={clip.duration:.3f},asetpts=PTS-STARTPTS,aresample={rate},"
+                         f"aformat=sample_fmts=fltp:channel_layouts={layout_name},"
+                         f"adelay=delays={delay}:all=1[g{index}]")
+            mix.append(f"[g{index}]")
         if len(mix) == 1:
             graph.append("[abed]anull[aout]")
         else:
@@ -286,6 +338,7 @@ class FFmpegVideoComposer(VideoComposer):
         if not output.exists() or output.stat().st_size == 0:
             raise FFmpegError("ffmpeg produced no output")
         cpu = _child_cpu() - cpu_before
+        metadata_extra = {"generated_clips": len(clip_files)} if clip_files else {}
         return ComposedVideo(
             path=str(output), media_type=config.media_type, composer=self.name, frames=total_frames,
             duration=total_frames / config.fps, render_seconds=round(time.perf_counter() - started, 3),
@@ -295,8 +348,54 @@ class FFmpegVideoComposer(VideoComposer):
                       "audio_tracks": len(plan.audio_tracks), "encoder": VIDEO_ENCODERS[config.codec],
                       "audio_encoder": AUDIO_ENCODERS[config.audio_codec], "preset": self._preset,
                       "rate_control": f"{config.bitrate_kbps}k" if config.bitrate_kbps else f"crf {self._crf}",
-                      "frame_renderer": renderer.name, "font": renderer.font_name},
+                      "frame_renderer": renderer.name, "font": renderer.font_name, **metadata_extra},
         )
+
+    def _clip_piece(self, piece: Piece, index: int, clip: GeneratedClip, base, renderer: FrameRenderer,
+                    plan: VideoPlan, inputs: list, graph: list[str], clip_files: dict[int, Path],
+                    layers: dict[str, Path], frames_dir: Path, workspace: Path) -> str:
+        """Filters for one stretch of a generated clip: the clip over the background (full frame) or in the card's
+        media box (inset), then the subtitle layer on top. Returns the piece's output label."""
+        config = plan.config
+        fps, fmt = config.fps, config.pixel_format
+        if index not in clip_files:
+            data = read_media(self._media, clip.uri, clip.checksum, f"generated clip {clip.artifact_id}")
+            clips_dir = workspace / "clips"
+            clips_dir.mkdir(exist_ok=True)
+            path = clips_dir / f"g{index:03d}.mp4"
+            path.write_bytes(data)
+            clip_files[index] = path
+        full = clip.strategy == InsertionStrategy.FULL_FRAME_REPLACE
+        under = frames_dir / f"c{index:03d}_{'bg' if full else 'card'}.png"
+        if not under.exists():
+            under.write_bytes(png_bytes(renderer.background_frame() if full else base))
+        if full:
+            x, y, w, h = 0, 0, config.width, config.height
+        else:
+            x0, y0, x1, y1 = renderer.media_box(plan.slides[index].visual_ref.card)
+            scale = min((x1 - x0) / clip.width, (y1 - y0) / clip.height)
+            w, h = max(2, int(clip.width * scale) // 2 * 2), max(2, int(clip.height * scale) // 2 * 2)
+            x, y = x0 + (x1 - x0 - w) // 2, y0 + (y1 - y0 - h) // 2
+        b = len(inputs)
+        inputs.append((("-framerate", str(fps)), under))
+        c = len(inputs)
+        inputs.append(((), clip_files[index]))
+        graph.append(f"[{b}:v]loop=loop={piece.frames - 1}:size=1:start=0,setpts=N/({fps}*TB),format={fmt}[cb{b}]")
+        graph.append(f"[{c}:v]trim=start_frame={piece.clip_offset}:end_frame={piece.clip_offset + piece.frames},"
+                     f"setpts=PTS-STARTPTS,scale={w}:{h},setsar=1,format={fmt}[cc{b}]")
+        if not piece.subtitle or not config.subtitles.enabled:
+            graph.append(f"[cb{b}][cc{b}]overlay=x={x}:y={y}:eof_action=repeat,format={fmt}[p{b}]")
+            return f"[p{b}]"
+        graph.append(f"[cb{b}][cc{b}]overlay=x={x}:y={y}:eof_action=repeat[co{b}]")
+        if piece.subtitle not in layers:
+            layer = frames_dir / f"sub{len(layers):04d}.png"
+            layer.write_bytes(png_bytes(renderer.subtitle_layer(piece.subtitle, config.subtitles)))
+            layers[piece.subtitle] = layer
+        s = len(inputs)
+        inputs.append((("-framerate", str(fps)), layers[piece.subtitle]))
+        graph.append(f"[{s}:v]loop=loop={piece.frames - 1}:size=1:start=0,setpts=N/({fps}*TB),format=rgba[cs{b}]")
+        graph.append(f"[co{b}][cs{b}]overlay=x=0:y=0:eof_action=repeat,format={fmt}[p{b}]")
+        return f"[p{b}]"
 
     def _image(self, seg: VideoSegment) -> bytes | None:
         image = seg.visual_ref.image
@@ -393,6 +492,18 @@ class FFprobeVideoProber(VideoProber):
             levels[w.label] = 20 * math.log10(peak / 32768) if peak else float("-inf")
         return levels
 
+    def decode_errors(self, path: Path) -> list[str]:
+        """Decodes every frame (and audio packet) once; FFmpeg's error output, if any, is the list of problems."""
+        workspace = path.parent
+        try:
+            self._adapter.run(FFmpegCommand(workspace=workspace, inputs=(((), path),), output=workspace / "decode.null",
+                                            output_options=("-f", "null"), pipe_output=True), log_name="decode")
+        except FFmpegError as exc:
+            return [str(exc)]
+        log = workspace / "decode.stderr.log"
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines() if log.exists() else []
+        return [line.strip() for line in lines if line.strip()][:20]
+
     def frame_stats(self, path: Path, samples: list[FrameSample]) -> dict[str, FrameStats]:
         """Decodes the video once and keeps a 64x36 greyscale thumbnail of each sampled frame."""
         if not samples:
@@ -417,3 +528,49 @@ class FFprobeVideoProber(VideoProber):
             stddev = math.sqrt(sum((v - mean) ** 2 for v in thumb) / size)
             out[s.label] = FrameStats(mean, stddev, thumb)
         return out
+
+
+# --- Normalisation of generated clips ---------------------------------------------------------------------------
+
+
+class FFmpegVideoNormalizer(VideoNormalizer):
+    name = "ffmpeg-normalizer/1"
+
+    def __init__(self, adapter: FFmpegAdapter | None = None, *, preset: str = "veryfast", crf: int = 20) -> None:
+        self._adapter = adapter or FFmpegAdapter()
+        self._preset = preset
+        self._crf = crf
+
+    def normalize(self, source: Path, probe: VideoProbe, target: ClipNormalization,
+                  workspace: Path) -> NormalizedClip:
+        """Scale into the target frame keeping the aspect ratio (letterboxed), resample to the target frame rate, cut
+        to at most the planned length, encode H.264 yuv420p (and AAC when the sound is kept) in MP4."""
+        started = time.perf_counter()
+        frames = max(1, frame_at(min(target.duration, probe.duration), target.fps))
+        w, h, fps = target.width, target.height, target.fps
+        graph = (f"[0:v]fps={fps},scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bicubic,"
+                 f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format={target.pixel_format}[v]")
+        keep_audio = target.keep_audio and bool(probe.audio)
+        audio: tuple[str, ...] = (("-c:a", AUDIO_ENCODERS[target.audio_codec], "-b:a", "128k",
+                                   "-ar", str(target.audio_sample_rate), "-ac", str(target.audio_channels),
+                                   "-t", f"{frames / fps:.3f}") if keep_audio else ("-an",))
+        output = workspace / f"normalized.{MUXERS[target.container]}"
+        command = FFmpegCommand(
+            workspace=workspace, inputs=(((), source),), output=output, filter_graph=graph,
+            maps=("[v]", "0:a:0") if keep_audio else ("[v]",),
+            output_options=("-c:v", VIDEO_ENCODERS[target.codec], "-preset", self._preset, "-crf", str(self._crf),
+                            "-pix_fmt", target.pixel_format, "-r", str(fps), "-frames:v", str(frames), *audio,
+                            "-movflags", "+faststart", "-map_metadata", "-1", "-fflags", "+bitexact",
+                            "-flags:v", "+bitexact", "-flags:a", "+bitexact", "-f", MUXERS[target.container]))
+        try:
+            self._adapter.run(command, log_name="normalize")
+        except FFmpegError as exc:
+            raise VideoNormalizationError(str(exc)) from exc
+        if not output.exists() or output.stat().st_size == 0:
+            raise VideoNormalizationError("ffmpeg produced no normalised clip")
+        return NormalizedClip(path=str(output), media_type=target.media_type, normalizer=self.name,
+                              render_seconds=round(time.perf_counter() - started, 3),
+                              metadata={"frames": frames, "audio": keep_audio, "encoder": VIDEO_ENCODERS[target.codec],
+                                        "source_codec": probe.video.codec if probe.video else None,
+                                        "source_size": f"{probe.video.width}x{probe.video.height}"
+                                        if probe.video else None})

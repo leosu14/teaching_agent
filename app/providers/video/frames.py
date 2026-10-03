@@ -103,8 +103,52 @@ class FrameRenderer:
     def font(self, fraction: float) -> FontType:
         return _font(self.font_path, round(self.h * fraction))
 
-    def card(self, card: SlideCard, image: bytes | None, position: tuple[int, int]) -> Image.Image:
-        """The slide without subtitles."""
+    def media_box(self, card: SlideCard) -> tuple[int, int, int, int]:
+        """Where a card places its picture (an IMAGE_ASSET, or an inset generated clip): beside the text when the
+        card has lines, else across the content area."""
+        w, h = self.w, self.h
+        margin = round(w * 0.06)
+        title_lines = len(wrap(card.title, self.font(0.062), w - 2 * margin)[:2])
+        top = max(round(h * 0.095) + title_lines * round(h * 0.075) + round(h * 0.03), round(h * 0.25))
+        bottom = round(h * 0.78)
+        if card.lines:
+            return round(w * 0.48), top, w - margin, bottom
+        return margin, top, w - margin, bottom
+
+    def background_frame(self) -> Image.Image:
+        """A plain frame in the background colour (behind a full-frame clip)."""
+        return Image.new("RGB", (self.w, self.h), self.background)
+
+    def subtitle_layer(self, text: str, style: SubtitleStyle) -> Image.Image:
+        """The burned-in subtitle alone, on a transparent RGBA frame, for drawing over moving pictures. Same box and
+        text placement as `with_subtitle`."""
+        layer = Image.new("RGBA", (self.w, self.h), (0, 0, 0, 0))
+        if not text or not style.enabled:
+            return layer
+        font = self.font(style.font_size)
+        lines = text.split("\n")[: style.max_lines]
+        line_h = round(self.h * style.font_size * 1.3)
+        pad = round(self.h * style.font_size * 0.4)
+        widths = [font.getlength(line) for line in lines]
+        box_w = min(self.w - 2 * pad, round(max(widths) + 2 * pad))
+        box_h = line_h * len(lines) + 2 * pad - round(self.h * style.font_size * 0.3)
+        x0 = (self.w - box_w) // 2
+        y1 = self.h - round(self.h * style.bottom_margin)
+        y0 = y1 - box_h
+        draw = ImageDraw.Draw(layer)
+        draw.rectangle((x0, y0, x0 + box_w, y1), fill=(*_rgb(style.box_color), round(255 * style.box_opacity)))
+        text_layer = Image.new("RGBA", (self.w, self.h), (0, 0, 0, 0))
+        tdraw = ImageDraw.Draw(text_layer)
+        y = y0 + pad - round(self.h * style.font_size * 0.15)
+        for line, lw in zip(lines, widths):
+            tdraw.text(((self.w - lw) / 2, y), line, font=font, fill=(*_rgb(style.text_color), 255))
+            y += line_h
+        return Image.alpha_composite(layer, text_layer)
+
+    def card(self, card: SlideCard, image: bytes | None, position: tuple[int, int], *,
+             reserve_media_box: bool = False) -> Image.Image:
+        """The slide without subtitles. `reserve_media_box` lays the card out as if it had a picture and leaves the
+        picture's box empty (an inset clip plays there)."""
         w, h = self.w, self.h
         frame = Image.new("RGB", (w, h), self.background)
         draw = ImageDraw.Draw(frame)
@@ -131,6 +175,9 @@ class FrameRenderer:
             self._place(frame, pic, image_box)
             if text_box:
                 self._lines(draw, lines, text_box)
+        elif reserve_media_box:
+            if lines:
+                self._lines(draw, lines, (margin, top, round(w * 0.44), bottom))
         elif lines:
             self._lines(draw, lines, (margin, top, w - margin, bottom))
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
+from collections.abc import Coroutine
 from pathlib import Path
 
 from app.artifacts.service import ArtifactService
@@ -100,7 +103,15 @@ class TaskService:
         return self._orchestrator.request_pause(task_id)
 
     def cancel(self, task_id: str) -> Task:
-        return self._orchestrator.request_cancel(task_id)
+        """Cancel a task. A task waiting on outside work (a video generation job) also has that work released: the
+        job is cancelled at the provider when it supports it, otherwise recorded as cancelled locally."""
+        before = self._tasks.get(task_id)
+        on_work = self._orchestrator.waiting_on_work(before)
+        task = self._orchestrator.request_cancel(task_id)
+        if on_work:
+            _run_sync(self._orchestrator.release(task_id))
+            task = self._tasks.get(task_id)
+        return task
 
     def get(self, task_id: str) -> Task:
         return self._tasks.get(task_id)
@@ -115,3 +126,21 @@ class TaskService:
     def events(self, task_id: str) -> list[Event]:
         self._tasks.get(task_id)
         return self._events.list_for_task(task_id)
+
+
+def _run_sync(coro: Coroutine) -> object:
+    """Run a coroutine to completion from synchronous code, even when the caller's thread runs an event loop."""
+    result: dict = {}
+
+    def target() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # re-raised in the caller's thread
+            result["error"] = exc
+
+    thread = threading.Thread(target=target, name="task-release")
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")

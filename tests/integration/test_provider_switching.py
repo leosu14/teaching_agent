@@ -69,7 +69,7 @@ def test_real_configuration_selects_production_adapters(tmp_path) -> None:
         assert registry.ids(Capability.IMAGE_SEARCH) == ["mock"]
         assert {s.capability: s.provider for s in c.providers.selector.describe()} == {
             Capability.LLM: "openai", Capability.TTS: "openai", Capability.IMAGE: "openai",
-            Capability.IMAGE_SEARCH: "mock", Capability.SEARCH: "tavily"}
+            Capability.IMAGE_SEARCH: "mock", Capability.SEARCH: "tavily", Capability.VIDEO_GENERATION: "mock"}
         assert all(t.provider == "openai" and t.model == "gpt-test" for t in c.router.targets(c.router.tier_for(
             "teacher", c.agents.get("teacher").spec.tier)))
         assert "gpt-test" in c.router.config.unpriced_models  # no price configured: cost unknown, not invented

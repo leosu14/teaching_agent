@@ -1,0 +1,32 @@
+[
+ {
+  "url": "https://earth-science.example.org/water-cycle/evaporation",
+  "title": "Evaporation and condensation in the water cycle",
+  "snippet": "Heat from the sun evaporates water; the vapour rises, cools and condenses into clouds.",
+  "publisher": "Open Earth Science",
+  "source_type": "educational",
+  "language": "en",
+  "published_at": "2025-04-02",
+  "content": "Heat from the sun warms the surface of oceans and lakes, so water molecules move faster and evaporate, rising into the air as invisible water vapour. Example: A puddle slowly disappears on a sunny afternoon as its water evaporates. Practice: What gives water the energy to evaporate? Answer: heat from the sun.\n\nAs the moist air rises it expands and cools, and the vapour condenses into tiny droplets that gather into clouds; this condensation releases heat that drives convection. Example: Drops form on a cold glass as vapour from the air condenses. Practice: What happens to water vapour when it cools high in the air? Answer: it condenses into droplets."
+ },
+ {
+  "url": "https://earth-science.example.org/water-cycle/precipitation",
+  "title": "Precipitation and runoff: how water returns to the sea",
+  "snippet": "Cloud droplets merge and fall as rain, snow or hail; runoff flows into rivers and back to the sea.",
+  "publisher": "Open Earth Science",
+  "source_type": "educational",
+  "language": "en",
+  "published_at": "2025-04-02",
+  "content": "Inside a cloud, droplets collide and merge until they are too heavy to float, and they fall to the ground as precipitation: rain, snow or hail. Example: A summer storm cloud releases heavy rain within minutes. Practice: Name two forms of precipitation. Answer: rain and snow.\n\nWater that reaches the ground flows downhill over the land as runoff, moving into streams and rivers that carry it back to lakes and the sea, where the cycle starts again. Example: After a storm, runoff flowing into a river makes the water level rise. Practice: What is water flowing over the land into rivers called? Answer: runoff."
+ },
+ {
+  "url": "https://earth-science.example.org/water-cycle/glossary",
+  "title": "Water cycle glossary: key terms",
+  "snippet": "Reservoir: a place where water is stored. Water vapour: water as a gas.",
+  "publisher": "Open Earth Science",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2025-04-02",
+  "content": "A reservoir is defined as any place where water is stored for a time, such as an ocean, a lake, a glacier or an aquifer. Example: The ocean is the largest reservoir of water on Earth. Practice: What is a place where water is stored called? Answer: a reservoir.\n\nKey term: water vapour is defined as water in the form of a gas; the term appears in every definition of the cycle. Example: The glossary lists vapour next to reservoir. Practice: What is water in the form of a gas called? Answer: water vapour."
+ }
+]

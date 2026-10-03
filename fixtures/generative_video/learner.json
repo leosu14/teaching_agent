@@ -1,0 +1,13 @@
+{
+  "_comment": "A learner new to the water cycle. The lesson is requested in a structured form (see scripts/run_generative_video_demo.py) and asks for generated video segments.",
+  "learner_id": "science-learner",
+  "profile": {
+    "display_name": "Science demo learner",
+    "subjects": [
+      {"subject": "earth science", "framework_id": "mastery", "target_level": "intermediate", "estimated_level": "beginner",
+       "objectives": ["Explain how water moves around the planet"]}
+    ],
+    "preferences": {"language_of_instruction": "en", "session_minutes": 30, "explanation_style": "examples-first"}
+  },
+  "request": "Create a lesson about the water cycle."
+}

@@ -165,6 +165,44 @@ class HttpClient:
             raise self._status_error(result, resp_headers.get("retry-after"))
         return result
 
+    async def download(self, url: str, *, max_bytes: int | None = None) -> HttpResponse:
+        """GET a file the vendor serves from another host (e.g. a signed CDN URL for a generated video). The
+        configured headers are NOT sent (they carry the credential); only https (or loopback) URLs are fetched;
+        redirects are not followed; the body is size-limited."""
+        if self.offline or offline_env():
+            raise self._error(ProviderOfflineError, "network request refused: offline mode is on "
+                                                    "(TEACHING_AGENT_MODE=offline or TEACHING_AGENT_OFFLINE=true)")
+        try:
+            validate_base_url(url)
+        except ConfigError as exc:
+            raise self._error(ProviderResponseError, f"refusing to download from an unsafe URL ({exc})") from None
+        limit = max_bytes or self.max_response_bytes
+        httpx = _httpx()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds), follow_redirects=False,
+                                         transport=self._transport) as client:
+                async with client.stream("GET", url, headers={"Accept": "*/*"}) as response:
+                    chunks, size = [], 0
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > limit:
+                            raise self._error(ProviderResponseError, f"download over the {limit}-byte limit")
+                        chunks.append(chunk)
+                    content = b"".join(chunks)
+                    status, resp_headers = response.status_code, response.headers
+        except ProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise self._error(ProviderTimeout, f"download timed out after {self.timeout_seconds}s "
+                                               f"({type(exc).__name__})") from None
+        except (httpx.TransportError, OSError) as exc:
+            raise self._error(ProviderUnavailable, f"download failed ({type(exc).__name__})") from None
+        result = HttpResponse(status=status, content=content, content_type=resp_headers.get("content-type", ""),
+                              vendor_request_id=None)
+        if status >= 300:
+            raise self._status_error(result, resp_headers.get("retry-after"))
+        return result
+
     def _status_error(self, response: HttpResponse, retry_after: str | None) -> ProviderError:
         status = response.status
         detail = self._detail(response)

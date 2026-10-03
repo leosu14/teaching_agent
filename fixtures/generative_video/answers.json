@@ -1,0 +1,15 @@
+{
+  "_comment": "Simulated learner answers keyed by concept id, one object per diagnostic round: the learner half-knows the key terms and is new to the processes.",
+  "rounds": [
+    {
+      "sci.water.terms": "a cloud",
+      "sci.water.evaporation": "it disappears",
+      "sci.water.precipitation": "clouds"
+    },
+    {
+      "sci.water.terms": "water vapour",
+      "sci.water.evaporation": "the wind",
+      "sci.water.precipitation": "rivers"
+    }
+  ]
+}

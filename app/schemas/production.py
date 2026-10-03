@@ -34,6 +34,7 @@ class ProductionTask(Schema):
     learner_id: str = Field(min_length=1, max_length=128)
     subject: str | None = None  # default: the language itself, for a language level framework (CEFR)
     user_id: str = "production"
+    generated_video: bool = False  # ask for optional generated video segments
 
 
 class ProviderChoice(Schema):
@@ -43,6 +44,26 @@ class ProviderChoice(Schema):
     fallbacks: list[str] = Field(default_factory=list)
     required: bool = False
     real: bool = False  # needs the network (not a mock)
+
+
+class VideoGenerationPlan(Schema):
+    """What generated video segments may cost a run, known before any provider call. The estimate is an upper
+    bound: the strategy only plans clips for sections that need moving pictures."""
+
+    requested: bool  # the task asked for generated segments
+    enabled: bool  # requested, allowed by the settings and by the budget
+    provider: str
+    model: str | None = None
+    real: bool = False  # needs the network (not the mock)
+    max_segments: int
+    max_seconds: float
+    segment_seconds: tuple[float, float]  # (min, max) per clip
+    estimated_seconds: float  # at most this many seconds are generated
+    estimated_cost_usd: float | None = None  # None: the provider's price is not configured
+    max_cost_usd: float | None = None
+    required: bool = False
+    failure_policy: str  # what a failed required clip does: fail the task, or continue with its fallback
+    fallback: str = "the slide's existing image, else the slide itself"
 
 
 class ProductionPlan(Schema):
@@ -62,6 +83,7 @@ class ProductionPlan(Schema):
     budget: TaskBudget
     estimated_llm_cost_usd: float | None = None  # from configured pricing; None when the models are unpriced
     knowledge_concepts: int = 0  # concepts the knowledge base holds for the subject and topic
+    video_generation: VideoGenerationPlan | None = None
     run_key: str
 
 

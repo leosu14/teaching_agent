@@ -16,6 +16,7 @@ class Capability(str, Enum):
     IMAGE = "image"  # image generation: every image it returns has origin "generated"
     IMAGE_SEARCH = "image_search"  # images found by a search API: origin "searched" or "external"
     SEARCH = "search"  # web search for research
+    VIDEO_GENERATION = "video_generation"  # short generated video clips (asynchronous jobs)
 
 
 class ProviderUsage(Schema):
@@ -36,6 +37,7 @@ class ProviderUsage(Schema):
     audio_seconds: float | None = None
     image_count: int | None = None
     result_count: int | None = None
+    video_seconds: float | None = None  # generated video seconds
     estimated_cost: float | None = None
     actual_cost: float | None = None
     currency: str | None = None
