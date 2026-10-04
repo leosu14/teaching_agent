@@ -85,6 +85,10 @@ class ProductionPlan(Schema):
     knowledge_concepts: int = 0  # concepts the knowledge base holds for the subject and topic
     video_generation: VideoGenerationPlan | None = None
     run_key: str
+    # The long-term learning loop the lesson belongs to, and the curriculum-planning workflow's stages (used for a
+    # learner with a learning goal; goals are optional).
+    learning_loop: list[str] = Field(default_factory=list)
+    curriculum_stages: list[str] = Field(default_factory=list)
 
 
 class ArtifactNode(Schema):

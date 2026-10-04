@@ -2,7 +2,9 @@
 
 completed lesson -> learner snapshot -> assessment -> WAITING for answers -> evaluation
 -> learning evidence and deterministic mastery update -> updated learner model -> next-learning recommendation
-(the pedagogical engine re-plans from the new state) -> feedback -> evaluation artifacts.
+(the pedagogical engine re-plans from the new state) -> curriculum progress (objective progress, goal completion,
+deterministic replanning and the next learning action; nothing for a learner without curricula) -> feedback ->
+evaluation artifacts.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from app.schemas.pedagogy import (
 )
 from app.schemas.task import ArtifactSummary, TaskResult
 from app.tools.artifacts.tools import ReadArtifactsOutput
+from app.tools.curriculum.tools import TrackRequest, TrackResult
 
 WORKFLOW_ID = "lesson_evaluation"
 LESSON_TASK = "lesson_task_id"
@@ -78,6 +81,10 @@ def _model(v: StateView) -> LearnerModel:
 
 def _recommendation(v: StateView) -> NextLearningRecommendation:
     return v.output("next_recommendation", NextLearningRecommendation)
+
+
+def _tracked(v: StateView) -> TrackResult:
+    return v.output("curriculum_progress", TrackResult)
 
 
 def _assessed(v: StateView) -> list[str]:
@@ -187,6 +194,14 @@ def _package(v: StateView) -> ArtifactBatch:
                       metadata={"concepts": rec.recommended_concepts, "prerequisite_review": rec.prerequisite_review,
                                 "goal_achieved": rec.goal_achieved, "plan_id": rec.plan_id}),
     ]
+    action = _tracked(v).action
+    if action is not None:  # the learner follows a curriculum: Evaluation -> ... -> next LEARNING_ACTION
+        drafts.append(ArtifactDraft(
+            key="learning_action", name="learning_action", type=ArtifactType.LEARNING_ACTION,
+            media_type="application/json", content=action.model_dump_json(indent=2), parent_keys=["learner_model"],
+            metadata={"action": action.action.value, "action_id": action.action_id, "goal_id": action.goal_id,
+                      "objective_id": action.objective_id, "concept_id": action.concept_id,
+                      "curriculum_version": action.curriculum_version}))
     return ArtifactBatch(drafts=drafts)
 
 
@@ -205,6 +220,7 @@ def _summarize(v: StateView) -> TaskResult:
         recommendation=result.recommendation,
         next_recommendation=_recommendation(v),
         feedback=v.output("feedback", EvaluationFeedback),
+        learning_action=_tracked(v).action,
     )
 
 
@@ -246,8 +262,13 @@ def build_evaluation_workflow(request: LessonRequest) -> WorkflowDefinition:
                  build_input=lambda v: RecommendationRequest(model=_model(v), goal=v.output("load_goal", LearningGoal),
                                                              concepts=_concepts(v).concepts,
                                                              available_minutes=_pedagogical_plan(v).available_minutes)),
-        ToolNode(id="feedback", tool="pedagogy.evaluation_feedback", permissions=frozenset({"learner:read"}),
+        # Curriculum progress from the updated learner state: transitions, completion, replanning, next action.
+        ToolNode(id="curriculum_progress", tool="curriculum.track", permissions=frozenset({"learner:write"}),
                  depends_on=("next_recommendation",),
+                 build_input=lambda v: TrackRequest(learner_id=v.task.learner_id, domain=_request(v).subject,
+                                                    concepts=_concepts(v).concepts)),
+        ToolNode(id="feedback", tool="pedagogy.evaluation_feedback", permissions=frozenset({"learner:read"}),
+                 depends_on=("curriculum_progress",),
                  build_input=lambda v: FeedbackRequest(changes=v.output("update_mastery", MasteryUpdate).changes,
                                                        assessed_concepts=_assessed(v), model=_model(v),
                                                        recommendation=_recommendation(v))),

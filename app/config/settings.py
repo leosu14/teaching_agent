@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.config.production import ProductionSettings
 from app.config.providers import ProviderSettings
 from app.config.routing import ConfigError
+from app.schemas.curriculum import CurriculumConfig, FeasibilityConfig
 from app.schemas.generative_video import GeneratedVideoConfig
 from app.schemas.pedagogy import (
     AdaptiveQuestioningPolicy,
@@ -54,6 +55,9 @@ class Settings(BaseSettings):
     pedagogy_mastery_target: float = Field(default=0.8, gt=0, le=1)
     pedagogy_max_target_concepts: int = Field(default=2, ge=1, le=10)
     pedagogy_lesson_minutes: int | None = Field(default=None, ge=5, le=240)  # unset: the learner's session length
+    curriculum_evidence_required: int = Field(default=2, ge=1, le=20)  # evidence before an objective is mastered
+    curriculum_completion_rule: Literal["all_required_mastered", "targets_mastered"] = "all_required_mastered"
+    curriculum_sessions_per_week: float = Field(default=3, gt=0, le=21)  # for target-date feasibility warnings
     research_requirement: Literal["mandatory", "optional"] = "mandatory"
     research_max_results: int = Field(default=5, ge=1, le=50)
     research_max_sources: int = Field(default=6, ge=1, le=50)
@@ -131,6 +135,17 @@ class Settings(BaseSettings):
             mastery_target=self.pedagogy_mastery_target,
             planner=PlannerConfig(max_target_concepts=self.pedagogy_max_target_concepts),
             questioning=self.questioning_policy())
+
+    def curriculum_config(self) -> CurriculumConfig:
+        """CurriculumConfig sharing the adaptive engine's thresholds (mastery target, prerequisite threshold,
+        practice band, repeated failure), so a curriculum and the lessons it starts never disagree."""
+        pedagogy = self.pedagogy_config()
+        return CurriculumConfig(
+            mastery_target=pedagogy.mastery_target, prerequisite_threshold=pedagogy.prerequisite_threshold,
+            practice_from=min(pedagogy.bands.independent, pedagogy.mastery_target),
+            repeated_failure_streak=pedagogy.repeated_failure_streak,
+            evidence_required=self.curriculum_evidence_required, completion_rule=self.curriculum_completion_rule,
+            feasibility=FeasibilityConfig(sessions_per_week=self.curriculum_sessions_per_week))
 
     def video_config(self) -> VideoConfig:
         """VideoConfig with the configured overrides; everything unset keeps its single default in VideoConfig."""

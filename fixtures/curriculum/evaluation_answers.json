@@ -1,0 +1,10 @@
+{
+  "description": "The curriculum demo learner's answers to post-lesson checks, keyed by concept and question kind. The learner learned what each lesson taught.",
+  "answers": {
+    "es.present": {"short_answer": "vivimos"},
+    "es.preterite": {"short_answer": "cenamos"},
+    "es.past_contrast": {"short_answer": "sonó"},
+    "es.subjunctive": {"short_answer": "tenga"},
+    "es.argument": {"short_answer": "otro"}
+  }
+}

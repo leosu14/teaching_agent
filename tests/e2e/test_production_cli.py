@@ -30,6 +30,8 @@ def test_dry_run_offline_checks_everything_and_calls_nothing(tmp_path) -> None:
     out = proc.stdout
     for expected in ("Level:     B1 (cefr)", "Topic:     Climate change", "Mode:      offline",
                      "Knowledge base: 3 concepts", "compose_video", "set TEACHING_AGENT_MODE=production",
+                     "Learning loop: Goal -> Curriculum -> Next Action -> Lesson -> Evaluation -> Mastery Update",
+                     "Curriculum stage (10 workflow nodes", "draft -> propose -> finalize",
                      "no provider was called", "a production run is NOT possible"):
         assert expected in out, expected
     assert SECRET not in proc.stdout + proc.stderr

@@ -3,6 +3,11 @@
 Deterministic: identical learner state, goal, concepts and configuration always give the same plan (and plan id).
 It decides the target concepts, prerequisite review, introduction vs reinforcement, practice and assessment types
 and the time allocation. Models only word the lesson afterwards.
+
+With a `LessonFocus` (a lesson started from a curriculum's next learning action) the target is the focus objective's
+concept instead of the top gaps, treated as the action asks: LEARN teaches it (introduce, or reteach after earlier
+lessons), REVIEW retrieves it (review mode, then a check), PRACTICE reinforces it with an extra applied exercise,
+EVALUATE retrieves it and assesses it twice. Prerequisite review and spaced review are added as usual.
 """
 
 from __future__ import annotations
@@ -16,7 +21,9 @@ from app.schemas.pedagogy import (
     KnowledgeGap,
     KnowledgeGapSet,
     LearnerModel,
+    LearningActivity,
     LearningObjective,
+    LessonFocus,
     PedagogicalPlan,
     PedagogyConfig,
     SequenceStep,
@@ -34,8 +41,8 @@ class PedagogicalPlanner:
         self.strategies = strategies or StrategyRegistry()
 
     def plan(self, model: LearnerModel, gaps: KnowledgeGapSet, goal: LearningGoal, graph: ConceptGraph,
-             available_minutes: int | None = None, lesson_history: list[LearningEvent] | None = None
-             ) -> PedagogicalPlan:
+             available_minutes: int | None = None, lesson_history: list[LearningEvent] | None = None,
+             focus: LessonFocus | None = None) -> PedagogicalPlan:
         if gaps.learner_id != model.learner_id or gaps.goal_id != goal.goal_id:
             raise PlanningError("the gap set must be for this learner and goal")
         cfg = self.config
@@ -45,6 +52,8 @@ class PedagogicalPlanner:
         taught_before = {c for e in history if e.type == "lesson_completed" for c in e.concept_ids}
 
         selection = _Selection(self, strategy, model, gaps, graph, taught_before, available)
+        if focus is not None:
+            return self._focused(model, gaps, goal, graph, strategy, selection, available, focus)
         for gap in gaps.gaps:
             if len(selection.targets) >= cfg.planner.max_target_concepts:
                 break
@@ -69,8 +78,65 @@ class PedagogicalPlanner:
         return ConceptTreatment(concept_id=cid, name=gap.concept.name, role=role, mode=mode, band=gap.band,
                                 mastery=gap.mastery, prerequisites=prerequisites)
 
+    def _focused(self, model: LearnerModel, gaps: KnowledgeGapSet, goal: LearningGoal, graph: ConceptGraph,
+                 strategy: PedagogicalStrategy, sel: _Selection, available: int,
+                 focus: LessonFocus) -> PedagogicalPlan:
+        cid = focus.concept_id
+        if cid not in graph:
+            raise PlanningError(f"the focus concept {cid} is not in the knowledge base")
+        gap = gaps.gap(cid)
+        mastery = model.mastery_of(cid)
+        reviews = [p for p in (gap.unmet_prerequisites if gap else []) if not sel.chosen(p)]
+        in_plan = [p for p in graph.prerequisites(cid) if p in reviews]
+        if focus.action == "LEARN" and gap is not None:
+            target = self.treatment(gap, "target", sel.taught_before, in_plan)
+        else:
+            mode: TeachingMode = {"LEARN": "introduce", "PRACTICE": "reinforce"}.get(focus.action, "review")
+            target = ConceptTreatment(concept_id=cid, name=graph.concept(cid).name, role="target", mode=mode,
+                                      band=self.config.bands.band_for(mastery), mastery=mastery,
+                                      prerequisites=in_plan)
+        review_treatments = []
+        for p in reviews:
+            state = model.state(p)
+            pm = state.mastery if state else 0.0
+            review_treatments.append(ConceptTreatment(concept_id=p, name=graph.concept(p).name, role="prerequisite",
+                                                      mode="review", band=self.config.bands.band_for(pm), mastery=pm))
+        extra = self._focus_minutes(focus, target)
+        if not sel.admit(target, review_treatments, extra):
+            raise PlanningError(f"the focus objective does not fit the available {available} minutes")
+        for r in gaps.due_for_review[:self.config.planner.max_review_concepts]:
+            if r != cid:
+                sel.add_review(r)
+        return self._build(model, gaps, goal, graph, strategy, sel, available, focus)
+
+    def _focus_minutes(self, focus: LessonFocus, target: ConceptTreatment) -> int:
+        """Minutes the strategy's estimate leaves out: the extra activity, and the check of a target in review mode."""
+        m = self.config.planner.minutes
+        return ({"PRACTICE": m.practice, "EVALUATE": m.assessment}.get(focus.action, 0)
+                + (m.assessment if target.mode == "review" else 0))
+
+    def _focus_steps(self, focus: LessonFocus, objective: LearningObjective, treatment: ConceptTreatment,
+                     name: str) -> list[PlannedActivity]:
+        """The extra activity a PRACTICE or EVALUATE action asks for (none for LEARN and REVIEW)."""
+        m = self.config.planner.minutes
+        cid = focus.concept_id
+        if focus.action == "PRACTICE":
+            return [PlannedActivity("practice", LearningActivity(
+                activity_id=f"act_{cid}_apply", type="free_response", concept_ids=[cid], difficulty=treatment.band,
+                estimated_minutes=m.practice, instructions=f"Apply {name} in a new, realistic context.",
+                expected_response="an original answer that applies the concept",
+                assessment_target=objective.objective_id))]
+        if focus.action == "EVALUATE":
+            return [PlannedActivity("assessment", LearningActivity(
+                activity_id=f"act_{cid}_transfer", type="free_response", concept_ids=[cid], difficulty=treatment.band,
+                estimated_minutes=m.assessment, instructions=f"Check transfer: use {name} without support.",
+                expected_response="an original answer that applies the concept",
+                assessment_target=objective.objective_id))]
+        return []
+
     def _build(self, model: LearnerModel, gaps: KnowledgeGapSet, goal: LearningGoal, graph: ConceptGraph,
-               strategy: PedagogicalStrategy, sel: _Selection, available: int) -> PedagogicalPlan:
+               strategy: PedagogicalStrategy, sel: _Selection, available: int,
+               focus: LessonFocus | None = None) -> PedagogicalPlan:
         cfg = self.config
         prerequisites = graph.order(sel.prerequisites)
         targets = graph.order(sel.targets)
@@ -82,6 +148,9 @@ class PedagogicalPlanner:
             concept = graph.concept(t.concept_id)
             objectives[t.concept_id] = strategy.objective(concept, t, cfg)
             steps += strategy.activities(concept, t, objectives[t.concept_id], cfg)
+        if focus is not None:
+            steps += self._focus_steps(focus, objectives[focus.concept_id], sel.treatments[focus.concept_id],
+                                       graph.concept(focus.concept_id).name)
         for cid in targets:
             steps.append(strategy.assessment(objectives[cid], sel.treatments[cid].band, cfg))
         phase_rank = {"prerequisite_review": 0, "instruction": 1, "practice": 1, "spaced_review": 2, "assessment": 3}
@@ -94,13 +163,14 @@ class PedagogicalPlanner:
             strategy_id=strategy.strategy_id, target_concepts=targets, prerequisite_concepts=prerequisites,
             review_concepts=reviews, treatments=treatments, lesson_objectives=list(objectives.values()),
             activities=activities, sequencing=sequencing, estimated_duration=sum(s.minutes for s in sequencing),
-            available_minutes=available, rationale=self._rationale(gaps, sel, graph),
+            available_minutes=available, rationale=self._rationale(gaps, sel, graph, focus), focus=focus,
             learner_id=model.learner_id, goal_id=goal.goal_id, gap_set_id=gaps.gap_set_id,
             config_fingerprint=cfg.fingerprint())
         return plan.model_copy(update={"plan_id": f"pp_{plan.brief().structural_hash()[:16]}"})
 
     @staticmethod
-    def _rationale(gaps: KnowledgeGapSet, sel: _Selection, graph: ConceptGraph) -> str:
+    def _rationale(gaps: KnowledgeGapSet, sel: _Selection, graph: ConceptGraph,
+                   focus: LessonFocus | None = None) -> str:
         def name(cid: str) -> str:
             return graph.concept(cid).name
         parts = []
@@ -108,6 +178,8 @@ class PedagogicalPlanner:
             t = sel.treatments[cid]
             parts.append(f"{t.mode} {name(cid)} ({t.band}, mastery {t.mastery:.2f})")
         text = "Targets: " + "; ".join(parts) + "."
+        if focus is not None:
+            text = f"Curriculum action {focus.action} for the objective: {focus.description}. " + text
         if sel.prerequisites:
             text += " Prerequisite review first: " + ", ".join(name(c) for c in graph.order(sel.prerequisites)) + "."
         if sel.deferred:
@@ -184,7 +256,11 @@ class _Selection:
             pre_gap = self.gaps.gap(p)
             assert pre_gap is not None
             review_treatments.append(self.planner.treatment(pre_gap, "prerequisite", self.taught_before, []))
-        cost = self.strategy.minutes(target, self.config) + sum(
+        return self.admit(target, review_treatments)
+
+    def admit(self, target: ConceptTreatment, review_treatments: list[ConceptTreatment], extra: int = 0) -> bool:
+        """Add a target with the prerequisites it reviews if they fit the time left (plus `extra` minutes)."""
+        cost = extra + self.strategy.minutes(target, self.config) + sum(
             self.strategy.minutes(t, self.config) for t in review_treatments)
         if self.used + cost > self.available:
             return False
@@ -192,8 +268,8 @@ class _Selection:
         for t in review_treatments:
             self.treatments[t.concept_id] = t
             self.prerequisites.append(t.concept_id)
-        self.treatments[cid] = target
-        self.targets.append(cid)
+        self.treatments[target.concept_id] = target
+        self.targets.append(target.concept_id)
         return True
 
     def add_review(self, cid: str) -> None:

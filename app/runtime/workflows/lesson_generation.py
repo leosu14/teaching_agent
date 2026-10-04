@@ -85,6 +85,7 @@ from app.schemas.pedagogy import (
     GapAnalysisRequest,
     KnowledgeGapSet,
     LearnerModel,
+    LessonFocus,
     PedagogicalPlan,
     PlanningRequest,
     learner_context,
@@ -110,6 +111,8 @@ from app.schemas.workflow import NodeStatus, ReviewOutcome, RevisionPolicy, Revi
 
 WORKFLOW_ID = "lesson_generation"
 GOAL_KEY = "learning_goal_id"  # Task.metadata key naming the goal to plan against (default: resolved per topic)
+# Task.metadata key carrying a LessonFocus: the lesson serves one curriculum objective and next learning action.
+FOCUS_KEY = "lesson_focus"
 # Provider capabilities the lesson's agents and tools call (what a production run must configure).
 # Video generation is only called for a lesson that asks for generated segments (see required_capabilities).
 PROVIDER_CAPABILITIES = frozenset({Capability.LLM, Capability.SEARCH, Capability.IMAGE, Capability.IMAGE_SEARCH,
@@ -164,6 +167,11 @@ def _topic_concept_ids(v: StateView) -> list[str]:
 
 def _goal(v: StateView) -> LearningGoal:
     return v.output("load_goal", LearningGoal)
+
+
+def _focus(v: StateView) -> LessonFocus | None:
+    raw = v.task.metadata.get(FOCUS_KEY)
+    return LessonFocus.model_validate(raw) if raw else None
 
 
 def _model(v: StateView) -> LearnerModel:
@@ -569,7 +577,7 @@ def build_lesson_workflow(request: LessonRequest, options: LessonWorkflowOptions
                  depends_on=("knowledge_gaps",),
                  build_input=lambda v: PlanningRequest(
                      model=_model(v), gaps=v.output("knowledge_gaps", KnowledgeGapSet), goal=_goal(v),
-                     concepts=_concepts(v).concepts, available_minutes=options.lesson_minutes)),
+                     concepts=_concepts(v).concepts, available_minutes=options.lesson_minutes, focus=_focus(v))),
         ToolNode(id="store_pedagogy", tool="artifact.store", permissions=frozenset({"artifact:write"}),
                  depends_on=("pedagogical_plan",), build_input=_pedagogy_batch),
         AgentNode(id="research", agent="research", depends_on=("store_pedagogy",),
@@ -707,11 +715,22 @@ def _pedagogy_batch(v: StateView) -> ArtifactBatch:
                       metadata={"gap_set_id": gaps.gap_set_id, "goal_id": gaps.goal_id,
                                 "gaps": [g.concept.concept_id for g in gaps.gaps]}),
         ArtifactDraft(key="pedagogical_plan", name="pedagogical_plan", type=ArtifactType.PEDAGOGICAL_PLAN,
-                      media_type="application/json", content=_json(plan), parent_keys=["knowledge_gaps"],
+                      media_type="application/json", content=_json(plan),
+                      parent_keys=["knowledge_gaps", *(["learning_action"] if plan.focus else [])],
                       metadata={"plan_id": plan.plan_id, "targets": plan.target_concepts,
                                 "prerequisites": plan.prerequisite_concepts, "reviews": plan.review_concepts,
                                 "minutes": plan.estimated_duration, "strategy": plan.strategy_id}),
     ]
+    if plan.focus is not None:
+        # The curriculum action the lesson serves, derived from the LEARNING_OBJECTIVE artifact it was chosen from.
+        focus = plan.focus
+        drafts.insert(-1, ArtifactDraft(
+            key="learning_action", name="learning_action", type=ArtifactType.LEARNING_ACTION,
+            media_type="application/json", content=_json(focus),
+            parent_ids=[focus.objective_artifact_id] if focus.objective_artifact_id else [],
+            metadata={"action": focus.action, "action_id": focus.action_id, "goal_id": focus.goal_id,
+                      "objective_id": focus.objective_id, "concept_id": focus.concept_id,
+                      "curriculum_version": focus.curriculum_version}))
     return ArtifactBatch(drafts=drafts)
 
 
@@ -819,6 +838,8 @@ def _package(v: StateView) -> ArtifactBatch:
     research_artifact = _research_artifact_id(v)
     visuals = _visuals(v)
     image_ids = [a.artifact_id for a in visuals.assets] if visuals else []
+    focus = _pedagogical_plan(v).focus
+    objective_ids = [focus.objective_artifact_id] if focus is not None and focus.objective_artifact_id else []
     return ArtifactBatch(drafts=[
         ArtifactDraft(key="lesson_plan", name="lesson_plan", type=ArtifactType.LESSON_PLAN,
                       media_type="application/json", content=_json(v.output("plan", LessonPlan)),
@@ -826,7 +847,8 @@ def _package(v: StateView) -> ArtifactBatch:
                       metadata={"objectives": len(v.output("plan", LessonPlan).objectives),
                                 "pedagogical_plan_id": _pedagogical_plan(v).plan_id}),
         ArtifactDraft(key="lesson", name="lesson", type=ArtifactType.LESSON, media_type="application/json",
-                      content=_json(lesson), parent_keys=["lesson_plan"], parent_ids=[research_artifact, *image_ids],
+                      content=_json(lesson), parent_keys=["lesson_plan"],
+                      parent_ids=[research_artifact, *image_ids, *objective_ids],
                       metadata={"title": lesson.title, "level": lesson.level, "sections": len(lesson.sections),
                                 "objectives": [o.objective_id for o in lesson.objectives],
                                 "section_purposes": {s.section_id: s.purpose for s in lesson.sections},

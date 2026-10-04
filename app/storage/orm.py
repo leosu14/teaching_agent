@@ -81,3 +81,32 @@ class LearningGoalRow(Base):
     domain: Mapped[str] = mapped_column(String(128), index=True)
     status: Mapped[str] = mapped_column(String(32))
     body: Mapped[str] = mapped_column(Text)
+
+
+class CurriculumRow(Base):
+    """The current-version pointer of a goal's curriculum."""
+
+    __tablename__ = "curricula"
+    curriculum_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    learner_id: Mapped[str] = mapped_column(String(128), index=True)
+    goal_id: Mapped[str] = mapped_column(String(64), index=True)
+    body: Mapped[str] = mapped_column(Text)
+
+
+class CurriculumVersionRow(Base):
+    """Append-only: one immutable curriculum version per row."""
+
+    __tablename__ = "curriculum_versions"
+    version_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    curriculum_id: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    body: Mapped[str] = mapped_column(Text)
+
+
+class CurriculumProgressRow(Base):
+    """The last progress snapshot of a curriculum (to report objective transitions once)."""
+
+    __tablename__ = "curriculum_progress"
+    curriculum_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    body: Mapped[str] = mapped_column(Text)

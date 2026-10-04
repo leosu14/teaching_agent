@@ -6,11 +6,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.schemas.artifact import Artifact
+from app.schemas.curriculum import CurriculumProgress, CurriculumRecord, CurriculumVersion, VersionConflict
 from app.schemas.events import Event
 from app.schemas.learner import EvidenceConflict, LearnerProfile, LearningEvent, LearningEvidence, LearningGoal
 from app.schemas.task import Task
 from app.storage.orm import (
     ArtifactRow,
+    CurriculumProgressRow,
+    CurriculumRow,
+    CurriculumVersionRow,
     EventRow,
     LearnerRow,
     LearningEventRow,
@@ -171,7 +175,7 @@ class SqlGoalRepository:
     def save(self, goal: LearningGoal) -> None:
         with self._sessions.begin() as s:
             s.merge(LearningGoalRow(goal_id=goal.goal_id, learner_id=goal.learner_id, domain=goal.domain,
-                                    status=goal.status, body=goal.model_dump_json()))
+                                    status=goal.status.value, body=goal.model_dump_json()))
 
     def get(self, goal_id: str) -> LearningGoal | None:
         with self._sessions() as s:
@@ -183,3 +187,59 @@ class SqlGoalRepository:
             rows = s.scalars(select(LearningGoalRow).where(LearningGoalRow.learner_id == learner_id)
                              .order_by(LearningGoalRow.goal_id))
             return [LearningGoal.model_validate_json(r.body) for r in rows]
+
+
+class SqlCurriculumRepository:
+    """Curricula: current pointers, append-only immutable versions and the last progress snapshot."""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def save_record(self, record: CurriculumRecord) -> None:
+        with self._sessions.begin() as s:
+            s.merge(CurriculumRow(curriculum_id=record.curriculum_id, learner_id=record.learner_id,
+                                  goal_id=record.goal_id, body=record.model_dump_json()))
+
+    def record(self, curriculum_id: str) -> CurriculumRecord | None:
+        with self._sessions() as s:
+            row = s.get(CurriculumRow, curriculum_id)
+            return CurriculumRecord.model_validate_json(row.body) if row else None
+
+    def records_for_learner(self, learner_id: str) -> list[CurriculumRecord]:
+        with self._sessions() as s:
+            rows = s.scalars(select(CurriculumRow).where(CurriculumRow.learner_id == learner_id)
+                             .order_by(CurriculumRow.curriculum_id))
+            return [CurriculumRecord.model_validate_json(r.body) for r in rows]
+
+    def add_version(self, version: CurriculumVersion) -> bool:
+        with self._sessions.begin() as s:
+            row = s.get(CurriculumVersionRow, version.version_id)
+            if row is not None:
+                existing = CurriculumVersion.model_validate_json(row.body)
+                if existing.model_dump(exclude={"created_at"}) != version.model_dump(exclude={"created_at"}):
+                    raise VersionConflict(f"curriculum version {version.version_id} exists with different content")
+                return False
+            s.add(CurriculumVersionRow(version_id=version.version_id, curriculum_id=version.curriculum_id,
+                                       version=version.version, content_hash=version.content_hash,
+                                       body=version.model_dump_json()))
+            return True
+
+    def version(self, version_id: str) -> CurriculumVersion | None:
+        with self._sessions() as s:
+            row = s.get(CurriculumVersionRow, version_id)
+            return CurriculumVersion.model_validate_json(row.body) if row else None
+
+    def versions(self, curriculum_id: str) -> list[CurriculumVersion]:
+        with self._sessions() as s:
+            rows = s.scalars(select(CurriculumVersionRow).where(CurriculumVersionRow.curriculum_id == curriculum_id)
+                             .order_by(CurriculumVersionRow.version))
+            return [CurriculumVersion.model_validate_json(r.body) for r in rows]
+
+    def save_progress(self, progress: CurriculumProgress) -> None:
+        with self._sessions.begin() as s:
+            s.merge(CurriculumProgressRow(curriculum_id=progress.curriculum_id, body=progress.model_dump_json()))
+
+    def progress(self, curriculum_id: str) -> CurriculumProgress | None:
+        with self._sessions() as s:
+            row = s.get(CurriculumProgressRow, curriculum_id)
+            return CurriculumProgress.model_validate_json(row.body) if row else None

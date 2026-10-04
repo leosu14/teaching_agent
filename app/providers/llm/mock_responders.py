@@ -15,6 +15,7 @@ from collections import defaultdict
 from app.providers.llm.base import LLMRequest
 from app.providers.llm.mock import Responder
 from app.schemas.audio import AudioPlanningInput, AudioPlanProposal, NarrationProposal, concise
+from app.schemas.curriculum import CurriculumBrief, CurriculumProposal, ProposedObjective
 from app.schemas.evaluation import (
     AssessmentPlan,
     AssessmentQuestion,
@@ -405,6 +406,29 @@ def plan(request: LLMRequest) -> dict:
     return lesson_plan.model_dump(mode="json")
 
 
+# --- learning path planner -------------------------------------------------------------------
+
+
+def plan_learning_path(request: LLMRequest) -> dict:
+    """Words the deterministic curriculum draft: one objective per concept in the brief, in the brief's order."""
+    b = CurriculumBrief.model_validate(request.input_payload)
+    wording = {
+        "mastered": "Keep {name} secure: recall and use it accurately in review",
+        "developing": "Use {name} accurately and independently",
+        "new": "Learn {name} and use it accurately with growing independence",
+    }
+    objectives = [ProposedObjective(concept_id=c.concept_id, description=wording[c.state].format(name=c.name),
+                                    rationale=("A goal concept." if c.role == "target" else
+                                               "A prerequisite the goal relies on."))
+                  for c in b.concepts]
+    first = [c.name for c in b.concepts if c.role == "prerequisite" and c.state != "mastered"]
+    explanation = (f"The path toward {b.goal_title!r} builds every concept on its prerequisites. "
+                   + (f"It starts with {', '.join(first)}, which later concepts rely on. " if first else "")
+                   + "Mastered concepts come back for review so they stay secure.")
+    return CurriculumProposal(objectives=objectives, suggested_order=[c.concept_id for c in b.concepts],
+                              explanation=explanation).model_dump(mode="json")
+
+
 # --- teacher -------------------------------------------------------------------------------
 
 
@@ -789,6 +813,7 @@ def default_responders(*, first_draft_defects: bool = True) -> dict[str, Respond
         "knowledge_diagnostic": diagnose,
         "research": research,
         "curriculum_planner": plan,
+        "learning_path_planner": plan_learning_path,
         "teacher": make_teacher(first_draft_defects),
         "content_reviewer": review,
         "slide_planner": plan_slides,

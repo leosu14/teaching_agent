@@ -130,3 +130,15 @@ def test_provider_demo_script_runs_offline_with_mocks() -> None:
                      "mock provider demo: OK (offline, no network, no credentials)"):
         assert expected in out, expected
     assert "sk-" not in out
+
+
+def test_curriculum_demo_script_runs_to_completion(tmp_path) -> None:
+    proc = subprocess.run([sys.executable, "scripts/run_curriculum_demo.py", "--data-dir", str(tmp_path)],
+                          cwd=REPO_ROOT, capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    for expected in ("Step 1: create the learner", "Step 7: next learning action", "action: LEARN  objective: es.preterite",
+                     "Step 12: the next action changes", "Goal change: B1 -> B2", "warning deadline_infeasible",
+                     "action: COMPLETE", "goal status: COMPLETED", "all checks passed"):
+        assert expected in out, expected
+    assert "[FAIL]" not in out

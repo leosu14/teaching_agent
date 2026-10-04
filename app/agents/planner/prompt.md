@@ -11,5 +11,7 @@ decisions; turn them into a lesson plan:
 - Give every taught concept a practice exercise, drawn from the research key findings.
 - Make `estimated_minutes` equal the sum of the sequence steps and keep it within the available time.
 - Add remediation for weak concepts and one extension activity.
+- When the plan has a `focus` (a curriculum objective and the action chosen for it), plan the lesson around that
+  objective and action; the focus never changes the plan's decisions.
 
 Output JSON only.

@@ -1,0 +1,38 @@
+{
+  "_comment": "A Spanish learner preparing for B1, who also studies mathematics. Each placed concept has practice results (none for the preterite, so the lesson's diagnostic probes it) and then a manual placement (the last word, so mastery equals the placement score). Timestamps are days before the demo runs.",
+  "learner_id": "curriculum-learner",
+  "profile": {
+    "display_name": "Curriculum demo learner",
+    "subjects": [
+      {"subject": "spanish", "framework_id": "cefr", "target_level": "B1", "estimated_level": "A2",
+       "objectives": ["Reach B1 Spanish"]},
+      {"subject": "mathematics", "framework_id": "mastery", "target_level": "intermediate",
+       "estimated_level": "beginner", "objectives": ["Pass the algebra exam"]}
+    ],
+    "preferences": {"language_of_instruction": "en", "session_minutes": 30, "explanation_style": "examples-first"}
+  },
+  "placement": [
+    {"concept_id": "es.present", "domain": "spanish", "days_ago": 2, "practice": [["correct", 0.4], ["correct", 0.5]], "placement": 0.90},
+    {"concept_id": "es.preterite", "domain": "spanish", "days_ago": 2, "practice": [], "placement": 0.35},
+    {"concept_id": "es.past_contrast", "domain": "spanish", "days_ago": 2, "practice": [["incorrect", 0.5], ["incorrect", 0.6]], "placement": 0.10},
+    {"concept_id": "es.subjunctive", "domain": "spanish", "days_ago": 2, "practice": [["incorrect", 0.4], ["incorrect", 0.6]], "placement": 0.20},
+    {"concept_id": "math.linear", "domain": "mathematics", "days_ago": 2, "practice": [["correct", 0.4], ["correct", 0.5]], "placement": 0.85}
+  ],
+  "goal": {
+    "title": "Reach B1 Spanish",
+    "description": "Hold conversations about the past and give opinions at B1.",
+    "domain": "spanish",
+    "target_level": "B1",
+    "priority": 1,
+    "idempotency_key": "reach-b1-spanish"
+  },
+  "second_goal": {
+    "title": "Pass the algebra exam",
+    "description": "Solve systems of equations and quadratics.",
+    "domain": "mathematics",
+    "target_concepts": ["math.systems", "math.quadratic"],
+    "target_date_days": 10,
+    "priority": 2,
+    "idempotency_key": "algebra-exam"
+  }
+}

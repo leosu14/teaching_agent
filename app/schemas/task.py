@@ -9,6 +9,7 @@ from pydantic import Field
 
 from app.schemas.artifact import ArtifactType
 from app.schemas.common import CostSummary, Schema, utcnow
+from app.schemas.curriculum import CurriculumPlan, NextLearningAction
 from app.schemas.evaluation import LearningRecommendation
 from app.schemas.learner import MasteryChange
 from app.schemas.lesson import LessonRequest
@@ -83,6 +84,8 @@ class TaskResult(Schema):
     next_recommendation: NextLearningRecommendation | None = None
     feedback: EvaluationFeedback | None = None
     warnings: list[str] = Field(default_factory=list)
+    curriculum: CurriculumPlan | None = None  # a curriculum planning task: the validated (and stored) curriculum
+    learning_action: NextLearningAction | None = None  # the next action after an evaluation, for curriculum learners
 
 
 class TaskControl(Schema):

@@ -56,12 +56,12 @@ class PlanningTool(Tool[PlanningRequest, PedagogicalPlan]):
     async def run(self, data: PlanningRequest, scope: ExecutionScope) -> PedagogicalPlan:
         try:
             plan = self._planner.plan(data.model, data.gaps, data.goal, ConceptGraph(data.concepts),
-                                      data.available_minutes, data.lesson_history)
+                                      data.available_minutes, data.lesson_history, focus=data.focus)
         except PlanningError as exc:
             raise ToolError(str(exc)) from exc
         scope.emit(EventType.PEDAGOGICAL_PLAN_CREATED, plan_id=plan.plan_id, targets=plan.target_concepts,
                    prerequisites=plan.prerequisite_concepts, reviews=plan.review_concepts,
-                   minutes=plan.estimated_duration)
+                   minutes=plan.estimated_duration, **({"focus": plan.focus.action} if plan.focus else {}))
         return plan
 
 

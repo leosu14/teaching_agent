@@ -157,6 +157,9 @@ def print_plan(plan: ProductionPlan, *, mock: bool) -> None:
               f"{'required segment fails the task' if g.required and g.failure_policy == 'fail' else 'segment continues'}"
               f" with {g.fallback}")
     print(f"\nKnowledge base: {plan.knowledge_concepts} concepts for {plan.lesson_request.subject}/{plan.task.topic}")
+    print(f"Learning loop: {' -> '.join(plan.learning_loop)}")
+    print(f"Curriculum stage ({len(plan.curriculum_stages)} workflow nodes, for a learner with a goal): "
+          f"{' -> '.join(plan.curriculum_stages)}")
     print(f"Stages ({len(plan.stages)} workflow nodes): {' -> '.join(plan.stages)}")
     for w in plan.warnings:
         print(f"WARNING: {w}")

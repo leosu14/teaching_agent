@@ -35,6 +35,8 @@ from app.providers.core.registry import ProviderRegistry
 from app.providers.core.selector import ProviderSelector
 from app.providers.llm.router import ModelRouter
 from app.runtime.orchestrator.planner import WorkflowPlanner
+from app.runtime.workflows.curriculum_planning import CAPABILITY as CURRICULUM_CAPABILITY
+from app.runtime.workflows.curriculum_planning import WORKFLOW_ID as CURRICULUM_WORKFLOW
 from app.runtime.workflows.lesson_evaluation import LESSON_TASK
 from app.runtime.workflows.lesson_generation import GENERATED_VIDEO_CAPABILITY
 from app.runtime.workflows.lesson_generation import WORKFLOW_ID as LESSON_WORKFLOW
@@ -88,6 +90,11 @@ WORKFLOW_SETTINGS = {
 }
 
 DiagnosticAnswerer = Callable[[DiagnosticQuestionSheet], Awaitable[DiagnosticAnswers]]
+
+
+# The long-term learning loop a production lesson is part of (goals are optional: without one, a lesson is planned
+# from the adaptive gaps alone).
+LEARNING_LOOP = ("Goal", "Curriculum", "Next Action", "Lesson", "Evaluation", "Mastery Update")
 
 
 @dataclass
@@ -242,7 +249,13 @@ class ProductionService:
             required_capabilities=sorted(c.value for c in required), budget=budget,
             estimated_llm_cost_usd=self._estimate(), knowledge_concepts=concepts,
             video_generation=video_generation, run_key=self.run_key(request, task.learner_id),
+            learning_loop=list(LEARNING_LOOP), curriculum_stages=self._curriculum_stages(request),
         )
+
+    def _curriculum_stages(self, request: LessonRequest) -> list[str]:
+        """The curriculum-planning workflow's nodes for the request's subject (built, never run)."""
+        template = self._planner.template(CURRICULUM_WORKFLOW)
+        return list(template.build(request.model_copy(update={"capabilities": [CURRICULUM_CAPABILITY]})).all_nodes)
 
     async def _concepts(self, request: LessonRequest) -> int:
         """How many concepts the (local) knowledge base holds for the request: a local lookup, no provider."""
