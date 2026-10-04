@@ -160,6 +160,14 @@ def print_plan(plan: ProductionPlan, *, mock: bool) -> None:
     print(f"Learning loop: {' -> '.join(plan.learning_loop)}")
     print(f"Curriculum stage ({len(plan.curriculum_stages)} workflow nodes, for a learner with a goal): "
           f"{' -> '.join(plan.curriculum_stages)}")
+    t = plan.interactive_teaching
+    if t is not None:
+        print(f"Interactive teaching ({'available' if t.available else 'NOT available'}, opt-in per lesson, "
+              f"not run by a dry run): {' -> '.join(t.loop)}")
+        print(f"  teacher agent {t.agent_id} on {t.llm_route}; difficulty {t.policy['min_difficulty']}-"
+              f"{t.policy['max_difficulty']}, harder after {t.policy['increase_after_successes']} correct, easier "
+              f"after {t.policy['decrease_after_failures']} incorrect, hints up to level {t.policy['max_hint_level']}")
+        print(f"  endpoints: {', '.join(t.endpoints)}")
     print(f"Stages ({len(plan.stages)} workflow nodes): {' -> '.join(plan.stages)}")
     for w in plan.warnings:
         print(f"WARNING: {w}")

@@ -19,6 +19,7 @@ from app.schemas.pedagogy import (
     PedagogyConfig,
     PlannerConfig,
 )
+from app.schemas.teaching import TeachingConfig
 from app.schemas.video import VideoConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -108,6 +109,19 @@ class Settings(BaseSettings):
     generated_video_poll_timeout_seconds: float | None = Field(default=None, gt=0, le=86400)
     generated_video_poll_max_attempts: int | None = Field(default=None, ge=1, le=10000)
 
+    # Interactive teaching sessions (opt-in, per lesson): the deterministic policy's thresholds. Unset values keep
+    # TeachingConfig's defaults; a session keeps the configuration it started with.
+    teaching_start_difficulty: int | None = Field(default=None, ge=1, le=10)
+    teaching_max_difficulty: int | None = Field(default=None, ge=1, le=10)
+    teaching_increase_after: int | None = Field(default=None, ge=1, le=20)  # consecutive correct -> harder
+    teaching_decrease_after: int | None = Field(default=None, ge=1, le=20)  # consecutive incorrect -> easier
+    teaching_max_hint_level: int | None = Field(default=None, ge=0, le=3)
+    teaching_reveal_answer_in_hints: bool | None = None
+    teaching_demonstration_correct: int | None = Field(default=None, ge=1, le=50)
+    teaching_max_incorrect: int | None = Field(default=None, ge=1, le=50)
+    teaching_max_questions: int | None = Field(default=None, ge=1, le=100)
+    teaching_max_turns: int | None = Field(default=None, ge=4, le=400)
+
     log_level: str = "INFO"
     log_json: bool = True
 
@@ -146,6 +160,21 @@ class Settings(BaseSettings):
             repeated_failure_streak=pedagogy.repeated_failure_streak,
             evidence_required=self.curriculum_evidence_required, completion_rule=self.curriculum_completion_rule,
             feasibility=FeasibilityConfig(sessions_per_week=self.curriculum_sessions_per_week))
+
+    def teaching_config(self) -> TeachingConfig:
+        """TeachingConfig with the configured overrides; everything unset keeps its single default."""
+        fields = {"start_difficulty": self.teaching_start_difficulty, "max_difficulty": self.teaching_max_difficulty,
+                  "increase_after_successes": self.teaching_increase_after,
+                  "decrease_after_failures": self.teaching_decrease_after,
+                  "max_hint_level": self.teaching_max_hint_level,
+                  "reveal_answer_in_hints": self.teaching_reveal_answer_in_hints,
+                  "demonstration_correct": self.teaching_demonstration_correct,
+                  "max_incorrect": self.teaching_max_incorrect, "max_questions": self.teaching_max_questions,
+                  "max_turns": self.teaching_max_turns}
+        try:
+            return TeachingConfig(**{k: v for k, v in fields.items() if v is not None})
+        except ValueError as exc:
+            raise ConfigError(f"invalid teaching configuration: {exc}") from exc
 
     def video_config(self) -> VideoConfig:
         """VideoConfig with the configured overrides; everything unset keeps its single default in VideoConfig."""

@@ -20,11 +20,13 @@ ALLOWED: dict[str, set[str]] = {
     # The curriculum engine reads the learner model and the concept graph; never providers, tools or storage.
     "curriculum": FOUNDATION | {"curriculum", "pedagogy", "learner"},
     "artifacts": FOUNDATION | {"artifacts"},
+    # The interactive-teaching engine is pure: session state, policy, grading and transitions over schemas only.
+    "teaching": FOUNDATION | {"teaching"},
     "tools": FOUNDATION | {"tools", "providers", "learner", "pedagogy", "curriculum", "artifacts"},
     "agents": FOUNDATION | {"agents", "tools", "providers"},
     "runtime": FOUNDATION | {"runtime", "agents", "tools", "providers"},
     "services": FOUNDATION | {"services", "runtime", "agents", "tools", "providers", "learner", "pedagogy",
-                              "curriculum", "artifacts", "storage"},
+                              "curriculum", "artifacts", "storage", "teaching"},
     "api": FOUNDATION | {"api", "services"},
 }
 # Finer rules on top of the layer order.

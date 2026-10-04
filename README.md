@@ -39,6 +39,13 @@ validated, versioned curriculum of objectives over the knowledge base's prerequi
 around that objective; evaluations update the curriculum's progress and complete the goal by rule. See
 [architecture](docs/architecture.md#goals-and-curricula).
 
+**Interactive teaching sessions** (`app/teaching/`) turn a generated lesson into a persistent, resumable, multi-turn
+conversation: the teacher explains and asks, the learner answers or asks, and a deterministic policy grades the answer,
+adapts the difficulty, gives graded hints and decides when the session completes. Models only word the turns and
+answer learner questions from the lesson's grounded material. A completed session's answers reach mastery through
+learner memory's existing updater, and the curriculum selects the next action. See
+[architecture](docs/architecture.md#interactive-teaching-sessions).
+
 ## Run it
 
 ```bash
@@ -47,6 +54,7 @@ python scripts/run_demo.py          # one command that proves the slice works
 python scripts/run_evaluation_demo.py  # lesson, then its evaluation, mastery before/after, recommendation
 python scripts/run_adaptive_demo.py    # learner model -> gaps -> plan -> lesson -> evaluation -> new recommendation
 python scripts/run_curriculum_demo.py  # goal -> curriculum -> next action -> lesson -> evaluation -> progress -> done
+python scripts/run_interactive_demo.py # interactive session: adaptive turns, hints, grounded questions, restart, mastery
 python scripts/run_research_demo.py    # the lesson's research: queries, results, sources, evidence, citations
 python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, selection, generation, validation, assets
 python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validation, build, real .pptx with the images
@@ -75,6 +83,13 @@ runs the lesson for that objective and its evaluation, prints the mastery update
 new next action (now one of the blocked concepts), changes the goal to B2 (version 2, version 1 kept), adds a maths
 goal with an unreachable target date (a structured warning), selects across both goals, and completes the Spanish goal
 by its completion rule. It exits 1 unless every check passes.
+`run_interactive_demo.py` (`fixtures/interactive/`) takes the same learner with the preterite secured, generates the
+lesson for the next objective (the preterite/imperfect contrast) and runs an interactive session with a scripted
+learner: a missed medium question (difficulty 2 → 1, a hint, a misconception recorded), a correct answer after the
+hint, a correct easier one (1 → 2), a pause and a process restart, a grounded learner question and an off-topic one
+(a structured limitation), and a final correct check that completes the session. It prints the summary, the mastery
+update, objective progress, the next action, the artifact lineage and the session's events, and exits 1 unless every
+check passes.
 `run_research_demo.py` runs the lesson and shows its research: the request, generated queries, mock search
 results (with duplicates), selected and rejected sources, extracted evidence, citations, the stored
 ResearchBundle, and how each lesson section's citations resolve to evidence and sources.
@@ -134,6 +149,10 @@ graph, per-request traceability, usage and cost. `--mock` rehearses the same pat
 | GET/PATCH | `/goals/{id}` | A goal / change it (a changed definition or target date replans its curriculum) |
 | POST/GET | `/goals/{id}/curriculum` | Build (or rebuild) the goal's curriculum / the current version with its progress |
 | GET | `/goals/{id}/curriculum/versions` | Every version of the curriculum, oldest first |
+| POST | `/lessons/{lesson_id}/teaching-session` | Start an interactive session on a lesson (the LESSON artifact or the completed lesson task; idempotent per `idempotency_key`) |
+| GET | `/teaching-sessions/{id}` | Session state, turns, objective progress, next action; summary and outcome once completed |
+| POST | `/teaching-sessions/{id}/answers` | The learner's answer, question or stop (`{"answer", "client_turn_id", "kind"}`); idempotent per `client_turn_id` |
+| POST | `/teaching-sessions/{id}/pause` · `/resume` · `/cancel` | Session control (cancel is idempotent and keeps the history) |
 | GET | `/learners/{id}/next-action` | The next learning action across the learner's goals (`?as_of=` for a given time) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 

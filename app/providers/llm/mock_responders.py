@@ -73,6 +73,16 @@ from app.schemas.lesson import (
     Verdict,
     VisualPlanningInput,
 )
+from app.schemas.teaching import (
+    GroundedAnswer,
+    MisconceptionCandidate,
+    PracticeItem,
+    SectionBrief,
+    TeacherTurnOutput,
+    TeachingAction,
+    TeachingQuestion,
+    TeachingTurnInput,
+)
 from app.schemas.visual import VisualPlanProposal
 
 LEVEL_RE = re.compile(r"\b(A1|A2|B1|B2|C1|C2)\b", re.IGNORECASE)
@@ -807,6 +817,123 @@ def _grade(p: EvaluationInput) -> EvaluationStep:
     return EvaluationStep(stage="evaluate", result=result)
 
 
+# --- interactive teaching ------------------------------------------------------------------------------------------
+
+CUE_RE = re.compile(r"\(([^()]+)\)\s*$")
+
+
+def teach(request: LLMRequest) -> dict:
+    p = TeachingTurnInput.model_validate(request.input_payload)
+    if p.stage == "answer":
+        return _grounded_answer(p).model_dump(mode="json")
+    return _teacher_turn(p).model_dump(mode="json")
+
+
+def _section(p: TeachingTurnInput) -> SectionBrief | None:
+    return next((s for s in p.sections if s.concept_id == p.objective.concept_id), p.sections[0] if p.sections else None)
+
+
+def _rule(p: TeachingTurnInput, answers: list[str]) -> str:
+    """The first sentence of the concept's explanation that does not give the answer away."""
+    section = _section(p)
+    for sentence in sentences(section.explanation if section else ""):
+        if not any(normalize(a) and f" {normalize(a)} " in f" {normalize(sentence)} " for a in answers):
+            return sentence
+    return f"Think about when {p.objective.concept_name.lower()} is used."
+
+
+def _question(p: TeachingTurnInput) -> TeachingQuestion:
+    items = list({normalize(i.prompt): i for i in p.practice}.values())
+    if not items:
+        section = _section(p)
+        examples = section.examples if section and section.examples else [p.objective.concept_name]
+        items = [PracticeItem(prompt=f"Give an example of {p.objective.concept_name.lower()}.", answer=examples[0])]
+    hardest = p.difficulty >= p.state.max_difficulty and p.state.min_difficulty < p.state.max_difficulty
+    order = list(reversed(items)) if hardest else items
+    item = order[p.state.questions_asked % len(order)]
+    if p.difficulty <= p.state.min_difficulty and p.state.min_difficulty < p.state.max_difficulty:
+        cue = CUE_RE.search(item.prompt)
+        distractors = [i.answer for i in items if normalize(i.answer) != normalize(item.answer)]
+        if cue and normalize(cue.group(1)) != normalize(item.answer):
+            distractors.insert(0, cue.group(1).strip())
+        choices = sorted({item.answer, *distractors[:2]})
+        if len(choices) >= 2:
+            return TeachingQuestion(kind="multiple_choice", prompt=f"Choose the right answer: {item.prompt}",
+                                    choices=choices, expected_answer=item.answer, accepted_answers=item.accepted)
+    prompt = f"{item.prompt} (no hints this time)" if hardest else item.prompt
+    return TeachingQuestion(kind="short_answer", prompt=prompt, expected_answer=item.answer,
+                            accepted_answers=item.accepted)
+
+
+def _hint(p: TeachingTurnInput) -> str:
+    assert p.question is not None
+    answer = p.question.expected_answer
+    answers = [answer, *p.question.accepted_answers]
+    if p.hint_level <= 1:
+        return f"Hint: {_rule(p, answers)}"
+    unit = "word(s)" if " " in answer.strip() else "letter(s)"
+    size = len(answer.split()) if unit == "word(s)" else len(answer)
+    if p.hint_level == 2 or len(answer) <= 2:
+        return f"Hint: the answer has {size} {unit}. {_rule(p, answers)}"
+    return f"Hint: the answer starts with '{answer[: max(1, len(answer) // 2)]}'."
+
+
+def _teacher_turn(p: TeachingTurnInput) -> TeacherTurnOutput:
+    concept = p.objective
+    section = _section(p)
+    cite = [section.ref] if section else []
+    examples = section.examples if section else []
+    base = {"action": p.action, "concept_id": concept.concept_id, "difficulty": p.difficulty,
+            "expected_response_type": "none"}
+    misconceptions = []
+    if p.answer_correct is False and p.learner_answer:
+        misconceptions = [MisconceptionCandidate(
+            concept_id=concept.concept_id, confidence=0.7,
+            misconception=f"uses a different form where {concept.concept_name.lower()} is required")]
+    if p.action == TeachingAction.EXPLAIN:
+        text = f"{concept.concept_name}. {section.explanation if section else concept.description}"
+        if examples:
+            text += f" For example: {examples[0]}"
+        return TeacherTurnOutput(**base, response=text, citations=cite)
+    if p.action == TeachingAction.RETEACH:
+        angle = (section.analogy if section and section.analogy else None) or concept.description
+        text = f"Let's look at {concept.concept_name.lower()} another way. {angle}"
+        if examples:
+            text += f" Look at this example again: {examples[-1]}"
+        return TeacherTurnOutput(**base, response=text, citations=cite, misconceptions=misconceptions)
+    if p.action in (TeachingAction.ASK, TeachingAction.PRACTICE, TeachingAction.CHECK):
+        q = _question(p)
+        number = p.state.questions_asked + 1
+        text = f"Question {number}: {q.prompt}"
+        if q.choices:
+            text += " Options: " + " / ".join(q.choices)
+        return TeacherTurnOutput(**{**base, "expected_response_type": "multiple_choice" if q.choices else "free_text"},
+                                 response=text, question=q)
+    if p.action == TeachingAction.HINT:
+        return TeacherTurnOutput(**base, response=_hint(p), hint_level=p.hint_level, misconceptions=misconceptions)
+    if p.action == TeachingAction.FEEDBACK:
+        assert p.question is not None
+        if p.correction:
+            answers = [p.question.expected_answer, *p.question.accepted_answers]
+            text = f"Not quite. The answer is '{p.question.expected_answer}'. {_rule(p, answers)}"
+            return TeacherTurnOutput(**base, response=text, misconceptions=misconceptions)
+        text = f"Correct: '{p.learner_answer}'."
+        if p.hint_level:
+            text += " Well done working it out from the hint."
+        return TeacherTurnOutput(**base, response=text)
+    s = p.state
+    return TeacherTurnOutput(**base, response=(
+        f"Summary: you practised {concept.concept_name.lower()}. You answered {s.correct_answers} question(s) "
+        f"correctly and {s.incorrect_answers} incorrectly, with {s.hints_used} hint(s)."))
+
+
+def _grounded_answer(p: TeachingTurnInput) -> GroundedAnswer:
+    source = p.sources[0]
+    first = sentences(source.text)
+    return GroundedAnswer(response=f"From {source.title}: {first[0] if first else source.text}",
+                          citations=[source.ref], grounded=True)
+
+
 def default_responders(*, first_draft_defects: bool = True) -> dict[str, Responder]:
     return {
         "request_interpreter": interpret,
@@ -820,4 +947,5 @@ def default_responders(*, first_draft_defects: bool = True) -> dict[str, Respond
         "audio_planner": plan_audio,
         "visual": visuals,
         "learner_evaluation": evaluate_learner,
+        "teaching_session": teach,
     }
