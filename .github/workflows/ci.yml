@@ -45,3 +45,5 @@ jobs:
         run: python scripts/run_generative_video_demo.py
       - name: Production dry run with generated video (offline, calls nothing)
         run: python scripts/run_production_demo.py --dry-run --generated-video
+      - name: Curriculum demo (goal -> curriculum -> next action -> lesson -> evaluation -> progress -> completion)
+        run: python scripts/run_curriculum_demo.py

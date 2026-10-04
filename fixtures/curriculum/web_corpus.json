@@ -1,0 +1,82 @@
+[
+ {
+  "url": "https://learning-reference.example.org/spanish/present",
+  "title": "Spanish present tense of regular verbs",
+  "snippet": "The present tense of regular Spanish verbs.",
+  "publisher": "Open Grammar Reference",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "Regular verbs in the present tense drop -ar, -er or -ir and add the person ending. Example: Yo hablo español y tú comes paella. Practice: Complete: Nosotros ___ en Sevilla. (vivir) Answer: vivimos."
+ },
+ {
+  "url": "https://learning-reference.example.org/spanish/preterite",
+  "title": "Spanish preterite for completed events",
+  "snippet": "Use the preterite for completed events.",
+  "publisher": "Open Grammar Reference",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "The preterite narrates completed events with a clear end point, such as ayer or anoche. Example: Ayer hablé con mi hermana. Practice: Complete: Anoche nosotros ___ en un restaurante. (cenar) Answer: cenamos.\n\nIrregular preterite forms like fui, hice and tuve are frequent for completed events. Example: El verano pasado fui a México."
+ },
+ {
+  "url": "https://learning-reference.example.org/spanish/past-contrast",
+  "title": "Preterite and imperfect contrast in a story",
+  "snippet": "Contrast the imperfect and the preterite.",
+  "publisher": "Open Grammar Reference",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "In a story the imperfect sets the scene and the preterite contrast tells the completed event that interrupts it. Example: Llovía cuando llegué a casa. Practice: Complete: Mientras yo leía, ___ el teléfono. (sonar) Answer: sonó."
+ },
+ {
+  "url": "https://learning-reference.example.org/spanish/subjunctive",
+  "title": "Present subjunctive after doubt",
+  "snippet": "The present subjunctive after doubt.",
+  "publisher": "Conversation Skills Hub",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "After expressions of doubt such as dudo que or no creo que, the verb takes the present subjunctive. Example: No creo que sea verdad. Practice: Complete: No pienso que ella ___ razón. (tener) Answer: tenga."
+ },
+ {
+  "url": "https://learning-reference.example.org/spanish/argument",
+  "title": "Argumentative writing in Spanish",
+  "snippet": "Connectors for argumentative writing.",
+  "publisher": "Writing Workshop",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "Argumentative writing states a claim, gives reasons with connectors and ends with a conclusion. Example: Por un lado es caro; sin embargo, es útil. Practice: Complete the connector: Por un lado es caro; por ___ lado es útil. Answer: otro."
+ },
+ {
+  "url": "https://learning-reference.example.org/math/linear",
+  "title": "Solving linear equations",
+  "snippet": "Inverse operations for linear equations.",
+  "publisher": "Open Math Notes",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "A linear equation is solved by applying inverse operations to both sides until x is alone. Example: 2x + 3 = 11, so 2x = 8 and x = 4. Practice: Solve for x: 3x - 2 = 10 Answer: 4."
+ },
+ {
+  "url": "https://learning-reference.example.org/math/systems",
+  "title": "Systems of linear equations",
+  "snippet": "Substitution and elimination for systems.",
+  "publisher": "Open Math Notes",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "A system of linear equations is solved by substitution or elimination of one variable. Example: x + y = 5 and x - y = 1 give x = 3. Practice: Solve the system x + y = 7 and x - y = 3. What is y? Answer: 2."
+ },
+ {
+  "url": "https://learning-reference.example.org/math/quadratic",
+  "title": "Quadratic equations by factoring",
+  "snippet": "Factoring quadratic equations.",
+  "publisher": "Open Math Notes",
+  "source_type": "reference",
+  "language": "en",
+  "published_at": "2024-03-01",
+  "content": "A quadratic equation is solved by factoring it into two linear factors and setting each to zero. Example: x^2 - 5x + 6 = (x - 2)(x - 3), so x = 2 or x = 3. Practice: Solve the quadratic x^2 = 49 and give the positive root. Answer: 7."
+ }
+]

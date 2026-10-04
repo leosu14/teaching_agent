@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
+from enum import Enum
 from typing import Literal
 
-from pydantic import AliasChoices, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.common import Schema, utcnow
 
@@ -275,27 +276,60 @@ class LearningEvent(Schema):
                    subject=subject, task_id=task_id, concept_ids=concept_ids or [], data=data or {})
 
 
-GoalStatus = Literal["active", "achieved", "paused", "abandoned"]
+class GoalStatus(str, Enum):
+    """ACTIVE goals are planned and taught; PAUSED ones keep their curriculum but get no next action; COMPLETED is
+    set only by the deterministic completion rule (app/curriculum/progress.py); CANCELLED goals are kept as history."""
+
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+# Statuses stored before goals had a lifecycle of their own.
+_LEGACY_GOAL_STATUS = {"active": "ACTIVE", "paused": "PAUSED", "achieved": "COMPLETED", "abandoned": "CANCELLED",
+                       "completed": "COMPLETED", "cancelled": "CANCELLED"}
+GoalTargetSource = Literal["explicit", "level"]
 
 
 class LearningGoal(Schema):
-    """What the learner is working towards: lessons are planned against a goal, not just a topic."""
+    """What the learner is working towards: lessons are planned against a goal, not just a topic.
+
+    Domain-independent: a language level ("Reach B2 Spanish"), an exam syllabus, a professional skill or any other
+    subject the knowledge base covers. `target_concepts` are always real knowledge-base concepts; a goal created from
+    a target level only gets them resolved from the knowledge base (`target_source="level"`), so a level change
+    re-resolves them. `priority` 1 is the highest."""
 
     goal_id: str = Field(min_length=1)
     learner_id: str = Field(min_length=1)
+    title: str = ""
+    description: str = ""
     domain: str = Field(min_length=1)
     target_level: str | None = None
     target_concepts: list[str] = Field(min_length=1)
-    deadline: datetime | None = None
+    target_source: GoalTargetSource = "explicit"
+    # Older goals stored this as `deadline`; both names are accepted.
+    target_date: datetime | None = Field(default=None, validation_alias=AliasChoices("target_date", "deadline"))
     priority: int = Field(default=3, ge=1, le=5)  # 1 = highest
-    status: GoalStatus = "active"
-    description: str = ""
+    status: GoalStatus = GoalStatus.ACTIVE
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    metadata: dict = Field(default_factory=dict)
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _legacy_status(cls, value):
+        return _LEGACY_GOAL_STATUS.get(value, value) if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _unique_targets(self) -> LearningGoal:
         if len(set(self.target_concepts)) != len(self.target_concepts):
             raise ValueError("target concepts must be unique")
         return self
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == GoalStatus.ACTIVE
 
 
 class ReviewIntervals(Schema):

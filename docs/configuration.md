@@ -24,6 +24,9 @@ They are validated when the container is built; errors say what to fix.
 | `TA_PEDAGOGY_MASTERY_TARGET` | `0.8` | Mastery at which a concept counts as mastered (no longer a gap; spaced review only) |
 | `TA_PEDAGOGY_MAX_TARGET_CONCEPTS` | `2` | Most new target concepts per lesson |
 | `TA_PEDAGOGY_LESSON_MINUTES` | unset | Time a lesson is planned for; unset uses the learner's `session_minutes` (else 30) |
+| `TA_CURRICULUM_EVIDENCE_REQUIRED` | `2` | Evidence items before a curriculum objective counts as mastered (its mastery target is `TA_PEDAGOGY_MASTERY_TARGET`) |
+| `TA_CURRICULUM_COMPLETION_RULE` | `all_required_mastered` | When a goal is complete: every required objective mastered, or `targets_mastered` (only the goal's target concepts) |
+| `TA_CURRICULUM_SESSIONS_PER_WEEK` | `3` | Pace assumed for target-date feasibility warnings (the plan is never compressed) |
 | `TA_RESEARCH_REQUIREMENT` | `mandatory` | `mandatory`: a failed research fails the lesson task; `optional`: continue with an empty bundle and a warning |
 | `TA_RESEARCH_MAX_RESULTS` | `5` | Results requested per search query |
 | `TA_RESEARCH_MAX_SOURCES` | `6` | Sources kept after ranking |

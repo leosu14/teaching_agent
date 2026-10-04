@@ -141,7 +141,7 @@ class LearnerMemoryService:
 
     def goals(self, learner_id: str, domain: str | None = None) -> list[LearningGoal]:
         return sorted((g for g in self._goals.for_learner(learner_id) if domain is None or g.domain == domain),
-                      key=lambda g: (g.priority, g.deadline is None, g.deadline, g.goal_id))
+                      key=lambda g: (g.priority, g.target_date is None, g.target_date, g.goal_id))
 
     def resolve_goal(self, learner_id: str, domain: str, topic: str, topic_concepts: list[str],
                      target_level: str | None, goal_id: str | None = None) -> LearningGoal:
@@ -154,7 +154,7 @@ class LearnerMemoryService:
             return goal
         wanted = set(topic_concepts)
         for goal in self.goals(learner_id, domain):
-            if goal.status == "active" and wanted & set(goal.target_concepts):
+            if goal.is_active and wanted & set(goal.target_concepts):
                 return goal
         if not topic_concepts:
             raise ValueError(f"no concepts known for {domain}/{topic}; cannot derive a learning goal")
@@ -196,13 +196,25 @@ class LearnerMemoryService:
         )
 
     def learner_model(self, learner_id: str, subject: str, framework_id: str, target_level: str | None = None,
-                      universe: list[str] | None = None) -> LearnerModel:
+                      universe: list[str] | None = None, as_of: datetime | None = None) -> LearnerModel:
+        """`as_of`: the time the model is read at (review due dates, recency); default now."""
         self._frameworks.get(framework_id)
         profile = self.get_or_create(learner_id)
         return build_learner_model(
             profile, domain=subject, framework_id=framework_id, target_level=target_level,
             evidence=self._evidence.for_learner(learner_id), events=self._events.for_learner(learner_id),
-            goals=self._goals.for_learner(learner_id), universe=universe or [], config=self.config, now=self._clock())
+            goals=self._goals.for_learner(learner_id), universe=universe or [], config=self.config,
+            now=as_of or self._clock())
+
+    def framework_for(self, learner_id: str, subject: str, default: str) -> str:
+        """The level framework the learner studies a subject in (their profile's), else `default`."""
+        profile = self._repo.get(learner_id)
+        state = profile.subjects.get(subject) if profile is not None else None
+        return state.framework_id if state is not None else default
+
+    @property
+    def frameworks(self) -> FrameworkRegistry:
+        return self._frameworks
 
     def evidence(self, learner_id: str, concept_id: str | None = None) -> list[LearningEvidence]:
         return self._evidence.for_learner(learner_id, concept_id)

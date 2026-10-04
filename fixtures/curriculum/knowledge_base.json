@@ -1,0 +1,264 @@
+[
+ {
+  "doc_id": "es-present",
+  "title": "Present tense of regular verbs",
+  "text": "The present tense of regular verbs: hablo, comes, vive. A2 Spanish grammar.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "present tense",
+   "level": "A2",
+   "concept": {
+    "concept_id": "es.present",
+    "name": "Present tense of regular verbs",
+    "level": "A2",
+    "prerequisites": [],
+    "description": "Conjugating regular -ar, -er and -ir verbs in the present tense (hablo, comes, vive)."
+   },
+   "probes": [
+    {
+     "prompt": "Complete: Yo ___ español. (hablar)",
+     "answer": "hablo",
+     "difficulty": 0.3
+    },
+    {
+     "prompt": "Complete: Ella ___ en Madrid. (vivir)",
+     "answer": "vive",
+     "difficulty": 0.4
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "es-preterite",
+  "title": "Preterite for completed events",
+  "text": "The preterite narrates completed past events with a clear end: ayer hablé con Ana. B1 Spanish grammar.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "preterite",
+   "level": "B1",
+   "concept": {
+    "concept_id": "es.preterite",
+    "name": "Preterite for completed events",
+    "level": "B1",
+    "prerequisites": [
+     "es.present"
+    ],
+    "description": "Narrating finished, completed actions in the past with the preterite (hablé, comí, fui)."
+   },
+   "probes": [
+    {
+     "prompt": "Complete: Ayer yo ___ con mi hermana. (hablar)",
+     "answer": "hablé",
+     "accepted": [
+      "hable"
+     ],
+     "difficulty": 0.5
+    },
+    {
+     "prompt": "Complete: El sábado ella ___ al cine. (ir)",
+     "answer": "fue",
+     "difficulty": 0.4
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "es-past-contrast",
+  "title": "Preterite and imperfect contrast",
+  "text": "Storytelling contrast: the imperfect sets the scene and the preterite tells what happened. B1 Spanish.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "past contrast",
+   "level": "B1",
+   "concept": {
+    "concept_id": "es.past_contrast",
+    "name": "Preterite and imperfect contrast",
+    "level": "B1",
+    "prerequisites": [
+     "es.preterite"
+    ],
+    "description": "Contrasting the imperfect (background, habits) with the preterite (completed events) in a story."
+   },
+   "probes": [
+    {
+     "prompt": "Complete: Llovía cuando yo ___ a casa. (llegar)",
+     "answer": "llegué",
+     "accepted": [
+      "llegue"
+     ],
+     "difficulty": 0.6
+    },
+    {
+     "prompt": "Complete: Mientras leía, ___ el teléfono. (sonar)",
+     "answer": "sonó",
+     "accepted": [
+      "sono"
+     ],
+     "difficulty": 0.5
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "es-subjunctive",
+  "title": "Present subjunctive after doubt",
+  "text": "After no creo que and dudo que the verb takes the present subjunctive: no creo que sea verdad. B1.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "subjunctive",
+   "level": "B1",
+   "concept": {
+    "concept_id": "es.subjunctive",
+    "name": "Present subjunctive after doubt",
+    "level": "B1",
+    "prerequisites": [
+     "es.preterite"
+    ],
+    "description": "Using the present subjunctive after expressions of doubt and negated opinions (no creo que sea)."
+   },
+   "probes": [
+    {
+     "prompt": "Complete: No creo que ella ___ razón. (tener)",
+     "answer": "tenga",
+     "difficulty": 0.6
+    },
+    {
+     "prompt": "Complete: Dudo que ellos ___ hoy. (venir)",
+     "answer": "vengan",
+     "difficulty": 0.6
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "es-argument",
+  "title": "Argumentative writing",
+  "text": "Argumentative writing connects a claim and reasons: por un lado, por otro lado, sin embargo. B2 Spanish.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "spanish",
+   "topic": "argumentative writing",
+   "level": "B2",
+   "concept": {
+    "concept_id": "es.argument",
+    "name": "Argumentative writing",
+    "level": "B2",
+    "prerequisites": [
+     "es.past_contrast",
+     "es.subjunctive"
+    ],
+    "description": "Writing a short argument: a claim, reasons with connectors (por un lado, sin embargo) and a conclusion."
+   },
+   "probes": [
+    {
+     "prompt": "Complete the connector: Por un lado es caro; por ___ lado es útil.",
+     "answer": "otro",
+     "difficulty": 0.5
+    },
+    {
+     "prompt": "Complete: ___ embargo, no estoy de acuerdo. (contrast)",
+     "answer": "sin",
+     "difficulty": 0.5
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "math-linear",
+  "title": "Linear equations",
+  "text": "A linear equation is solved by undoing operations on both sides: 2x + 3 = 11 gives x = 4.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "mathematics",
+   "topic": "linear equations",
+   "level": "beginner",
+   "concept": {
+    "concept_id": "math.linear",
+    "name": "Linear equations",
+    "level": "beginner",
+    "prerequisites": [],
+    "description": "Solving one-variable linear equations by inverse operations (2x + 3 = 11)."
+   },
+   "probes": [
+    {
+     "prompt": "Solve for x: 2x + 3 = 11",
+     "answer": "4",
+     "difficulty": 0.3
+    },
+    {
+     "prompt": "Solve for x: 5x - 5 = 20",
+     "answer": "5",
+     "difficulty": 0.4
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "math-systems",
+  "title": "Systems of linear equations",
+  "text": "A system of two linear equations is solved by substitution or elimination: x + y = 5, x - y = 1.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "mathematics",
+   "topic": "systems of equations",
+   "level": "intermediate",
+   "concept": {
+    "concept_id": "math.systems",
+    "name": "Systems of linear equations",
+    "level": "intermediate",
+    "prerequisites": [
+     "math.linear"
+    ],
+    "description": "Solving two linear equations together by substitution or elimination."
+   },
+   "probes": [
+    {
+     "prompt": "Solve: x + y = 5 and x - y = 1. What is x?",
+     "answer": "3",
+     "difficulty": 0.5
+    },
+    {
+     "prompt": "Solve: x + y = 7 and x - y = 3. What is y?",
+     "answer": "2",
+     "difficulty": 0.5
+    }
+   ]
+  }
+ },
+ {
+  "doc_id": "math-quadratic",
+  "title": "Quadratic equations",
+  "text": "A quadratic equation can be solved by factoring: x^2 - 5x + 6 = (x - 2)(x - 3) = 0.",
+  "metadata": {
+   "kind": "concept",
+   "subject": "mathematics",
+   "topic": "quadratic equations",
+   "level": "intermediate",
+   "concept": {
+    "concept_id": "math.quadratic",
+    "name": "Quadratic equations",
+    "level": "intermediate",
+    "prerequisites": [
+     "math.linear"
+    ],
+    "description": "Solving quadratic equations by factoring (x^2 - 5x + 6 = 0)."
+   },
+   "probes": [
+    {
+     "prompt": "Solve by factoring: x^2 - 5x + 6 = 0. Give the larger root.",
+     "answer": "3",
+     "difficulty": 0.6
+    },
+    {
+     "prompt": "Solve: x^2 = 49. Give the positive root.",
+     "answer": "7",
+     "difficulty": 0.4
+    }
+   ]
+  }
+ }
+]

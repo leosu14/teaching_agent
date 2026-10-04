@@ -40,6 +40,13 @@ class TaskService:
             request=lesson_request.raw_request, learner_id=learner_id, user_id=user_id, workflow_id=LESSON_WORKFLOW,
             lesson_request=lesson_request, inputs={}, metadata=metadata)
 
+    def create_planned(self, *, request: LessonRequest, learner_id: str, user_id: str, workflow_id: str,
+                       inputs: dict[str, str], metadata: dict | None = None) -> Task:
+        """A task for a known workflow (e.g. curriculum planning) with its inputs; not run yet."""
+        return self._orchestrator.create_planned_task(
+            request=request.raw_request, learner_id=learner_id, user_id=user_id, workflow_id=workflow_id,
+            lesson_request=request, inputs=inputs, metadata=metadata)
+
     async def run(self, task_id: str) -> Task:
         """Execute a created task until it completes, waits, pauses or fails."""
         return await self._orchestrator.run(task_id)

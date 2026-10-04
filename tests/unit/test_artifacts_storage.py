@@ -103,7 +103,7 @@ def test_repositories_round_trip(sessions) -> None:
 def test_learner_history_repositories(sessions) -> None:
     from datetime import timedelta
 
-    from app.schemas.learner import EvidenceConflict, LearningEvent, LearningEvidence, LearningGoal
+    from app.schemas.learner import EvidenceConflict, GoalStatus, LearningEvent, LearningEvidence, LearningGoal
     from tests.unit.helpers import NOW
 
     def ev(ref: str, at, concept: str = "c1") -> LearningEvidence:
@@ -128,6 +128,11 @@ def test_learner_history_repositories(sessions) -> None:
     goals = SqlGoalRepository(sessions)
     goal = LearningGoal(goal_id="g1", learner_id="l1", domain="spanish", target_concepts=["c1"])
     goals.save(goal)
-    goals.save(goal.model_copy(update={"status": "achieved"}))
-    assert goals.get("g1").status == "achieved" and goals.get("missing") is None
+    goals.save(goal.model_copy(update={"status": GoalStatus.COMPLETED}))
+    assert goals.get("g1").status == GoalStatus.COMPLETED and goals.get("missing") is None
+    # Goals stored with the earlier status names and `deadline` still load.
+    legacy = LearningGoal.model_validate({"goal_id": "g0", "learner_id": "l1", "domain": "spanish",
+                                          "target_concepts": ["c1"], "status": "achieved",
+                                          "deadline": "2030-01-01T00:00:00Z"})
+    assert legacy.status == GoalStatus.COMPLETED and legacy.target_date.year == 2030
     assert [g.goal_id for g in goals.for_learner("l1")] == ["g1"]

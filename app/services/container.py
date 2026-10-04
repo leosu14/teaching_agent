@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.agents.audio.agent import AudioPlannerAgent
+from app.agents.curriculum.agent import LearningPathPlannerAgent
 from app.agents.diagnostic.agent import KnowledgeDiagnosticAgent
 from app.agents.evaluator.agent import LearnerEvaluationAgent
 from app.agents.interpreter.agent import RequestInterpreterAgent
@@ -25,6 +26,8 @@ from app.artifacts.service import ArtifactService
 from app.config.providers import ProviderSettings, apply_llm_overrides
 from app.config.routing import ConfigError, RoutingConfig, load_routing
 from app.config.settings import Settings
+from app.curriculum.engine import CurriculumEngine
+from app.curriculum.tracker import CurriculumTracker
 from app.learner.frameworks import FrameworkRegistry, default_frameworks
 from app.learner.memory import LearnerMemoryService
 from app.pedagogy.strategy import StrategyRegistry
@@ -81,12 +84,14 @@ from app.providers.video_generation.mock import MockVideoGenerationProvider
 from app.runtime.orchestrator.orchestrator import NodeObserver, Orchestrator
 from app.runtime.orchestrator.planner import WorkflowPlanner
 from app.runtime.workflow.engine import WorkflowEngine
+from app.runtime.workflows.curriculum_planning import curriculum_template
 from app.runtime.workflows.lesson_evaluation import evaluation_template
 from app.runtime.workflows.lesson_generation import LessonWorkflowOptions, lesson_template
 from app.schemas.presentation import PresentationConfig
 from app.schemas.providers import Capability
 from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
+from app.services.curriculum import CurriculumService
 from app.services.learners import LearnerService
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
@@ -94,6 +99,7 @@ from app.storage.db import create_db, dispose
 from app.storage.object_store import FilesystemObjectStore
 from app.storage.repositories import (
     SqlArtifactRepository,
+    SqlCurriculumRepository,
     SqlEventRepository,
     SqlEvidenceRepository,
     SqlGoalRepository,
@@ -102,6 +108,12 @@ from app.storage.repositories import (
     SqlTaskRepository,
 )
 from app.tools.artifacts.tools import ReadArtifactsTool, StoreArtifactsTool
+from app.tools.curriculum.tools import (
+    CurriculumDraftTool,
+    CurriculumFinalizeTool,
+    CurriculumSaveTool,
+    CurriculumTrackTool,
+)
 from app.tools.knowledge.base import KnowledgeConceptsTool, RetrieverKnowledgeBase
 from app.tools.learner.tools import (
     LearnerModelTool,
@@ -340,6 +352,7 @@ class Container:
     orchestrator: Orchestrator
     task_service: TaskService
     learner_service: LearnerService
+    curriculum_service: CurriculumService
     catalog: CatalogService
     production: ProductionService
     _sessions: object
@@ -389,6 +402,7 @@ def build_container(
                                   evidence=SqlEvidenceRepository(sessions), events=SqlLearningEventRepository(sessions),
                                   goals=SqlGoalRepository(sessions), config=pedagogy)
     artifacts = ArtifactService(SqlArtifactRepository(sessions), FilesystemObjectStore(settings.resolved_object_store_dir))
+    curriculum = CurriculumEngine(SqlCurriculumRepository(sessions), settings.curriculum_config())
 
     retriever = retriever or LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json")
     search = providers.search
@@ -423,6 +437,10 @@ def build_container(
         PlanningTool(pedagogy, strategies),
         RecommendationTool(pedagogy, strategies),
         FeedbackTool(pedagogy),
+        CurriculumDraftTool(curriculum),
+        CurriculumFinalizeTool(curriculum),
+        CurriculumSaveTool(curriculum),
+        CurriculumTrackTool(CurriculumTracker(memory, curriculum), artifacts),
         StoreArtifactsTool(artifacts),
         ReadArtifactsTool(artifacts),
         ImageSearchTool(image_search),
@@ -453,7 +471,8 @@ def build_container(
     agents = AgentRegistry()
     for agent in (RequestInterpreterAgent(), KnowledgeDiagnosticAgent(), ResearchAgent(),
                   CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), VisualAgent(),
-                  SlidePlannerAgent(), AudioPlannerAgent(), VideoAgent(), LearnerEvaluationAgent()):
+                  SlidePlannerAgent(), AudioPlannerAgent(), VideoAgent(), LearnerEvaluationAgent(),
+                  LearningPathPlannerAgent()):
         agents.register(agent)
     for agent_id in [*routing.agent_tiers, *routing.routes]:
         agents.get(agent_id)  # overrides and routes must name real agents
@@ -487,16 +506,17 @@ def build_container(
         generated_video_enabled=settings.generated_video_enabled,
         generated_video=settings.generated_video_config(),
     )
-    planner = WorkflowPlanner([lesson_template(options), evaluation_template()], router, agents)
+    planner = WorkflowPlanner([lesson_template(options), evaluation_template(), curriculum_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,
                                 agents=agents, tools=tools, router=router, events=events, observers=observers)
     task_service = TaskService(orchestrator, task_repo, event_repo, artifacts)
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
+    curriculum_service = CurriculumService(memory, RetrieverKnowledgeBase(retriever), curriculum, task_service, events)
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
         frameworks=frameworks, memory=memory, artifacts=artifacts, orchestrator=orchestrator,
-        task_service=task_service, learner_service=learner_service,
+        task_service=task_service, learner_service=learner_service, curriculum_service=curriculum_service,
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         production=ProductionService(settings=settings, events=events, registry=providers.registry,
                                      selector=providers.selector, router=router, agents=agents, tools=tools,

@@ -17,12 +17,14 @@ ALLOWED: dict[str, set[str]] = {
     "storage": FOUNDATION | {"storage"},
     "learner": FOUNDATION | {"learner"},
     "pedagogy": FOUNDATION | {"pedagogy"},
+    # The curriculum engine reads the learner model and the concept graph; never providers, tools or storage.
+    "curriculum": FOUNDATION | {"curriculum", "pedagogy", "learner"},
     "artifacts": FOUNDATION | {"artifacts"},
-    "tools": FOUNDATION | {"tools", "providers", "learner", "pedagogy", "artifacts"},
+    "tools": FOUNDATION | {"tools", "providers", "learner", "pedagogy", "curriculum", "artifacts"},
     "agents": FOUNDATION | {"agents", "tools", "providers"},
     "runtime": FOUNDATION | {"runtime", "agents", "tools", "providers"},
-    "services": FOUNDATION | {"services", "runtime", "agents", "tools", "providers", "learner", "pedagogy", "artifacts",
-                              "storage"},
+    "services": FOUNDATION | {"services", "runtime", "agents", "tools", "providers", "learner", "pedagogy",
+                              "curriculum", "artifacts", "storage"},
     "api": FOUNDATION | {"api", "services"},
 }
 # Finer rules on top of the layer order.
@@ -47,7 +49,7 @@ API_EXCEPTION_MODULES = {  # the API may import exception types from lower layer
     "app.runtime.orchestrator.orchestrator": {"InvalidInput"},
     "app.runtime.tasks.state_machine": {"InvalidTransition"},
     "app.learner.frameworks": {"UnknownFramework"},
-    "app.learner.memory": {"UnknownLearner"},
+    "app.learner.memory": {"UnknownLearner", "UnknownGoal"},
     "app.storage.repositories": {"NotFound"},
 }
 

@@ -365,6 +365,31 @@ class SequenceStep(Schema):
     minutes: int = Field(ge=1)
 
 
+FocusAction = Literal["LEARN", "REVIEW", "PRACTICE", "EVALUATE"]
+
+
+class LessonFocus(Schema):
+    """A lesson started from a curriculum's next learning action: the objective it serves and what kind of lesson
+    the action asks for. LEARN teaches (introduce or reteach), REVIEW is retrieval and reinforcement, PRACTICE adds
+    controlled and applied exercises, EVALUATE puts assessment first. Optional: lessons without it are planned from
+    the adaptive gaps exactly as before."""
+
+    action: FocusAction
+    concept_id: str = Field(min_length=1)
+    objective_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    goal_id: str = Field(min_length=1)
+    curriculum_id: str = Field(min_length=1)
+    curriculum_version: int = Field(ge=1)
+    action_id: str = Field(min_length=1)
+    objective_artifact_id: str | None = None  # the LEARNING_OBJECTIVE artifact the lesson derives from
+
+    def brief(self) -> LessonFocus:
+        """What a model may see: the objective and the action, without goal, curriculum or artifact ids."""
+        return self.model_copy(update={"goal_id": "goal", "curriculum_id": "curriculum", "action_id": "action",
+                                       "objective_artifact_id": None})
+
+
 class PlanBrief(Schema):
     """The structural plan without learner or goal identifiers: what a model may see when writing the lesson."""
 
@@ -382,6 +407,7 @@ class PlanBrief(Schema):
     estimated_duration: int = Field(ge=1)  # minutes
     available_minutes: int = Field(ge=1)
     rationale: str = Field(min_length=1)
+    focus: LessonFocus | None = None  # the curriculum objective and action the lesson serves, if any
 
     def concept_ids(self) -> list[str]:
         """Every concept the lesson covers, in teaching order (prerequisites, targets, reviews)."""
@@ -432,6 +458,8 @@ class PlanBrief(Schema):
             raise ValueError("estimated_duration must equal the sum of the sequence")
         if self.estimated_duration > self.available_minutes:
             raise ValueError("the plan does not fit the available time")
+        if self.focus is not None and self.focus.concept_id not in self.target_concepts:
+            raise ValueError(f"the focus objective's concept {self.focus.concept_id} must be a target of the plan")
         # Prerequisites first: a concept's first activity comes after every activity on a prerequisite it relies on.
         by_activity = {a.activity_id: a for a in self.activities}
         first: dict[str, int] = {}
@@ -449,7 +477,8 @@ class PlanBrief(Schema):
         return self
 
     def structural_hash(self) -> str:
-        body = self.model_dump(mode="json", exclude={"plan_id"})
+        # A plan without a focus hashes exactly as before focus existed.
+        body = self.model_dump(mode="json", exclude={"plan_id"} | ({"focus"} if self.focus is None else set()))
         return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -460,8 +489,9 @@ class PedagogicalPlan(PlanBrief):
     config_fingerprint: str
 
     def brief(self) -> PlanBrief:
-        return PlanBrief.model_validate(self.model_dump(
+        brief = PlanBrief.model_validate(self.model_dump(
             exclude={"learner_id", "goal_id", "gap_set_id", "config_fingerprint"}))
+        return brief.model_copy(update={"focus": self.focus.brief()}) if self.focus is not None else brief
 
 
 # --- Recommendation and feedback -------------------------------------------------------------------------------------
@@ -522,6 +552,7 @@ class PlanningRequest(Schema):
     concepts: list[Concept]
     available_minutes: int | None = Field(default=None, ge=1)  # None: the learner's session length
     lesson_history: list[LearningEvent] | None = None  # None: the learner model's history
+    focus: LessonFocus | None = None  # plan for one curriculum objective and action instead of the top gaps
 
 
 class RecommendationRequest(Schema):

@@ -21,6 +21,9 @@ learner      level frameworks, MasteryUpdater + review scheduler, evidence / lea
              learner-model builder, LearnerMemoryService (long-term memory)
 pedagogy     the adaptive engine: ConceptGraph, KnowledgeBase interface, KnowledgeGapAnalyzer, PedagogicalPlanner,
              PedagogicalStrategy (GenericStrategy), NextLessonRecommender; pure, deterministic, no I/O
+curriculum   long-term learning: CurriculumPlanner, validation, CurriculumEngine (versions, progress, completion,
+             replanning), priority model, NextActionEngine, review policy, CurriculumTracker; reads the learner
+             model and the concept graph, never providers, tools or storage
 artifacts    ArtifactService: versioning, content-hash dedup, dependency graph, content-addressed media objects
 storage      SQLAlchemy/SQLite metadata repositories + filesystem object store (no business rules)
 schemas / config / observability / utils   shared foundation
@@ -513,6 +516,64 @@ What is decided by code and what by models:
 - **Failures.** Learner state changes only in `record_diagnostic` and `update_mastery`/`update_learner`, from
   validated, graded answers. A failed model call, review or evaluation leaves mastery as it was (the evaluation
   can be resumed); nothing is invented to fill a gap.
+
+## Goals and curricula
+
+```
+Learner → LearningGoal → Curriculum (versioned) → objectives → mastery targets → next learning action
+→ adaptive lesson for that objective → evaluation → mastery update → objective progress → curriculum progress
+→ next learning action
+```
+
+The curriculum engine (`app/curriculum/`) extends the adaptive loop; it does not replace the learner model, the
+mastery updater, the gap analysis, the pedagogical planner or the evaluation workflow. Goals are optional: a learner
+without one keeps the adaptive loop exactly as before.
+
+| Deterministic (code, `app/curriculum`) | Model (`learning_path_planner` agent) |
+|---|---|
+| A goal's scope: its targets (explicit, or the knowledge base's concepts up to a target level) plus every prerequisite from the knowledge base | Wording of each objective |
+| Objective order (prerequisites first), role, mode (learn / maintain), target mastery, evidence required, priority | A suggested order (used only when it respects every prerequisite) |
+| Validation, version ids and content hashes, replanning triggers | The explanation of the learning path |
+| Objective status, curriculum progress, goal completion, the next action and its priority | |
+
+- **Goal.** `LearningGoal` (title, description, domain, target level and concepts, optional target date, priority
+  1–5, status ACTIVE / PAUSED / COMPLETED / CANCELLED). The same idempotency key (or, without one, the same request)
+  never creates a second goal. COMPLETED is set only by the completion rule.
+- **Planning.** A `curriculum_planning` task: concept graph → goal → learner model → `curriculum.draft` →
+  `learning_path_planner` (sees a `CurriculumBrief`: concepts, prerequisites and a coarse state band; no learner,
+  goal or task ids, evidence or numbers) → `curriculum.finalize` → a new version only when its content changed →
+  LEARNING_GOAL → CURRICULUM_VERSION → LEARNING_OBJECTIVE artifacts → `curriculum.save`.
+- **Validation** (`app/curriculum/validation.py`): concepts exist; prerequisites are exactly the knowledge base's,
+  inside the curriculum and acyclic; every target is covered; target mastery is valid; prerequisites come first;
+  objectives belong to the goal and the goal to the learner; version histories are consistent. An invalid
+  curriculum fails the planning task; nothing is stored and no lesson starts from it. The model's proposal has no
+  field for mastery, status, completion or prerequisites (unknown fields fail validation); unknown concepts are
+  rejected as unresolved, concepts outside the scope are rejected.
+- **Versions.** Immutable. The id derives from the content hash (goal definition, objective structure,
+  configuration; not wording, progress or timestamps), so identical inputs give the same version and a resumed task
+  never stores a second one. A goal change, a target-date change or a replanning trigger (repeated failure, a
+  prerequisite that regressed, a concept mastered before its prerequisite) produces a new version when the path
+  changes; older versions stay readable (`GET /goals/{id}/curriculum/versions`).
+- **Objective status.** MASTERED (mastery ≥ target and enough evidence), BLOCKED (a prerequisite below
+  `prerequisite_threshold`), IN_PROGRESS (some evidence), NOT_STARTED.
+- **Next action** (`NextActionEngine`): per objective, REVIEW (mastered and due), EVALUATE (at target, evidence
+  missing), LEARN (reteach after repeated failure, or below `practice_from`), PRACTICE (otherwise); BLOCKED
+  objectives are never selected. COMPLETE when an active goal's completion rule holds; WAIT when nothing is
+  eligible. The winner is the highest priority score
+  (`score = prerequisite_ready × Σ weight × factor / Σ weight` over deficit, objective priority, goal priority, review
+  urgency, target-date pressure, recent failure and recency; `app/curriculum/priority.py`), ties by goal priority,
+  goal id, objective order. Completed goals contribute only reviews; paused and cancelled goals nothing.
+- **Review.** `MasteryReviewPolicy` reads the learner model's review dates (the existing `IntervalReviewScheduler`):
+  `next_review_at`, interval, review count, last review. Replaceable (`ReviewPolicy`).
+- **Lessons.** `CurriculumService.start_lesson(action)` starts a normal lesson task with a `LessonFocus` (the
+  objective and the action) in its metadata. The pedagogical planner then targets that objective's concept: LEARN
+  teaches it, REVIEW retrieves it, PRACTICE adds an applied exercise, EVALUATE retrieves it and assesses it twice.
+  The LEARNING_ACTION artifact and the lesson derive from the LEARNING_OBJECTIVE artifact.
+- **Evaluation.** After the mastery update the evaluation runs `curriculum.track`: objective progress, transitions
+  (`objective.started`, `objective.mastered`), completion (`goal.completed`), deterministic replanning, and the next
+  action (a LEARNING_ACTION artifact). Nothing happens for a learner without curricula.
+- **Target dates.** Feasibility (`sessions needed / sessions_per_week` against the days left) is reported as a
+  structured warning (`deadline_infeasible`, `deadline_passed`); the plan is never compressed.
 
 ## Cost and observability
 

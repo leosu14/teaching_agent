@@ -33,6 +33,12 @@ deterministic rules over the concept prerequisite graph, and a `PedagogicalPlan`
 prerequisite review, introduction vs reinforcement, activities, difficulty and timing. Models only word the plan
 and the lesson. See [architecture](docs/architecture.md#adaptive-pedagogy).
 
+**Goals and curricula** (`app/curriculum/`) turn single lessons into long-term learning: a learner's goal becomes a
+validated, versioned curriculum of objectives over the knowledge base's prerequisite graph; the next learning action
+(LEARN, REVIEW, PRACTICE, EVALUATE, WAIT or COMPLETE) is chosen by a documented priority model; lessons are planned
+around that objective; evaluations update the curriculum's progress and complete the goal by rule. See
+[architecture](docs/architecture.md#goals-and-curricula).
+
 ## Run it
 
 ```bash
@@ -40,6 +46,7 @@ pip install -e ".[dev]"                # plus ffmpeg + ffprobe on PATH (apt-get 
 python scripts/run_demo.py          # one command that proves the slice works
 python scripts/run_evaluation_demo.py  # lesson, then its evaluation, mastery before/after, recommendation
 python scripts/run_adaptive_demo.py    # learner model -> gaps -> plan -> lesson -> evaluation -> new recommendation
+python scripts/run_curriculum_demo.py  # goal -> curriculum -> next action -> lesson -> evaluation -> progress -> done
 python scripts/run_research_demo.py    # the lesson's research: queries, results, sources, evidence, citations
 python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, selection, generation, validation, assets
 python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validation, build, real .pptx with the images
@@ -61,6 +68,13 @@ prints the evaluation, mastery before and after, remaining gaps and the next rec
 recommendation, runs an adaptive lesson (the diagnostic asks only about the unknown concepts), prints the knowledge
 gaps, the pedagogical plan, the lesson objectives and section purposes, evaluates the lesson, prints mastery before
 and after, the feedback and the next recommendation, and exits 1 unless the recommendation changed.
+`run_curriculum_demo.py` (`fixtures/curriculum/`) creates a Spanish learner (present 0.90, preterite 0.35, past
+contrast 0.10, subjunctive 0.20), the goal "Reach B1 Spanish", builds its curriculum, prints the objectives,
+prerequisites and mastery, selects the next action (LEARN the preterite; the concepts that need it are blocked),
+runs the lesson for that objective and its evaluation, prints the mastery update, the recalculated progress and the
+new next action (now one of the blocked concepts), changes the goal to B2 (version 2, version 1 kept), adds a maths
+goal with an unreachable target date (a structured warning), selects across both goals, and completes the Spanish goal
+by its completion rule. It exits 1 unless every check passes.
 `run_research_demo.py` runs the lesson and shows its research: the request, generated queries, mock search
 results (with duplicates), selected and rejected sources, extracted evidence, citations, the stored
 ResearchBundle, and how each lesson section's citations resolve to evidence and sources.
@@ -116,6 +130,11 @@ graph, per-request traceability, usage and cost. `--mock` rehearses the same pat
 | PUT/GET | `/learners/{id}` | Learner profile (subjects with a level framework, preferences) |
 | GET | `/learners/{id}/progress` | Mastery, weak concepts, due reviews |
 | POST | `/learners/{id}/assessment` | Submit diagnostic answers for a WAITING task |
+| POST/GET | `/learners/{id}/goals` | Create a learning goal (idempotent per `idempotency_key`) / list the learner's goals |
+| GET/PATCH | `/goals/{id}` | A goal / change it (a changed definition or target date replans its curriculum) |
+| POST/GET | `/goals/{id}/curriculum` | Build (or rebuild) the goal's curriculum / the current version with its progress |
+| GET | `/goals/{id}/curriculum/versions` | Every version of the curriculum, oldest first |
+| GET | `/learners/{id}/next-action` | The next learning action across the learner's goals (`?as_of=` for a given time) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 
 See [docs/architecture.md](docs/architecture.md) for the design and [docs/configuration.md](docs/configuration.md)
