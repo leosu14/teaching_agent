@@ -24,6 +24,15 @@ class AnswerEvaluation(Schema):
     correct: bool
     difficulty: float = Field(ge=0, le=1)
     feedback: str = ""
+    # Set when the answer was graded by the assessment layer: the validated outcome (CORRECT, PARTIAL, INCORRECT,
+    # UNCERTAIN), its 0-1 score and the grade. An UNCERTAIN answer is never evidence.
+    outcome: Literal["CORRECT", "PARTIAL", "INCORRECT", "UNCERTAIN"] | None = None
+    score: float | None = Field(default=None, ge=0, le=1)
+    grade_id: str | None = None
+
+    @property
+    def counts(self) -> bool:
+        return self.outcome != "UNCERTAIN"
 
 
 class ConceptMastery(Schema):
@@ -190,8 +199,20 @@ class LearnerProgress(Schema):
 
 # --- Evidence, learning events and goals -----------------------------------------------------------------------------
 
-EvidenceSource = Literal["diagnostic", "lesson", "evaluation", "exercise", "manual", "interaction"]
+EvidenceSource = Literal["diagnostic", "lesson", "evaluation", "exercise", "manual", "interaction", "assessment"]
 Correctness = Literal["correct", "partial", "incorrect"]
+
+
+def graded_correctness(outcome: str, score: float) -> tuple[Correctness, float]:
+    """A validated assessment outcome and its 0-1 score as evidence: CORRECT keeps at least 0.5, PARTIAL lies strictly
+    between 0 and 1, INCORRECT stays below 0.5. UNCERTAIN is never evidence (the caller does not record it)."""
+    if outcome == "UNCERTAIN":
+        raise ValueError("an UNCERTAIN grade is not evidence")
+    if outcome == "CORRECT":
+        return "correct", round(max(0.5, min(1.0, score)), 4)
+    if outcome == "PARTIAL":
+        return "partial", round(min(0.95, max(0.05, score)), 4)
+    return "incorrect", round(max(0.0, min(0.49, score)), 4)
 
 
 def stable_id(prefix: str, *parts: str) -> str:
@@ -242,11 +263,18 @@ class LearningEvidence(Schema):
         """A graded answer (diagnostic or evaluation) as evidence. The grading is the agent's interpretation; the
         number it becomes and every mastery update after it are computed by code."""
         ref = f"{task_id}/{evaluation.question_id}"
+        metadata = {"task_id": task_id, "question_id": evaluation.question_id}
+        if evaluation.outcome is not None:  # graded by the assessment layer: partial credit
+            correctness, score = graded_correctness(evaluation.outcome,
+                                                    evaluation.score if evaluation.score is not None
+                                                    else float(evaluation.correct))
+            metadata.update(outcome=evaluation.outcome, grade_id=evaluation.grade_id)
+        else:
+            correctness, score = ("correct", 1.0) if evaluation.correct else ("incorrect", 0.0)
         return cls(evidence_id=cls.id_for(learner_id, source_type, ref, evaluation.concept_id), learner_id=learner_id,
                    concept_id=evaluation.concept_id, source_type=source_type, source_ref=ref,
-                   correctness="correct" if evaluation.correct else "incorrect",
-                   score=1.0 if evaluation.correct else 0.0, difficulty=evaluation.difficulty, timestamp=at,
-                   metadata={"task_id": task_id, "question_id": evaluation.question_id})
+                   correctness=correctness, score=score, difficulty=evaluation.difficulty, timestamp=at,
+                   metadata=metadata)
 
 
 LearningEventType = Literal["diagnostic_completed", "lesson_completed", "evaluation_completed", "concept_mastered",

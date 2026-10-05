@@ -1,6 +1,7 @@
 """Post-lesson evaluation workflow template.
 
-completed lesson -> learner snapshot -> assessment -> WAITING for answers -> evaluation
+completed lesson -> learner snapshot -> assessment -> WAITING for answers -> grading by the AssessmentService
+(deterministic for closed questions, rubric / semantic for free text; immutable grades) -> evaluation
 -> learning evidence and deterministic mastery update -> updated learner model -> next-learning recommendation
 (the pedagogical engine re-plans from the new state) -> curriculum progress (objective progress, goal completion,
 deterministic replanning and the next learning action; nothing for a learner without curricula) -> feedback ->
@@ -13,6 +14,13 @@ from app.runtime.orchestrator.planner import ExpectedCall, WorkflowTemplate
 from app.runtime.workflow.engine import WorkflowDefinition
 from app.runtime.workflow.nodes import AgentNode, HumanApprovalNode, StateView, ToolNode, TransformNode
 from app.schemas.artifact import ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
+from app.schemas.assessment import (
+    AssessmentItem,
+    AssessRequest,
+    BatchAssessmentRequest,
+    BatchAssessmentResult,
+    ResponseType,
+)
 from app.schemas.evaluation import (
     AssessmentPlan,
     AssessmentResponse,
@@ -23,10 +31,11 @@ from app.schemas.evaluation import (
     LearnerEvaluationReport,
     LearnerEvaluationResult,
     LessonReference,
+    QuestionGrade,
     SheetQuestion,
 )
 from app.schemas.events import EventType
-from app.schemas.learner import LearnerSnapshot, LearningGoal, MasteryUpdate
+from app.schemas.learner import AnswerEvaluation, LearnerSnapshot, LearningGoal, MasteryUpdate, stable_id
 from app.schemas.lesson import ConceptRef, LessonContent, LessonPlan, LessonRequest
 from app.schemas.pedagogy import (
     ConceptSet,
@@ -43,6 +52,9 @@ from app.tools.curriculum.tools import TrackRequest, TrackResult
 
 WORKFLOW_ID = "lesson_evaluation"
 LESSON_TASK = "lesson_task_id"
+RESPONSE_TYPES = {"short_answer": ResponseType.SHORT_TEXT, "multiple_choice": ResponseType.MULTIPLE_CHOICE,
+                  "translation": ResponseType.FREE_TEXT, "problem": ResponseType.FREE_TEXT,
+                  "free_text": ResponseType.FREE_TEXT}
 
 
 def _request(v: StateView) -> LessonRequest:
@@ -110,8 +122,51 @@ def _evaluation_input(stage: str):
             snapshot=v.output("learner_snapshot", LearnerSnapshot).for_provider(),
             assessment=_assessment(v) if stage == "evaluate" else None,
             response=v.output("answers", AssessmentResponse) if stage == "evaluate" else None,
+            grades=_grades(v) if stage == "evaluate" else [],
         )
     return build
+
+
+def _grading_request(v: StateView) -> BatchAssessmentRequest:
+    """Every answer as an assessment item and attempt with stable ids (per evaluation task and question), so a resumed
+    task replays the stored grades instead of grading again."""
+    lesson_id = _loaded(v).artifact("lesson").artifact_id
+    answers = {a.question_id: a.answer for a in v.output("answers", AssessmentResponse).answers}
+    language = _request(v).language_of_instruction
+    requests = []
+    for q in _assessment(v).questions:
+        item = AssessmentItem(
+            assessment_item_id=stable_id("aitem", v.task.task_id, q.question_id), lesson_id=lesson_id,
+            concept_id=q.concept_id, prompt=q.prompt, expected_answer=q.expected_answer,
+            acceptable_answers=q.accepted_answers, response_type=RESPONSE_TYPES[q.kind], difficulty=q.difficulty,
+            language=language, choices=q.choices if q.kind == "multiple_choice" else [], max_score=q.points,
+            metadata={"question_id": q.question_id, "objective": q.objective})
+        requests.append(AssessRequest(item=item, learner_id=v.task.learner_id, answer=answers[q.question_id],
+                                      attempt_id=stable_id("aatt", v.task.task_id, q.question_id),
+                                      task_id=v.task.task_id, source="evaluation", source_ref=q.question_id))
+    return BatchAssessmentRequest(requests=requests)
+
+
+def _grades(v: StateView) -> list[QuestionGrade]:
+    graded = v.output("grade_answers", BatchAssessmentResult)
+    questions = {stable_id("aitem", v.task.task_id, q.question_id): q for q in _assessment(v).questions}
+    out = []
+    for r in graded.results:
+        q, g = questions[r.grade.assessment_item_id], r.grade
+        feedback = " ".join(filter(None, [g.feedback.explanation, *g.feedback.errors]))
+        out.append(QuestionGrade(question_id=q.question_id, concept_id=q.concept_id, attempt_id=r.attempt.attempt_id,
+                                 grade_id=g.grade_id, outcome=g.outcome.value, score=g.fraction,
+                                 grader_type=g.grader_type.value, feedback=feedback[:500]))
+    return out
+
+
+def _graded_evaluations(v: StateView) -> list[AnswerEvaluation]:
+    """The evaluation's answers with the validated outcome and score of each: what learner memory records (partial
+    credit; an UNCERTAIN answer is kept on record but is never evidence)."""
+    grades = {g.question_id: g for g in _grades(v)}
+    return [e.model_copy(update={"outcome": grades[e.question_id].outcome, "score": grades[e.question_id].score,
+                                 "grade_id": grades[e.question_id].grade_id}) if e.question_id in grades else e
+            for e in _result(v).evaluations]
 
 
 def _sheet(v: StateView) -> AssessmentSheet:
@@ -144,7 +199,7 @@ def _outcome(v: StateView) -> EvaluationOutcome:
         task_id=v.task.task_id, learner_id=v.task.learner_id, lesson_task_id=_lesson_task(v),
         subject=req.subject, framework_id=req.framework_id,
         concepts=[ConceptRef(concept_id=s.concept_id, name=s.heading) for s in _lesson(v).sections],
-        evaluations=_result(v).evaluations,
+        evaluations=_graded_evaluations(v),
     )
 
 
@@ -157,8 +212,9 @@ def _package(v: StateView) -> ArtifactBatch:
         lesson=LessonReference(task_id=_lesson_task(v), artifact_id=lesson_artifact.artifact_id,
                                title=_lesson(v).title),
         questions=_assessment(v).questions, answers=v.output("answers", AssessmentResponse).answers,
-        score=result.score, points_earned=result.points_earned, points_possible=result.points_possible,
-        evaluations=result.evaluations, concepts=result.concepts, mastery_changes=update.changes,
+        grades=_grades(v), score=result.score, points_earned=result.points_earned,
+        points_possible=result.points_possible, evaluations=_graded_evaluations(v), concepts=result.concepts,
+        mastery_changes=update.changes,
         mastered=result.mastered, partial=result.partial, remaining_gaps=result.gaps,
         recommendation=result.recommendation, feedback=v.output("feedback", EvaluationFeedback),
         next_recommendation=_recommendation(v),
@@ -172,13 +228,16 @@ def _package(v: StateView) -> ArtifactBatch:
         parent_ids=[lesson_artifact.artifact_id],
         metadata={"score": result.score, "remaining_gaps": result.gaps, "action": result.recommendation.action},
     )]
-    # Evaluation -> LearningEvidence -> updated LearnerModel -> NextLearningRecommendation
+    # ASSESSMENT_GRADEs + Evaluation -> LearningEvidence -> updated LearnerModel -> NextLearningRecommendation
     if update.evidence:
+        graded = {r.grade.grade_id: r.artifact_ids.get("grade") for r in v.output("grade_answers",
+                                                                                   BatchAssessmentResult).results}
         drafts.append(ArtifactDraft(
             key="learning_evidence", name="learning_evidence", type=ArtifactType.LEARNING_EVIDENCE,
             media_type="application/json",
             content="[\n" + ",\n".join(e.model_dump_json(indent=2) for e in update.evidence) + "\n]",
             parent_keys=["evaluation"],
+            parent_ids=[a for e in update.evidence if (a := graded.get(e.metadata.get("grade_id")))],
             metadata={"source": "evaluation", "items": len(update.evidence),
                       "concepts": sorted({e.concept_id for e in update.evidence})}))
     drafts += [
@@ -240,7 +299,10 @@ def build_evaluation_workflow(request: LessonRequest) -> WorkflowDefinition:
                           build_request=_sheet, response_model=AssessmentResponse,
                           validate_input=_validate_answers, wait_event=EventType.ASSESSMENT_WAITING,
                           submitted_event=EventType.ASSESSMENT_SUBMITTED),
-        AgentNode(id="evaluate", agent="learner_evaluation", depends_on=("answers",),
+        # The AssessmentService grades every answer (deterministically where it can); the agent then reports them.
+        ToolNode(id="grade_answers", tool="assessment.grade", permissions=frozenset({"assessment:write"}),
+                 depends_on=("answers",), build_input=_grading_request),
+        AgentNode(id="evaluate", agent="learner_evaluation", depends_on=("grade_answers",),
                   build_input=_evaluation_input("evaluate")),
         ToolNode(id="update_mastery", tool="learner.record_evaluation", permissions=frozenset({"learner:write"}),
                  depends_on=("evaluate",), build_input=_outcome),

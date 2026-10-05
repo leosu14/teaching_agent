@@ -8,9 +8,15 @@ Difficulty (`DifficultyController`):
   - `increase_after_successes` consecutive correct answers: one level harder (the streak restarts);
   - `decrease_after_failures` consecutive incorrect answers: one level easier (the streak restarts).
 
+Answers are graded by the AssessmentService (CORRECT, PARTIAL, INCORRECT or UNCERTAIN); the policy reads the grade:
+  - partially correct: keep the difficulty (the success streak restarts; it is not a failure);
+  - uncertain: nothing changes (no difficulty change, no count), the learner is asked to answer again.
+
 Next turns after an answer (`TeachingPolicy.after_answer`):
   - the session's completion condition holds: SUMMARIZE (then COMPLETE);
+  - uncertain: FEEDBACK asking for a clearer answer (the same question stays open);
   - correct: FEEDBACK, then the next question;
+  - partially correct: FEEDBACK on what is missing, then the next question;
   - incorrect and the misconception repeats (`reteach_after_misconceptions`): RETEACH, then a new question;
   - incorrect with a hint level left: HINT at the next level (the same question stays open);
   - incorrect without hints left: FEEDBACK that corrects (reveals the answer), then a new question.
@@ -66,6 +72,12 @@ class DifficultyController:
                                       f"{failures} consecutive incorrect answer(s): easier")
         return DifficultyDecision(difficulty, successes, failures, "keep", "incorrect")
 
+    @staticmethod
+    def after_partial(difficulty: int, failures: int) -> DifficultyDecision:
+        """A partially correct answer is neither a success nor a failure: keep the level, restart the success
+        streak, leave the failure streak as it is."""
+        return DifficultyDecision(difficulty, 0, failures, "keep", "partially correct: keep")
+
 
 class TeachingPolicy:
     def __init__(self, config: TeachingConfig) -> None:
@@ -116,9 +128,16 @@ class TeachingPolicy:
         return None
 
     def after_answer(self, state: SessionState, question: PendingQuestion, *, correct: bool, answer_turn_id: str,
-                     mode: SessionMode, misconceptions_before: int) -> tuple[list[PlannedTurn], bool]:
-        """The teacher turns owed after a graded answer, and whether the question stays open (a hint follows)."""
+                     mode: SessionMode, misconceptions_before: int, outcome: str | None = None
+                     ) -> tuple[list[PlannedTurn], bool]:
+        """The teacher turns owed after a graded answer, and whether the question stays open (a hint follows, or the
+        answer could not be graded and is asked for again)."""
         c = self.config
+        if outcome == "UNCERTAIN":
+            return [PlannedTurn(action=TeachingAction.FEEDBACK, responds_to=answer_turn_id, clarify=True)], True
+        if outcome == "PARTIAL":
+            return [PlannedTurn(action=TeachingAction.FEEDBACK, responds_to=answer_turn_id),
+                    PlannedTurn(action=self.question_action(state, mode))], False
         if correct:
             return [PlannedTurn(action=TeachingAction.FEEDBACK, responds_to=answer_turn_id),
                     PlannedTurn(action=self.question_action(state, mode))], False

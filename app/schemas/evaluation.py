@@ -19,7 +19,9 @@ class AssessmentQuestion(Schema):
     question_id: str
     concept_id: str
     objective: str
-    kind: Literal["short_answer", "multiple_choice", "translation", "problem"]
+    # short_answer and multiple_choice are graded deterministically; translation, problem and free_text are free text,
+    # graded against a rubric (semantically when the answer is not an acceptable answer).
+    kind: Literal["short_answer", "multiple_choice", "translation", "problem", "free_text"]
     prompt: str
     choices: list[str] = Field(default_factory=list)
     difficulty: float = Field(ge=0, le=1)
@@ -65,6 +67,19 @@ class AssessmentSheet(Schema):
 
     title: str
     questions: list[SheetQuestion]
+
+
+class QuestionGrade(Schema):
+    """The AssessmentService's validated grade of one answer: what the evaluation must agree with."""
+
+    question_id: str
+    concept_id: str
+    attempt_id: str
+    grade_id: str
+    outcome: Literal["CORRECT", "PARTIAL", "INCORRECT", "UNCERTAIN"]
+    score: float = Field(ge=0, le=1)  # fraction of the question's points
+    grader_type: str
+    feedback: str = ""
 
 
 class AssessmentResponse(Schema):
@@ -129,6 +144,7 @@ class EvaluationInput(Schema):
     snapshot: LearnerSnapshot
     assessment: AssessmentPlan | None = None
     response: AssessmentResponse | None = None
+    grades: list[QuestionGrade] = Field(default_factory=list)  # evaluate stage: the validated grades to report
 
     @model_validator(mode="after")
     def _stage_inputs(self) -> EvaluationInput:
@@ -177,6 +193,7 @@ class LearnerEvaluationReport(Schema):
     lesson: LessonReference
     questions: list[AssessmentQuestion]
     answers: list[LearnerAnswer]
+    grades: list[QuestionGrade] = Field(default_factory=list)  # the AssessmentService's validated grades
     score: float
     points_earned: float
     points_possible: float

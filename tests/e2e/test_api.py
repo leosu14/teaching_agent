@@ -113,7 +113,8 @@ def test_lesson_evaluation_over_http(client: TestClient) -> None:
 
     artifacts = client.get(f"/tasks/{task['task_id']}/artifacts").json()
     assert {a["type"] for a in artifacts} == {"LEARNER_EVALUATION", "LEARNING_EVIDENCE", "LEARNER_MODEL",
-                                              "LEARNING_RECOMMENDATION"}
+                                              "LEARNING_RECOMMENDATION", "ASSESSMENT_ITEM", "ASSESSMENT_GRADE",
+                                              "ASSESSMENT_FEEDBACK"}
     artifact = next(a for a in artifacts if a["type"] == "LEARNER_EVALUATION")
     assert artifact["type"] == "LEARNER_EVALUATION"
     assert artifact["metadata"]["score"] == 0.5

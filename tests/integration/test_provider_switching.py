@@ -157,3 +157,17 @@ async def test_anthropic_adapter_serves_an_agent_route(tmp_path, monkeypatch) ->
         assert all("output_config" in b or "system" in b for b in fake.bodies())
     finally:
         c.close()
+
+
+def test_the_semantic_grader_uses_the_configured_llm_only_in_production(tmp_path, container) -> None:
+    """No new provider configuration: the grader routes like every agent, to mocks offline (the default) and to the
+    configured real provider only under TEACHING_AGENT_MODE=production."""
+    offline = container.router.targets(container.router.tier_for(
+        "semantic_grader", container.agents.get("semantic_grader").spec.tier))
+    assert offline and all(t.provider == "mock" for t in offline)
+    c = build_container(real_settings(tmp_path))
+    try:
+        targets = c.router.targets(c.router.tier_for("semantic_grader", c.agents.get("semantic_grader").spec.tier))
+        assert targets and all(t.provider == "openai" and t.model == "gpt-test" for t in targets)
+    finally:
+        c.close()

@@ -37,6 +37,13 @@ They are validated when the container is built; errors say what to fix.
 | `TA_TEACHING_MAX_INCORRECT` | `5` | Incorrect answers after which the session completes as repeated failure |
 | `TA_TEACHING_MAX_QUESTIONS` | `10` | Questions per session |
 | `TA_TEACHING_MAX_TURNS` | `40` | Turns per session (the turn budget) |
+| `TA_ASSESSMENT_CORRECT_THRESHOLD` | `0.8` | Score at or above which a grade is CORRECT (a rubric's `passing_threshold` takes precedence) |
+| `TA_ASSESSMENT_PARTIAL_THRESHOLD` | `0.4` | Score at or above which a grade is PARTIAL |
+| `TA_ASSESSMENT_ACCEPT_CONFIDENCE` | `0.85` | Semantic grader confidence at or above which its grade stands |
+| `TA_ASSESSMENT_MIN_CONFIDENCE` | `0.6` | Below this the grade is UNCERTAIN |
+| `TA_ASSESSMENT_MID_CONFIDENCE` | `partial` | Between the two: `partial` caps CORRECT at PARTIAL (INCORRECT becomes UNCERTAIN); `uncertain` makes every such grade UNCERTAIN |
+| `TA_ASSESSMENT_SEMANTIC_ENABLED` | `true` | `false`: free text the deterministic steps cannot decide is UNCERTAIN (no model call) |
+| `TA_ASSESSMENT_ACCENT_INSENSITIVE_LANGUAGES` | (none) | Comma-separated languages whose answers match without accents, e.g. `es,pt` |
 | `TA_RESEARCH_REQUIREMENT` | `mandatory` | `mandatory`: a failed research fails the lesson task; `optional`: continue with an empty bundle and a warning |
 | `TA_RESEARCH_MAX_RESULTS` | `5` | Results requested per search query |
 | `TA_RESEARCH_MAX_SOURCES` | `6` | Sources kept after ranking |

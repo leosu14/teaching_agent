@@ -12,6 +12,7 @@ from app.agents.base import OutputRejected
 from app.agents.teaching.agent import TeachingSessionAgent
 from app.schemas.teaching import (
     QUESTION_ACTIONS,
+    AnswerAssessment,
     CompletionReason,
     EvidenceType,
     GroundedAnswer,
@@ -509,3 +510,85 @@ def test_the_output_schemas_have_no_way_to_change_mastery_or_complete_anything()
         GroundedAnswer(response="x", grounded=False)  # ungrounded without a stated limitation
     with pytest.raises(ValidationError):
         TeachingQuestion(kind="multiple_choice", prompt="?", choices=["a", "b"], expected_answer="c")
+
+
+# --- graded by the assessment layer ---------------------------------------------------------------------------------
+
+
+def graded(outcome: str, score: float, **kw) -> AnswerAssessment:
+    return AnswerAssessment(outcome=outcome, score=score, grader_type="SEMANTIC", grade_id=f"g-{outcome}",
+                            attempt_id=f"a-{outcome}", **kw)
+
+
+def test_a_partial_answer_closes_the_question_without_a_hint_and_keeps_the_difficulty() -> None:
+    s, _ = teach(new_session())
+    t = engine.record_answer(s, "went, I think", NOW, assessment=graded("PARTIAL", 0.5, feedback="Half of it."))
+    s = t.change.session
+    ev = t.change.evidence[0]
+    assert (ev.outcome, ev.score, ev.correct) == ("PARTIAL", 0.5, False)
+    assert (s.state.partial_answers, s.state.correct_answers, s.state.incorrect_answers) == (1, 0, 0)
+    assert s.state.pending_question is None and t.difficulty_change is None
+    assert [p.action for p in s.state.planned] == [TeachingAction.FEEDBACK, TeachingAction.ASK]
+    assert s.state.last_answer.outcome == "PARTIAL" and s.state.last_answer.feedback == "Half of it."
+    assert t.change.turns[0].metadata["grade_id"] == "g-PARTIAL"
+
+
+def test_an_uncertain_answer_changes_nothing_but_asks_again() -> None:
+    s, _ = teach(new_session())
+    before = s.state.model_copy(deep=True)
+    t = engine.record_answer(s, "mmm", NOW, assessment=graded("UNCERTAIN", 0.0, misconceptions=[
+        MisconceptionCandidate(concept_id=CONCEPT, misconception="should never be recorded", confidence=0.9)]))
+    s = t.change.session
+    assert [e.evidence_type for e in t.change.evidence] == [EvidenceType.ANSWER]
+    assert t.change.evidence[0].correct is None and t.change.evidence[0].outcome == "UNCERTAIN"
+    assert s.state.uncertain_answers == 1 and t.difficulty_change is None
+    assert (s.state.questions_answered, s.state.correct_answers, s.state.incorrect_answers, s.state.difficulty,
+            s.state.consecutive_failures) == (before.questions_answered, 0, 0, before.difficulty, 0)
+    assert s.state.pending_question is not None  # the same question stays open
+    assert [(p.action, p.clarify) for p in s.state.planned] == [(TeachingAction.FEEDBACK, True)]
+    assert t.change.turns[0].metadata["correct"] is None
+    s, _ = teach(s)
+    again = engine.record_answer(s, "went", NOW + timedelta(seconds=1), assessment=graded("CORRECT", 1.0))
+    assert again.correct and again.change.session.state.correct_answers == 1
+
+
+def test_the_assessments_misconceptions_become_evidence_on_wrong_answers_only() -> None:
+    s, _ = teach(new_session())
+    mis = [MisconceptionCandidate(concept_id=CONCEPT, misconception="regularises irregular verbs", confidence=0.8),
+           MisconceptionCandidate(concept_id=CONCEPT, misconception="Regularises irregular verbs.", confidence=0.9),
+           MisconceptionCandidate(concept_id=CONCEPT, misconception="a weak guess", confidence=0.1)]
+    t = engine.record_answer(s, "goed", NOW, assessment=graded("INCORRECT", 0.0, misconceptions=mis))
+    kinds = [e.evidence_type for e in t.change.evidence]
+    assert kinds == [EvidenceType.ANSWER, EvidenceType.MISCONCEPTION]
+    assert t.change.evidence[1].metadata["grade_id"] == "g-INCORRECT"
+    # the teacher proposing the same misconception afterwards does not record it twice
+    s, (_, evidence, _) = teach(t.change.session, misconceptions=[mis[0]])
+    assert not [e for e in evidence if e.evidence_type == EvidenceType.MISCONCEPTION]
+    assert len(s.state.misconceptions) == 1
+    ok = engine.record_answer(s, "went", NOW, assessment=graded("CORRECT", 1.0, misconceptions=mis))
+    assert [e.evidence_type for e in ok.change.evidence] == [EvidenceType.ANSWER]
+
+
+def test_without_an_assessment_closed_questions_are_matched_deterministically() -> None:
+    s, _ = teach(new_session())
+    t = engine.record_answer(s, " Went! ", NOW)
+    assert t.correct and t.change.evidence[0].outcome == "CORRECT"
+    assert t.change.turns[0].metadata["grader_type"] == "EXACT"
+
+
+def test_feedback_on_an_ungradable_answer_must_not_reveal_it_and_partial_answers_have_no_misconceptions() -> None:
+    uncertain = turn_input(TeachingAction.FEEDBACK, answer_correct=None, answer_outcome="UNCERTAIN",
+                           learner_answer="mmm")
+    AGENT.check(good(uncertain, response="Please answer again in a full sentence."), uncertain)
+    with pytest.raises(OutputRejected, match="do not reveal"):
+        AGENT.check(good(uncertain, response="The answer was went."), uncertain)
+    partial = turn_input(TeachingAction.FEEDBACK, answer_correct=False, answer_outcome="PARTIAL",
+                         learner_answer="went, I think")
+    with pytest.raises(OutputRejected, match="incorrect answer"):
+        AGENT.check(good(partial, misconceptions=[MisconceptionCandidate(
+            concept_id=CONCEPT, misconception="unsure", confidence=0.9)]), partial)
+    free = turn_input(TeachingAction.ASK, learner_answer=None, answer_correct=None, question=None)
+    leaky = TeachingQuestion(kind="free_text", prompt="Explain why 'went' is right: went is the past of go.",
+                             expected_answer="went is the past of go")
+    with pytest.raises(OutputRejected, match="its own answer"):
+        AGENT.check(good(free, question=leaky), free)

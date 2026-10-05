@@ -3,6 +3,8 @@
 
 The service orchestrates; the existing systems stay authoritative:
 - every state transition is computed by the deterministic engine (`app/teaching/`), never by a model;
+- every answer is graded by the AssessmentService (deterministic matching first, the semantic grader only for free
+  text); the engine consumes the validated grade, never a model's;
 - the teacher's turns are phrased by the TeachingSessionAgent through the runtime (validated structured output);
 - mastery changes only through learner memory's MasteryUpdater, once, when the session completes (assessed sessions);
 - objective progress and the next learning action come from the curriculum engine, as after an evaluation.
@@ -17,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
 
 from app.artifacts.service import ArtifactService
@@ -26,22 +27,20 @@ from app.observability.events import EventBus
 from app.observability.scope import ExecutionScope, UsageLedger
 from app.pedagogy.knowledge import KnowledgeBase
 from app.runtime.interaction.teacher import TeacherTurnFailed, TeachingRuntime
-from app.runtime.workflows.lesson_generation import WORKFLOW_ID as LESSON_WORKFLOW
 from app.schemas.artifact import Artifact, ArtifactType
 from app.schemas.common import new_id, utcnow
 from app.schemas.events import EventType
-from app.schemas.learner import LearningEvidence, stable_id
-from app.schemas.lesson import LessonContent, LessonRequest
-from app.schemas.pedagogy import LessonFocus, PedagogicalPlan
-from app.schemas.research import ResearchBundle
-from app.schemas.task import Task, TaskStatus
+from app.schemas.assessment import AssessmentItem, AssessRequest, AttemptConflict
+from app.schemas.learner import LearningEvidence, graded_correctness, stable_id
 from app.schemas.teaching import (
+    AnswerAssessment,
     AnswerResult,
     EvidenceBrief,
     EvidenceType,
     GroundingItem,
     InteractionEvidence,
     LearnerInput,
+    MisconceptionCandidate,
     ObjectiveBrief,
     OutboxItem,
     PlannedTurn,
@@ -67,10 +66,12 @@ from app.schemas.teaching import (
     TeachingTurnInput,
     TurnBrief,
 )
+from app.services.assessment import AssessmentService
 from app.services.curriculum import CurriculumService
+from app.services.lessons import LessonMaterial, LessonNotReady, load_lesson
 from app.services.tasks import TaskService
-from app.storage.repositories import NotFound
 from app.teaching import engine
+from app.teaching.grading import RESPONSE_TYPES
 from app.teaching.errors import (
     InvalidSessionTransition,
     InvalidTeachingRequest,
@@ -87,21 +88,11 @@ GOAL_KEY, CURRICULUM_KEY = "goal_id", "curriculum_id"
 CONTROL_ATTEMPTS = 3  # pause / resume / cancel re-read the session after a concurrent change
 
 
-@dataclass(frozen=True)
-class LessonMaterial:
-    task: Task
-    artifact: Artifact
-    lesson: LessonContent
-    request: LessonRequest
-    research: ResearchBundle | None
-    focus: LessonFocus | None
-
-
 class TeachingSessionService:
     def __init__(self, repository: TeachingRepository, runtime: TeachingRuntime, *, artifacts: ArtifactService,
                  memory: LearnerMemoryService, knowledge: KnowledgeBase, curriculum: CurriculumService,
-                 tasks: TaskService, events: EventBus, config: TeachingConfig | None = None,
-                 clock: Callable[[], datetime] = utcnow) -> None:
+                 tasks: TaskService, events: EventBus, assessment: AssessmentService,
+                 config: TeachingConfig | None = None, clock: Callable[[], datetime] = utcnow) -> None:
         self._repo = repository
         self._runtime = runtime
         self._artifacts = artifacts
@@ -110,6 +101,7 @@ class TeachingSessionService:
         self._curriculum = curriculum
         self._tasks = tasks
         self._events = events
+        self._assessment = assessment
         self.config = config or TeachingConfig()
         self._clock = clock
 
@@ -166,37 +158,9 @@ class TeachingSessionService:
     def _lesson(self, lesson_id: str) -> LessonMaterial:
         """A LESSON artifact id, or the id of the completed lesson task that produced it."""
         try:
-            artifact = self._artifacts.get(lesson_id)
-        except (NotFound, KeyError):
-            artifact = None
-        if artifact is not None:
-            if artifact.type != ArtifactType.LESSON:
-                raise NotFound(f"artifact {lesson_id} is not a lesson")
-            task = self._tasks.get(artifact.task_id)
-        else:
-            try:
-                task = self._tasks.get(lesson_id)
-            except NotFound:
-                raise NotFound(f"lesson {lesson_id} not found") from None
-            if task.plan is None or task.plan.workflow_id != LESSON_WORKFLOW:
-                raise NotFound(f"task {lesson_id} is not a lesson")
-            if task.status != TaskStatus.COMPLETED:
-                raise InvalidSessionTransition(f"lesson task {lesson_id} is {task.status.value}, not completed")
-            artifact = self._artifacts.find(task.task_id, "lesson")
-            if artifact is None:
-                raise NotFound(f"lesson task {lesson_id} has no lesson")
-        assert task.plan is not None
-        research_artifact = self._artifacts.find(task.task_id, "research_bundle")
-        plan_artifact = self._artifacts.find(task.task_id, "pedagogical_plan")
-        plan = (PedagogicalPlan.model_validate_json(self._artifacts.read(plan_artifact.artifact_id))
-                if plan_artifact is not None else None)
-        return LessonMaterial(
-            task=task, artifact=artifact,
-            lesson=LessonContent.model_validate_json(self._artifacts.read(artifact.artifact_id)),
-            request=task.plan.lesson_request,
-            research=(ResearchBundle.model_validate_json(self._artifacts.read(research_artifact.artifact_id))
-                      if research_artifact is not None else None),
-            focus=plan.focus if plan is not None else None)
+            return load_lesson(self._artifacts, self._tasks, lesson_id)
+        except LessonNotReady as exc:
+            raise InvalidSessionTransition(str(exc)) from None
 
     @staticmethod
     def _objective(m: LessonMaterial, data: StartTeachingSession) -> tuple[str | None, str, str, str]:
@@ -235,13 +199,16 @@ class TeachingSessionService:
             record = self._repo.request(session_id, data.client_turn_id)
             if record is not None:
                 return await self._replay(record, digest)
-        now = self._clock()
         if data.kind == "answer":
-            change = engine.record_answer(session, data.answer, now, client_turn_id=data.client_turn_id).change
+            engine.require_answerable(session)
+            graded = await self._assess(session, data.answer)
+            change = engine.record_answer(session, data.answer, self._clock(), assessment=graded,
+                                          client_turn_id=data.client_turn_id).change
         elif data.kind == "question":
-            change = engine.record_question(session, data.answer, now, client_turn_id=data.client_turn_id)
+            change = engine.record_question(session, data.answer, self._clock(), client_turn_id=data.client_turn_id)
         else:
-            change = engine.record_stop(session, data.answer, now, client_turn_id=data.client_turn_id)
+            change = engine.record_stop(session, data.answer, self._clock(), client_turn_id=data.client_turn_id)
+        now = self._clock()
         learner_turn = change.turns[0]
         record = TeachingRequestRecord(session_id=session_id,
                                        client_turn_id=data.client_turn_id or learner_turn.turn_id,
@@ -255,6 +222,37 @@ class TeachingSessionService:
         await self._publish(change.session)
         driven = await self._drive(change.session)
         return self._result(driven, learner_turn.turn_id, replayed=False)
+
+    async def _assess(self, session: TeachingSession, answer: str) -> AnswerAssessment:
+        """Grade the answer to the open question through the AssessmentService. The attempt id is derived from the
+        session version and the answer's turn, so the same request graded twice is graded once, and an answer that
+        was graded but never applied (a concurrent change won) leaves an auditable attempt only."""
+        q = session.state.pending_question
+        assert q is not None
+        turn_id = engine.answer_turn_id(session)
+        item = AssessmentItem(
+            assessment_item_id=stable_id("aitem", session.session_id, q.turn_id), lesson_id=session.lesson_id,
+            objective_id=session.objective_id, concept_id=q.concept_id, prompt=q.prompt,
+            expected_answer=q.expected_answer, acceptable_answers=q.accepted_answers,
+            response_type=RESPONSE_TYPES[q.kind], difficulty=session.config.evidence_difficulty(q.difficulty),
+            language=session.metadata.get("language") or "en",
+            choices=q.choices if q.kind == "multiple_choice" else [],
+            metadata={"session_id": session.session_id, "question_turn_id": q.turn_id})
+        try:
+            result = await self._assessment.assess(AssessRequest(
+                item=item, learner_id=session.learner_id, answer=answer, task_id=session.task_id,
+                attempt_id=stable_id("tatt", session.session_id, str(session.version), turn_id),
+                source="teaching_session", source_ref=turn_id))
+        except AttemptConflict as exc:  # a different answer to the same turn, sent concurrently
+            raise SessionConflict(str(exc)) from exc
+        g = result.grade
+        return AnswerAssessment(
+            outcome=g.outcome.value, score=g.fraction, grader_type=g.grader_type.value, grade_id=g.grade_id,
+            attempt_id=result.attempt.attempt_id,
+            feedback=" ".join(filter(None, [g.feedback.explanation, g.feedback.next_hint]))[:1000],
+            misconceptions=[MisconceptionCandidate(concept_id=m.concept_id, misconception=m.description[:200],
+                                                   confidence=m.confidence)
+                            for m in g.misconceptions if len(m.description) >= 3])
 
     async def _replay(self, record: TeachingRequestRecord, digest: str) -> AnswerResult:
         if record.request_hash != digest:
@@ -274,9 +272,12 @@ class TeachingSessionService:
         ids = {learner.turn_id, *(t.turn_id for t in reply)}
         evidence = [e for e in self._repo.evidence(session.session_id) if e.turn_id in ids]
         change = next((c for c in session.state.difficulty_history if c.turn_id == learner.turn_id), None)
+        attempt = learner.metadata.get("attempt_id")
         return AnswerResult(session_id=session.session_id, status=session.status, replayed=replayed,
                             learner_turn=learner, teacher_turns=reply, evidence=evidence,
-                            correct=learner.metadata.get("correct"), difficulty=session.state.difficulty,
+                            correct=learner.metadata.get("correct"), answer_outcome=learner.metadata.get("outcome"),
+                            assessment=self._assessment.grade_for(attempt) if attempt else None,
+                            difficulty=session.state.difficulty,
                             difficulty_change=change, completion_reason=session.state.completion_reason,
                             waiting_question=self._public_question(session), summary=session.summary,
                             outcome=session.outcome)
@@ -340,6 +341,7 @@ class TeachingSessionService:
             concept_name=st.concept_name, difficulty=st.difficulty, strategy=st.strategy,
             questions_asked=st.questions_asked, questions_answered=st.questions_answered,
             correct_answers=st.correct_answers, incorrect_answers=st.incorrect_answers,
+            partial_answers=st.partial_answers, uncertain_answers=st.uncertain_answers,
             consecutive_successes=st.consecutive_successes, consecutive_failures=st.consecutive_failures,
             hints_used=st.hints_used, misconceptions=list(dict.fromkeys(m.misconception for m in st.misconceptions)),
             difficulty_trajectory=st.difficulty_trajectory, difficulty_changes=st.difficulty_history,
@@ -488,7 +490,10 @@ class TeachingSessionService:
                                    expected_answer=question.expected_answer,
                                    accepted_answers=question.accepted_answers, difficulty=question.difficulty)
             if question is not None else None,
-            learner_answer=answer.answer if answer else None, answer_correct=answer.correct if answer else None,
+            learner_answer=answer.answer if answer else None,
+            answer_correct=(None if answer.grade == "UNCERTAIN" else answer.correct) if answer else None,
+            answer_outcome=answer.grade if answer else None,
+            assessment_feedback=(answer.feedback or None) if answer else None,
             correction=item.correction,
             hint_level=item.hint_level if item.action.value == "HINT" else (answer.hint_level if answer else 0),
             reveal_answer=cfg.reveal_answer_in_hints, difficulty=st.difficulty,
@@ -630,12 +635,16 @@ class TeachingSessionService:
     @staticmethod
     def _learning_evidence(session: TeachingSession, e: InteractionEvidence) -> LearningEvidence:
         """A graded session answer as LearningEvidence: correct unaided 1.0, correct after a hint partial credit,
-        incorrect 0.0; the session difficulty weights it like any other evidence."""
-        if e.correct and e.hint_level == 0:
+        partially correct its validated score (less the hint penalty), incorrect 0.0; the session difficulty weights
+        it like any other evidence. UNCERTAIN answers never get here."""
+        penalty = 1 - session.config.hint_penalty * e.hint_level
+        if e.outcome == "PARTIAL":
+            correctness, score = graded_correctness("PARTIAL", (e.score or 0.0) * penalty)
+        elif e.correct and e.hint_level == 0:
             correctness, score = "correct", 1.0
         elif e.correct:
             correctness = "partial"
-            score = round(min(0.95, max(0.05, 1 - session.config.hint_penalty * e.hint_level)), 4)
+            score = round(min(0.95, max(0.05, penalty)), 4)
         else:
             correctness, score = "incorrect", 0.0
         ref = f"{session.session_id}/{e.turn_id}"
@@ -645,7 +654,8 @@ class TeachingSessionService:
             correctness=correctness, score=score, difficulty=session.config.evidence_difficulty(e.difficulty),
             timestamp=e.created_at,
             metadata={"session_id": session.session_id, "turn_id": e.turn_id, "interaction_evidence_id": e.evidence_id,
-                      "hint_level": e.hint_level})
+                      "hint_level": e.hint_level, **({"outcome": e.outcome} if e.outcome else {}),
+                      **({"grade_id": e.metadata["grade_id"]} if "grade_id" in e.metadata else {})})
 
 
 def _answer(text: str) -> str:

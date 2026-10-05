@@ -101,13 +101,15 @@ class TeachingSessionAgent(Agent[TeachingTurnInput, TeacherTurnOutput]):
         answers = self._answers(source)
         if source.action == TeachingAction.HINT and not source.reveal_answer and reveals(output.response, answers):
             raise OutputRejected("a hint must not reveal the expected answer")
+        if source.answer_outcome == "UNCERTAIN" and reveals(output.response, answers):
+            raise OutputRejected("the question stays open after an ungradable answer: do not reveal the answer")
         allowed = ({s.ref for s in source.sections} | {c for s in source.sections for c in s.citations}
                    | {i.ref for i in source.sources} | {c for i in source.sources for c in i.citations})
         invented = sorted(set(output.citations) - allowed)
         if invented:
             raise OutputRejected(f"citations {invented} do not exist in the lesson material")
         if output.misconceptions:
-            if source.answer_correct is not False:
+            if source.answer_correct is not False or source.answer_outcome not in (None, "INCORRECT"):
                 raise OutputRejected("misconceptions can only be proposed for an incorrect answer")
             stray = sorted({m.concept_id for m in output.misconceptions} - {source.objective.concept_id})
             if stray:
@@ -130,5 +132,5 @@ class TeachingSessionAgent(Agent[TeachingTurnInput, TeacherTurnOutput]):
         q = output.question
         if output.expected_response_type != ("multiple_choice" if q.kind == "multiple_choice" else "free_text"):
             raise OutputRejected("expected_response_type must match the question kind")
-        if q.kind == "short_answer" and reveals(q.prompt, [q.expected_answer]):
+        if q.kind in ("short_answer", "free_text") and reveals(q.prompt, [q.expected_answer]):
             raise OutputRejected("the question must not contain its own answer")

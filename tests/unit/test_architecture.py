@@ -21,12 +21,15 @@ ALLOWED: dict[str, set[str]] = {
     "curriculum": FOUNDATION | {"curriculum", "pedagogy", "learner"},
     "artifacts": FOUNDATION | {"artifacts"},
     # The interactive-teaching engine is pure: session state, policy, grading and transitions over schemas only.
-    "teaching": FOUNDATION | {"teaching"},
+    "teaching": FOUNDATION | {"teaching", "assessment"},
+    # The assessment engine is pure too: normalisation, matching, rubrics, classification and the validation of a
+    # semantic grader's candidate; it reaches models only through the SemanticGrader interface its callers supply.
+    "assessment": FOUNDATION | {"assessment"},
     "tools": FOUNDATION | {"tools", "providers", "learner", "pedagogy", "curriculum", "artifacts"},
-    "agents": FOUNDATION | {"agents", "tools", "providers"},
+    "agents": FOUNDATION | {"agents", "tools", "providers", "assessment"},
     "runtime": FOUNDATION | {"runtime", "agents", "tools", "providers"},
     "services": FOUNDATION | {"services", "runtime", "agents", "tools", "providers", "learner", "pedagogy",
-                              "curriculum", "artifacts", "storage", "teaching"},
+                              "curriculum", "artifacts", "storage", "teaching", "assessment"},
     "api": FOUNDATION | {"api", "services"},
 }
 # Finer rules on top of the layer order.

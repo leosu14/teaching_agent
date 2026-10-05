@@ -17,6 +17,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
+from app.schemas.assessment import PublicGrade
 from app.schemas.common import Schema
 
 # --- enums ---------------------------------------------------------------------------------------------------------
@@ -85,7 +86,10 @@ class EvidenceType(str, Enum):
 
 
 SessionMode = Literal["assessed", "practice"]
-QuestionKind = Literal["short_answer", "multiple_choice"]
+# short_answer and multiple_choice are graded deterministically; free_text (an explanation) against a rubric, by the
+# semantic grader when it is not an acceptable answer. Every answer is graded by the AssessmentService.
+QuestionKind = Literal["short_answer", "multiple_choice", "free_text"]
+AnswerGrade = Literal["CORRECT", "PARTIAL", "INCORRECT", "UNCERTAIN"]
 LearnerInputKind = Literal["answer", "question", "stop"]
 
 
@@ -160,6 +164,7 @@ class PlannedTurn(Schema):
     purpose: Literal["teach", "answer_question"] = "teach"
     responds_to: str | None = None
     correction: bool = False  # FEEDBACK that reveals the expected answer (the question is closed)
+    clarify: bool = False  # FEEDBACK asking the learner to answer again: the answer could not be graded (UNCERTAIN)
     hint_level: int = Field(default=0, ge=0, le=3)  # HINT: the level this hint is written at
 
 
@@ -184,6 +189,24 @@ class AnswerOutcome(Schema):
     answer: str
     correct: bool
     hint_level: int = 0
+    outcome: AnswerGrade | None = None  # None: stored before outcomes existed (CORRECT / INCORRECT from `correct`)
+    feedback: str = ""  # the assessment's explanation and next hint, for the teacher to phrase
+
+    @property
+    def grade(self) -> AnswerGrade:
+        return self.outcome or ("CORRECT" if self.correct else "INCORRECT")
+
+
+class AnswerAssessment(Schema):
+    """The AssessmentService's validated grade of a session answer: the only input the engine grades from."""
+
+    outcome: AnswerGrade
+    score: float = Field(ge=0, le=1)
+    grader_type: str
+    grade_id: str | None = None
+    attempt_id: str | None = None
+    feedback: str = ""
+    misconceptions: list[MisconceptionCandidate] = Field(default_factory=list)  # validated by the assessment layer
 
 
 class SessionState(Schema):
@@ -200,6 +223,8 @@ class SessionState(Schema):
     questions_answered: int = 0
     correct_answers: int = 0
     incorrect_answers: int = 0
+    partial_answers: int = 0  # partly correct: neither a success nor a failure
+    uncertain_answers: int = 0  # could not be graded: not counted, the learner answers again
     assisted_correct: int = 0  # correct after a hint
     consecutive_successes: int = 0
     consecutive_failures: int = 0
@@ -297,7 +322,9 @@ class InteractionEvidence(Schema):
     learner_id: str
     concept_id: str
     evidence_type: EvidenceType
-    correct: bool | None = None
+    correct: bool | None = None  # None for an answer: UNCERTAIN (never evidence of mastery)
+    outcome: AnswerGrade | None = None  # ANSWER: the assessment's outcome
+    score: float | None = Field(default=None, ge=0, le=1)  # ANSWER: the assessment's 0-1 score
     hint_level: int = Field(default=0, ge=0)
     hints_used: int = Field(default=0, ge=0)
     answer_after_hint: bool = False
@@ -434,6 +461,8 @@ class TeachingTurnInput(Schema):
     question: QuestionBrief | None = None  # the question being answered or hinted at
     learner_answer: str | None = None
     answer_correct: bool | None = None
+    answer_outcome: AnswerGrade | None = None  # CORRECT, PARTIAL, INCORRECT or UNCERTAIN (ask to answer again)
+    assessment_feedback: str | None = None  # the assessment's explanation of the grade
     correction: bool = False  # a FEEDBACK turn that may reveal the expected answer
     hint_level: int = Field(default=0, ge=0, le=3)
     reveal_answer: bool = False
@@ -559,6 +588,8 @@ class PublicState(Schema):
     questions_answered: int
     correct_answers: int
     incorrect_answers: int
+    partial_answers: int = 0
+    uncertain_answers: int = 0
     consecutive_successes: int
     consecutive_failures: int
     hints_used: int
@@ -617,9 +648,14 @@ class AnswerResult(Schema):
     teacher_turns: list[TeachingTurn]
     evidence: list[InteractionEvidence]
     correct: bool | None = None
+    answer_outcome: AnswerGrade | None = None  # correct, partially correct, incorrect, or uncertain (answer again)
+    assessment: PublicGrade | None = None  # the answer's grade: score, criteria, feedback
     difficulty: int
     difficulty_change: DifficultyChange | None = None
     completion_reason: CompletionReason | None = None
     waiting_question: PublicQuestion | None = None
     summary: TeachingSessionSummary | None = None
     outcome: SessionOutcome | None = None
+
+
+AnswerAssessment.model_rebuild()

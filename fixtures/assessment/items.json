@@ -1,0 +1,149 @@
+{
+  "_comment": "Assessment items for scripts/run_assessment_demo.py, on the lesson the curriculum generates for es.past_contrast (the curriculum demo's learner, with the preterite secured). The ids are prefixed with the lesson id at run time. 'answers' are what the scripted learner says.",
+  "items": [
+    {
+      "item": {
+        "assessment_item_id": "conjugate",
+        "concept_id": "es.past_contrast",
+        "prompt": "Completa la frase: Ayer yo ___ (hablar) con María.",
+        "expected_answer": "hablé",
+        "response_type": "SHORT_TEXT",
+        "difficulty": 0.4,
+        "language": "es",
+        "known_errors": [
+          {
+            "answer": "hablaba",
+            "misconception_type": "imperfect_for_completed_action",
+            "description": "uses the imperfect for an action completed at a specific time (ayer)"
+          }
+        ]
+      },
+      "answers": {
+        "exact": "Hablé.",
+        "wrong": "hablo",
+        "known": "hablaba"
+      }
+    },
+    {
+      "item": {
+        "assessment_item_id": "why_preterite",
+        "concept_id": "es.past_contrast",
+        "prompt": "¿Por qué usamos el pretérito en esta frase? «Ayer terminé el libro.»",
+        "expected_answer": "The action is completed.",
+        "acceptable_answers": [
+          "Because the action is finished."
+        ],
+        "response_type": "FREE_TEXT",
+        "rubric_id": "why_preterite_rubric",
+        "difficulty": 0.6,
+        "language": "es",
+        "misconceptions": [
+          {
+            "type": "preterite_as_habitual",
+            "description": "treats the preterite as describing a habitual or ongoing past action",
+            "cues": [
+              "habitual",
+              "duraba",
+              "siempre",
+              "todos los días"
+            ]
+          }
+        ]
+      },
+      "rubric": {
+        "rubric_id": "why_preterite_rubric",
+        "name": "Why the preterite",
+        "language": "es",
+        "passing_threshold": 0.8,
+        "criteria": [
+          {
+            "criterion_id": "completed",
+            "description": "says the action is completed",
+            "weight": 0.6,
+            "required": true,
+            "concept_id": "es.past_contrast",
+            "indicators": [
+              "terminó",
+              "acción terminó",
+              "completada",
+              "acabó",
+              "completed",
+              "finished"
+            ]
+          },
+          {
+            "criterion_id": "bounded",
+            "description": "places the action at a bounded moment in the past",
+            "weight": 0.4,
+            "indicators": [
+              "ayer",
+              "ya",
+              "momento concreto",
+              "pasado"
+            ]
+          }
+        ]
+      },
+      "answers": {
+        "semantic": "Porque la acción ya terminó.",
+        "partial": "Porque pasó ayer.",
+        "misconception": "Porque es una acción habitual que duraba.",
+        "uncertain": "Mi gato come pescado los domingos."
+      }
+    },
+    {
+      "item": {
+        "assessment_item_id": "explain_story",
+        "concept_id": "es.past_contrast",
+        "prompt": "En «Leía cuando sonó el teléfono», ¿qué verbo interrumpe y por qué?",
+        "expected_answer": "sonó interrumpe porque es una acción puntual en pretérito",
+        "response_type": "FREE_TEXT",
+        "rubric_id": "story_rubric",
+        "difficulty": 0.7,
+        "language": "es"
+      },
+      "rubric": {
+        "rubric_id": "story_rubric",
+        "name": "Interrupting action (deterministic)",
+        "language": "es",
+        "deterministic": true,
+        "passing_threshold": 0.8,
+        "criteria": [
+          {
+            "criterion_id": "verb",
+            "description": "names sonó as the interrupting verb",
+            "weight": 0.5,
+            "required": true,
+            "indicators": [
+              "sonó"
+            ]
+          },
+          {
+            "criterion_id": "aspect",
+            "description": "says it is a punctual, completed action",
+            "weight": 0.3,
+            "indicators": [
+              "puntual",
+              "terminó",
+              "completa",
+              "de repente"
+            ]
+          },
+          {
+            "criterion_id": "background",
+            "description": "says leía is the ongoing background",
+            "weight": 0.2,
+            "indicators": [
+              "leía",
+              "fondo",
+              "en curso"
+            ]
+          }
+        ]
+      },
+      "answers": {
+        "rubric": "El verbo sonó, porque es una acción puntual."
+      }
+    }
+  ]
+}

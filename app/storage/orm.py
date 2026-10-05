@@ -163,3 +163,42 @@ class TeachingOutboxRow(Base):
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     published: Mapped[bool] = mapped_column(Boolean, default=False)
     body: Mapped[str] = mapped_column(Text)
+
+
+class AssessmentItemRow(Base):
+    """An immutable assessment item (the full item as JSON; its content hash detects a conflicting re-registration)."""
+
+    __tablename__ = "assessment_items"
+    item_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    lesson_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    body: Mapped[str] = mapped_column(Text)
+
+
+class AssessmentRubricRow(Base):
+    __tablename__ = "assessment_rubrics"
+    rubric_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    body: Mapped[str] = mapped_column(Text)
+
+
+class AssessmentAttemptRow(Base):
+    """Append-only: one attempt per row. The attempt number is unique per learner and item."""
+
+    __tablename__ = "assessment_attempts"
+    __table_args__ = (UniqueConstraint("item_id", "learner_id", "attempt_number"),)
+    attempt_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    item_id: Mapped[str] = mapped_column(String(128), index=True)
+    learner_id: Mapped[str] = mapped_column(String(128), index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    grade_id: Mapped[str] = mapped_column(String(64), unique=True)
+    body: Mapped[str] = mapped_column(Text)
+
+
+class AssessmentGradeRow(Base):
+    """Append-only and immutable: one grade per attempt."""
+
+    __tablename__ = "assessment_grades"
+    grade_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    attempt_id: Mapped[str] = mapped_column(String(128), unique=True)
+    body: Mapped[str] = mapped_column(Text)
