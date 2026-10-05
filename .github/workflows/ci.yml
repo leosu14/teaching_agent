@@ -49,3 +49,5 @@ jobs:
         run: python scripts/run_curriculum_demo.py
       - name: Interactive demo (session -> adaptive turns -> hint -> grounded questions -> restart -> completion -> mastery)
         run: python scripts/run_interactive_demo.py
+      - name: Assessment demo (exact -> rule -> semantic -> partial -> uncertain -> rubric -> mastery -> next action)
+        run: python scripts/run_assessment_demo.py

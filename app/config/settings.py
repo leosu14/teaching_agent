@@ -19,6 +19,7 @@ from app.schemas.pedagogy import (
     PedagogyConfig,
     PlannerConfig,
 )
+from app.schemas.assessment import AssessmentConfig
 from app.schemas.teaching import TeachingConfig
 from app.schemas.video import VideoConfig
 
@@ -122,6 +123,16 @@ class Settings(BaseSettings):
     teaching_max_questions: int | None = Field(default=None, ge=1, le=100)
     teaching_max_turns: int | None = Field(default=None, ge=4, le=400)
 
+    # Semantic assessment: the deterministic grade's thresholds (TA_ASSESSMENT_*). Unset values keep
+    # AssessmentConfig's defaults. A model's own score or outcome never overrides them.
+    assessment_correct_threshold: float | None = Field(default=None, gt=0, le=1)
+    assessment_partial_threshold: float | None = Field(default=None, ge=0, lt=1)
+    assessment_accept_confidence: float | None = Field(default=None, gt=0, le=1)
+    assessment_min_confidence: float | None = Field(default=None, ge=0, le=1)
+    assessment_mid_confidence: Literal["partial", "uncertain"] | None = None
+    assessment_semantic_enabled: bool | None = None  # False: free text the rules cannot decide is UNCERTAIN
+    assessment_accent_insensitive_languages: str | None = None  # comma-separated, e.g. "es,pt"
+
     log_level: str = "INFO"
     log_json: bool = True
 
@@ -175,6 +186,21 @@ class Settings(BaseSettings):
             return TeachingConfig(**{k: v for k, v in fields.items() if v is not None})
         except ValueError as exc:
             raise ConfigError(f"invalid teaching configuration: {exc}") from exc
+
+    def assessment_config(self) -> AssessmentConfig:
+        """AssessmentConfig with the configured overrides; everything unset keeps its single default."""
+        languages = self.assessment_accent_insensitive_languages
+        fields = {"correct_threshold": self.assessment_correct_threshold,
+                  "partial_threshold": self.assessment_partial_threshold,
+                  "accept_confidence": self.assessment_accept_confidence,
+                  "min_confidence": self.assessment_min_confidence, "mid_confidence": self.assessment_mid_confidence,
+                  "semantic_enabled": self.assessment_semantic_enabled,
+                  "accent_insensitive_languages": [x.strip() for x in languages.split(",") if x.strip()]
+                  if languages is not None else None}
+        try:
+            return AssessmentConfig(**{k: v for k, v in fields.items() if v is not None})
+        except ValueError as exc:
+            raise ConfigError(f"invalid assessment configuration: {exc}") from exc
 
     def video_config(self) -> VideoConfig:
         """VideoConfig with the configured overrides; everything unset keeps its single default in VideoConfig."""

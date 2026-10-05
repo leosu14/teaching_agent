@@ -14,6 +14,7 @@ from collections import defaultdict
 
 from app.providers.llm.base import LLMRequest
 from app.providers.llm.mock import Responder
+from app.schemas.assessment import SemanticGradingRequest
 from app.schemas.audio import AudioPlanningInput, AudioPlanProposal, NarrationProposal, concise
 from app.schemas.curriculum import CurriculumBrief, CurriculumProposal, ProposedObjective
 from app.schemas.evaluation import (
@@ -764,22 +765,36 @@ def _grade(p: EvaluationInput) -> EvaluationStep:
     assert p.assessment is not None and p.response is not None
     answers = {a.question_id: a.answer for a in p.response.answers}
     names = {s.concept_id: s.heading for s in p.lesson.sections}
+    grades = {g.question_id: g for g in p.grades}  # the assessment service's validated grades: reported, not redone
     evaluations = []
     for q in p.assessment.questions:
         given = answers.get(q.question_id, "")
-        accepted = {normalize(q.expected_answer), *(normalize(a) for a in q.accepted_answers)}
-        correct = bool(given) and normalize(given) in accepted
+        grade = grades.get(q.question_id)
+        if grade is not None:
+            correct = grade.outcome == "CORRECT"
+            feedback = "Correct." if correct else grade.feedback or f"Expected: {q.expected_answer}"
+        else:
+            accepted = {normalize(q.expected_answer), *(normalize(a) for a in q.accepted_answers)}
+            correct = bool(given) and normalize(given) in accepted
+            feedback = "Correct." if correct else f"Expected: {q.expected_answer}"
         evaluations.append(AnswerEvaluation(
             question_id=q.question_id, concept_id=q.concept_id, answer=given, expected=q.expected_answer,
-            correct=correct, difficulty=q.difficulty,
-            feedback="Correct." if correct else f"Expected: {q.expected_answer}",
+            correct=correct, difficulty=q.difficulty, feedback=feedback,
         ))
     points = {q.question_id: q.points for q in p.assessment.questions}
+
+    def credit(e: AnswerEvaluation) -> float | None:  # None: UNCERTAIN, not counted
+        grade = grades.get(e.question_id)
+        if grade is None:
+            return 1.0 if e.correct else 0.0
+        return None if grade.outcome == "UNCERTAIN" else grade.score
+
     concepts: list[ConceptOutcome] = []
     for cid in dict.fromkeys(q.concept_id for q in p.assessment.questions):
         mine = [e for e in evaluations if e.concept_id == cid]
-        possible = sum(points[e.question_id] for e in mine)
-        earned = sum(points[e.question_id] for e in mine if e.correct)
+        counted = [e for e in mine if credit(e) is not None] or mine
+        possible = sum(points[e.question_id] for e in counted)
+        earned = round(sum(points[e.question_id] * (credit(e) or 0.0) for e in counted), 4)
         score = earned / possible
         status = "mastered" if score == 1 else "partial" if score >= 0.5 else "gap"
         concepts.append(ConceptOutcome(concept_id=cid, name=names.get(cid, cid), questions=len(mine),
@@ -815,6 +830,82 @@ def _grade(p: EvaluationInput) -> EvaluationStep:
         recommendation=rec,
     )
     return EvaluationStep(stage="evaluate", result=result)
+
+
+# --- semantic grading ----------------------------------------------------------------------------------------------
+
+# Function words left out of the mock's overlap measure (a few languages; the real grader reads meaning).
+STOPWORDS = frozenset("""
+a an and are as at be because but by for from has have in is it its of on or so that the this to was were with
+el la los las un una unos unas y o de del al en por para con que porque es son fue era se lo le su sus mas muy
+le les des du et est une pour dans qui parce o os as um uma e do da dos das em no na com porque der die das und ist
+ein eine zu mit weil il lo gli di che perche
+""".split())
+
+
+def _fold(text: str) -> str:
+    text = unicodedata.normalize("NFD", unicodedata.normalize("NFKC", text).lower())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text)).strip()
+
+
+def _stems(text: str) -> set[str]:
+    """Content words, cut to a five-letter stem ("terminó", "terminada" -> "termi")."""
+    return {w[:5] for w in _fold(text).split() if len(w) > 2 and w not in STOPWORDS}
+
+
+def _phrase_in(phrase: str, answer: str) -> bool:
+    folded = _fold(phrase)
+    return bool(folded) and (f" {folded} " in f" {_fold(answer)} " or (bool(_stems(phrase))
+                                                                       and _stems(phrase) <= _stems(answer)))
+
+
+def grade_semantically(request: LLMRequest) -> dict:
+    """A deterministic stand-in for a semantic grader. A criterion with indicators is met when the answer says one of
+    them (by phrase or by its content-word stems, so wording and inflection may differ); a criterion without them is
+    scored by the overlap with the expected and acceptable answers. Confidence is how much of the answer's content the
+    grading material accounts for: an answer the material cannot explain gets a low confidence."""
+    p = SemanticGradingRequest.model_validate(request.input_payload)
+    answer, item = p.learner_answer, p.item
+    references = [item.expected_answer, *item.acceptable_answers]
+    results = []
+    for c in p.rubric.criteria:
+        if c.indicators:
+            hit = next((i for i in c.indicators if _phrase_in(i, answer)), None)
+            score, why = (1.0, f"says '{hit}'") if hit else (0.0, "not stated")
+        else:
+            expected = set().union(*(_stems(r) for r in references))
+            overlap = len(expected & _stems(answer)) / len(expected) if expected else 0.0
+            score, why = round(overlap, 2), f"{round(overlap * 100)}% of the expected meaning"
+        results.append({"criterion_id": c.criterion_id, "score": score, "rationale": why})
+    weights = {c.criterion_id: c.weight for c in p.rubric.criteria}
+    total = round(sum(r["score"] * weights[r["criterion_id"]] for r in results), 4)
+    vocabulary = set().union(
+        *(_stems(t) for t in [item.prompt, *references, *(m.description for m in item.misconceptions),
+                              *(cue for m in item.misconceptions for cue in m.cues),
+                              *(c.description for c in p.rubric.criteria),
+                              *(i for c in p.rubric.criteria for i in c.indicators),
+                              *(x.text for x in [*p.lesson_context, *p.research_evidence])]))
+    words = _stems(answer)
+    coverage = len(words & vocabulary) / len(words) if words else 0.0
+    confidence = round(0.4 + 0.55 * coverage, 2)
+    misconceptions = [{"concept_id": m.concept_id or item.concept_id, "type": m.type, "description": m.description,
+                       "confidence": 0.8}
+                      for m in item.misconceptions if any(_phrase_in(cue, answer) for cue in m.cues)]
+    outcome = ("CORRECT" if total >= p.rubric.passing_threshold else "PARTIAL" if total >= 0.4 else "INCORRECT")
+    met = [c for c, r in zip(p.rubric.criteria, results) if r["score"] >= 0.5]
+    unmet = [c for c, r in zip(p.rubric.criteria, results) if r["score"] < 0.5]
+    source = (p.lesson_context or p.research_evidence or [None])[0]
+    explanation = ""
+    if source is not None:
+        first = sentences(source.text)
+        explanation = f"{source.title}: {first[0] if first else source.text}"
+    return {"score": total, "criterion_results": results, "outcome": outcome, "confidence": confidence,
+            "misconceptions": misconceptions,
+            "feedback": {"strengths": [c.description for c in met], "errors": [c.description for c in unmet],
+                         "explanation": explanation[:1000],
+                         "next_hint": f"Think about this: {unmet[0].description}" if unmet else ""},
+            "citations": [source.ref] if source is not None else []}
 
 
 # --- interactive teaching ------------------------------------------------------------------------------------------
@@ -886,7 +977,7 @@ def _teacher_turn(p: TeachingTurnInput) -> TeacherTurnOutput:
     base = {"action": p.action, "concept_id": concept.concept_id, "difficulty": p.difficulty,
             "expected_response_type": "none"}
     misconceptions = []
-    if p.answer_correct is False and p.learner_answer:
+    if p.answer_correct is False and p.learner_answer and p.answer_outcome in (None, "INCORRECT"):
         misconceptions = [MisconceptionCandidate(
             concept_id=concept.concept_id, confidence=0.7,
             misconception=f"uses a different form where {concept.concept_name.lower()} is required")]
@@ -913,6 +1004,15 @@ def _teacher_turn(p: TeachingTurnInput) -> TeacherTurnOutput:
         return TeacherTurnOutput(**base, response=_hint(p), hint_level=p.hint_level, misconceptions=misconceptions)
     if p.action == TeachingAction.FEEDBACK:
         assert p.question is not None
+        if p.answer_outcome == "UNCERTAIN":  # the question stays open: never reveal the answer
+            return TeacherTurnOutput(**base, response=(
+                "I couldn't grade that answer reliably, so it doesn't count yet. "
+                f"Please answer again in a complete sentence: {p.question.prompt}"))
+        if p.answer_outcome == "PARTIAL":
+            text = f"Partly right: '{p.learner_answer}'."
+            if p.assessment_feedback:
+                text += f" {p.assessment_feedback}"
+            return TeacherTurnOutput(**base, response=text + f" A complete answer: '{p.question.expected_answer}'.")
         if p.correction:
             answers = [p.question.expected_answer, *p.question.accepted_answers]
             text = f"Not quite. The answer is '{p.question.expected_answer}'. {_rule(p, answers)}"
@@ -948,4 +1048,5 @@ def default_responders(*, first_draft_defects: bool = True) -> dict[str, Respond
         "visual": visuals,
         "learner_evaluation": evaluate_learner,
         "teaching_session": teach,
+        "semantic_grader": grade_semantically,
     }

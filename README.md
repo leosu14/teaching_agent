@@ -46,6 +46,12 @@ answer learner questions from the lesson's grounded material. A completed sessio
 learner memory's existing updater, and the curriculum selects the next action. See
 [architecture](docs/architecture.md#interactive-teaching-sessions).
 
+**Semantic assessment** (`app/assessment/`, `AssessmentService`) grades every answer, in sessions, evaluations and
+the assessment API: deterministic normalisation and matching first, then known-error rules and deterministic rubrics,
+and a validated semantic grader only for free text. Rubric scores aggregate by weight, outcomes (CORRECT, PARTIAL,
+INCORRECT, UNCERTAIN) are classified by code against configurable thresholds, and an ungradable answer is UNCERTAIN,
+never INCORRECT. See [architecture](docs/architecture.md#semantic-assessment).
+
 ## Run it
 
 ```bash
@@ -55,6 +61,7 @@ python scripts/run_evaluation_demo.py  # lesson, then its evaluation, mastery be
 python scripts/run_adaptive_demo.py    # learner model -> gaps -> plan -> lesson -> evaluation -> new recommendation
 python scripts/run_curriculum_demo.py  # goal -> curriculum -> next action -> lesson -> evaluation -> progress -> done
 python scripts/run_interactive_demo.py # interactive session: adaptive turns, hints, grounded questions, restart, mastery
+python scripts/run_assessment_demo.py  # exact, rule, rubric and semantic grading, partial, uncertain, mastery, next action
 python scripts/run_research_demo.py    # the lesson's research: queries, results, sources, evidence, citations
 python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, selection, generation, validation, assets
 python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validation, build, real .pptx with the images
@@ -90,6 +97,12 @@ hint, a correct easier one (1 → 2), a pause and a process restart, a grounded 
 (a structured limitation), and a final correct check that completes the session. It prints the summary, the mastery
 update, objective progress, the next action, the artifact lineage and the session's events, and exits 1 unless every
 check passes.
+`run_assessment_demo.py` (`fixtures/assessment/`) registers three items on that lesson and grades a scripted
+learner: an exact-match miss, a free-text answer showing a misconception and a known wrong form (three misses in a row
+switch the next action to reteaching), an exact-match hit, "Porque la acción ya terminó." credited semantically for
+"The action is completed.", a partial answer (0.4), an ungradable answer (UNCERTAIN, no mastery change, retried),
+a deterministic rubric (Σ score × weight), the mastery updates, a replayed and a conflicting attempt, the lineage and
+the events. It runs twice and exits 1 unless every check passes and the grades are identical.
 `run_research_demo.py` runs the lesson and shows its research: the request, generated queries, mock search
 results (with duplicates), selected and rejected sources, extracted evidence, citations, the stored
 ResearchBundle, and how each lesson section's citations resolve to evidence and sources.
@@ -153,6 +166,10 @@ graph, per-request traceability, usage and cost. `--mock` rehearses the same pat
 | GET | `/teaching-sessions/{id}` | Session state, turns, objective progress, next action; summary and outcome once completed |
 | POST | `/teaching-sessions/{id}/answers` | The learner's answer, question or stop (`{"answer", "client_turn_id", "kind"}`); idempotent per `client_turn_id` |
 | POST | `/teaching-sessions/{id}/pause` · `/resume` · `/cancel` | Session control (cancel is idempotent and keeps the history) |
+| POST | `/assessment-items` | Register an assessment item on a lesson, with its rubric (immutable; the same item again is a no-op) |
+| POST | `/assessment-items/{id}/attempts` | Grade an answer (`{"learner_id", "answer", "attempt_id"}`); idempotent per `attempt_id`; updates mastery unless UNCERTAIN |
+| GET | `/assessment-items/{id}/attempts?learner_id=` | Every attempt of a learner on the item, in order |
+| GET | `/assessment-attempts/{id}` · `/grade` | An attempt / its grade (outcome, score, criteria, misconceptions, feedback) |
 | GET | `/learners/{id}/next-action` | The next learning action across the learner's goals (`?as_of=` for a given time) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 

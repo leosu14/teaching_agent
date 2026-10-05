@@ -401,11 +401,12 @@ class LearnerMemoryService:
             return []
         now = self._clock()
         evidence_kind = "diagnostic" if kind == "diagnostic" else "evaluation"
+        graded = [ev for ev in evaluations if ev.counts]  # an UNCERTAIN grade is kept on record, never evidence
         evidence = [LearningEvidence.from_answer(profile.learner_id, evidence_kind, task_id, ev, now)
-                    for ev in evaluations]
+                    for ev in graded]
         reasons = ("correct answer", "wrong answer") if kind == "diagnostic" else (
             "correct on assessment", "missed on assessment")
-        for ev in evaluations:
+        for ev in graded:
             tracker.reasons.setdefault(ev.concept_id, []).append(reasons[0] if ev.correct else reasons[1])
             if not ev.correct:
                 profile.mistakes.append(MistakeRecord(task_id=task_id, concept_id=ev.concept_id,
@@ -415,7 +416,8 @@ class LearnerMemoryService:
         self._events.add(LearningEvent.create(
             profile.learner_id, event_type, now, key=task_id, subject=subject, task_id=task_id,
             concept_ids=sorted({ev.concept_id for ev in evaluations}),
-            data={"questions": len(evaluations), "correct": sum(ev.correct for ev in evaluations)}))
+            data={"questions": len(evaluations), "correct": sum(ev.correct for ev in evaluations),
+                  "uncertain": len(evaluations) - len(graded)}))
         self._apply(profile, tracker, evidence, key=task_id)
         profile.assessments.append(AssessmentRecord(task_id=task_id, subject=subject, at=now, estimated_level=level,
                                                     kind=kind, evaluations=evaluations,

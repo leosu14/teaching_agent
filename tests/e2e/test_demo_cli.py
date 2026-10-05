@@ -155,3 +155,16 @@ def test_interactive_demo_script_runs_to_completion(tmp_path) -> None:
                      "next action:", "INTERACTION_EVIDENCE", "teaching_session.completed x1", "all checks passed"):
         assert expected in out, expected
     assert "[FAIL]" not in out
+
+
+def test_assessment_demo_script_runs_to_completion(tmp_path) -> None:
+    proc = subprocess.run([sys.executable, "scripts/run_assessment_demo.py", "--data-dir", str(tmp_path)],
+                          cwd=REPO_ROOT, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    for expected in ("graded by EXACT", "graded by RULE", "graded by SEMANTIC", "graded by RUBRIC", "-> PARTIAL",
+                     "-> UNCERTAIN", "misconception preterite_as_habitual", "now:                LEARN es.past_contrast",
+                     "mastery es.past_contrast:", "ASSESSMENT_GRADE", "assessment.uncertain x1", "all checks passed",
+                     "a second run on a fresh data directory produces identical grades"):
+        assert expected in out, expected
+    assert "[FAIL]" not in out

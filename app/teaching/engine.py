@@ -23,6 +23,7 @@ from app.schemas.events import EventType
 from app.schemas.learner import stable_id
 from app.schemas.teaching import (
     QUESTION_ACTIONS,
+    AnswerAssessment,
     AnswerOutcome,
     CompletionReason,
     DifficultyChange,
@@ -45,7 +46,7 @@ from app.schemas.teaching import (
     TurnType,
 )
 from app.teaching.errors import InvalidSessionTransition
-from app.teaching.grading import grade, normalize
+from app.teaching.grading import deterministic, normalize
 from app.teaching.policy import RETEACH_STRATEGY, DifficultyDecision, TeachingPolicy
 from app.teaching.summary import build_summary
 
@@ -71,7 +72,7 @@ def turn_id_for(session_id: str, sequence: int) -> str:
     return stable_id("tturn", session_id, str(sequence))
 
 
-def evidence_id_for(session_id: str, turn_id: str, kind: EvidenceType, index: int = 0) -> str:
+def evidence_id_for(session_id: str, turn_id: str, kind: EvidenceType, index: int | str = 0) -> str:
     return stable_id("tevid", session_id, turn_id, kind.value, str(index))
 
 
@@ -181,28 +182,55 @@ def _learner_turn(session: TeachingSession, turn_type: TurnType, content: str, a
                         created_at=at, metadata=metadata)
 
 
-def record_answer(session: TeachingSession, answer: str, at: datetime, *,
-                  client_turn_id: str | None = None) -> AnswerTransition:
+def require_answerable(session: TeachingSession) -> None:
+    """Raise unless the session waits for an answer to an open question (checked before the answer is graded)."""
     _require_waiting(session)
-    question = session.state.pending_question
-    if question is None:
+    if session.state.pending_question is None:
         raise InvalidSessionTransition(f"session {session.session_id} has no open question to answer")
+
+
+def answer_turn_id(session: TeachingSession) -> str:
+    """The id the next learner turn will have."""
+    return turn_id_for(session.session_id, session.turn_count + 1)
+
+
+def record_answer(session: TeachingSession, answer: str, at: datetime, *, assessment: AnswerAssessment | None = None,
+                  client_turn_id: str | None = None) -> AnswerTransition:
+    """Record a graded answer. `assessment` is the AssessmentService's validated grade; without one, a closed
+    question is graded by deterministic matching. UNCERTAIN changes nothing but the attempt count: the question stays
+    open and the teacher asks for a clearer answer."""
+    require_answerable(session)
     s = _advance(session, at)
     st, q, policy = s.state, s.state.pending_question, TeachingPolicy(s.config)
     assert q is not None
-    correct = grade(q, answer)
+    graded = assessment or deterministic(q, answer)
+    outcome = graded.outcome
+    correct = outcome == "CORRECT"
+    uncertain = outcome == "UNCERTAIN"
     hinted = q.hint_level > 0
     turn = _learner_turn(s, TurnType.LEARNER_ANSWER, answer, at, {
-        "question_turn_id": q.turn_id, "correct": correct, "hint_level": q.hint_level, "difficulty": q.difficulty,
+        "question_turn_id": q.turn_id, "correct": None if uncertain else correct, "outcome": outcome,
+        "score": graded.score, "grader_type": graded.grader_type, "hint_level": q.hint_level,
+        "difficulty": q.difficulty,
+        **({"grade_id": graded.grade_id, "attempt_id": graded.attempt_id} if graded.grade_id else {}),
         **({"client_turn_id": client_turn_id} if client_turn_id else {})})
-    st.questions_answered += 1
-    if correct:
-        st.correct_answers += 1
-        st.assisted_correct += hinted
+    if uncertain:
+        st.uncertain_answers += 1
+        decision = DifficultyDecision(st.difficulty, st.consecutive_successes, st.consecutive_failures, "keep",
+                                      "could not be graded: keep")
+    elif outcome == "PARTIAL":
+        st.questions_answered += 1
+        st.partial_answers += 1
+        decision = policy.difficulty.after_partial(st.difficulty, st.consecutive_failures)
     else:
-        st.incorrect_answers += 1
-    decision = policy.difficulty.after_answer(st.difficulty, st.consecutive_successes, st.consecutive_failures,
-                                              correct=correct, hinted=hinted)
+        st.questions_answered += 1
+        if correct:
+            st.correct_answers += 1
+            st.assisted_correct += hinted
+        else:
+            st.incorrect_answers += 1
+        decision = policy.difficulty.after_answer(st.difficulty, st.consecutive_successes, st.consecutive_failures,
+                                                  correct=correct, hinted=hinted)
     change = None
     if decision.change != "keep":
         change = DifficultyChange(turn_id=turn.turn_id, before=st.difficulty, after=decision.difficulty,
@@ -214,7 +242,7 @@ def record_answer(session: TeachingSession, answer: str, at: datetime, *,
     q.attempts += 1
     before = sum(1 for m in st.misconceptions if m.concept_id == q.concept_id)
     planned, keep_open = policy.after_answer(st, q, correct=correct, answer_turn_id=turn.turn_id, mode=s.mode,
-                                             misconceptions_before=before)
+                                             misconceptions_before=before, outcome=outcome)
     reason = policy.completion(st, correct=correct, hinted=hinted, question_difficulty=q.difficulty,
                                question_open=keep_open, turn_count=s.turn_count)
     if reason is not None:
@@ -225,24 +253,56 @@ def record_answer(session: TeachingSession, answer: str, at: datetime, *,
     st.pending_question = q if keep_open else None
     st.last_question = q.model_copy()
     st.planned = planned
-    st.last_answer = AnswerOutcome(turn_id=turn.turn_id, answer=answer, correct=correct, hint_level=q.hint_level)
+    st.last_answer = AnswerOutcome(turn_id=turn.turn_id, answer=answer, correct=correct, hint_level=q.hint_level,
+                                   outcome=outcome, feedback=graded.feedback)
     evidence = InteractionEvidence(
         evidence_id=evidence_id_for(s.session_id, turn.turn_id, EvidenceType.ANSWER), session_id=s.session_id,
         turn_id=turn.turn_id, learner_id=s.learner_id, concept_id=q.concept_id, evidence_type=EvidenceType.ANSWER,
-        correct=correct, hint_level=q.hint_level, hints_used=q.hint_level, answer_after_hint=hinted,
-        difficulty=q.difficulty, practice=s.mode == "practice", created_at=at,
-        metadata={"question_turn_id": q.turn_id, "attempt": q.attempts, "question_action": q.action.value})
-    st.evidence_ids.append(evidence.evidence_id)
+        correct=None if uncertain else correct, outcome=outcome, score=graded.score, hint_level=q.hint_level,
+        hints_used=q.hint_level, answer_after_hint=hinted, difficulty=q.difficulty, practice=s.mode == "practice",
+        created_at=at,
+        metadata={"question_turn_id": q.turn_id, "attempt": q.attempts, "question_action": q.action.value,
+                  **({"grade_id": graded.grade_id} if graded.grade_id else {})})
+    found = [evidence]
+    if outcome in ("INCORRECT", "PARTIAL"):  # the assessment's validated misconceptions become evidence now
+        seen: set[str] = set()
+        for i, m in enumerate(graded.misconceptions):
+            label = normalize(m.misconception)
+            if m.confidence < s.config.misconception_min_confidence or label in seen:
+                continue
+            seen.add(label)
+            found.append(_misconception(s, turn.turn_id, f"a{i}", m.concept_id, m.misconception, m.confidence, at,
+                                        {"grade_id": graded.grade_id}))
+    st.evidence_ids += [e.evidence_id for e in found]
     s.status = Status.ACTIVE
-    outbox = [*_turn_items(s, turn), _evidence_item(s, evidence),
+    outbox = [*_turn_items(s, turn), *(_evidence_item(s, e) for e in found),
               event_item(s, EventType.LEARNER_ANSWER_RECEIVED, turn.turn_id, turn_id=turn.turn_id, kind="answer",
-                         sequence=turn.sequence, concept_id=q.concept_id, correct=correct, hint_level=q.hint_level,
-                         difficulty=q.difficulty, evidence_id=evidence.evidence_id)]
+                         sequence=turn.sequence, concept_id=q.concept_id, correct=None if uncertain else correct,
+                         outcome=outcome, hint_level=q.hint_level, difficulty=q.difficulty,
+                         evidence_id=evidence.evidence_id)]
+    outbox += [event_item(s, EventType.MISCONCEPTION_DETECTED, e.evidence_id, turn_id=turn.turn_id,
+                          concept_id=e.concept_id, evidence_id=e.evidence_id, confidence=e.confidence)
+               for e in found[1:]]
     if change is not None:
         outbox.append(event_item(s, EventType.DIFFICULTY_CHANGED, turn.turn_id, turn_id=turn.turn_id,
                                  before=change.before, after=change.after, reason=change.reason))
-    return AnswerTransition(change=SessionChange(session=s, turns=[turn], evidence=[evidence], outbox=outbox),
+    return AnswerTransition(change=SessionChange(session=s, turns=[turn], evidence=found, outbox=outbox),
                             correct=correct, decision=decision, difficulty_change=change)
+
+
+def _misconception(session: TeachingSession, turn_id: str, index: int | str, concept_id: str, text: str,
+                   confidence: float, at: datetime, metadata: dict) -> InteractionEvidence:
+    """A validated misconception as evidence: recorded in the session, never a mastery change by itself."""
+    st = session.state
+    ev = InteractionEvidence(
+        evidence_id=evidence_id_for(session.session_id, turn_id, EvidenceType.MISCONCEPTION, index),
+        session_id=session.session_id, turn_id=turn_id, learner_id=session.learner_id, concept_id=concept_id,
+        evidence_type=EvidenceType.MISCONCEPTION, correct=False, difficulty=st.difficulty,
+        practice=session.mode == "practice", misconception=text, confidence=confidence, created_at=at,
+        metadata=metadata)
+    st.misconceptions.append(MisconceptionRecord(evidence_id=ev.evidence_id, concept_id=concept_id,
+                                                 misconception=text, confidence=confidence))
+    return ev
 
 
 def record_question(session: TeachingSession, question: str, at: datetime, *,
@@ -363,23 +423,19 @@ def apply_teacher(session: TeachingSession, item: PlannedTurn, out: TeacherTurnO
         outbox.append(event_item(session, EventType.HINT_GIVEN, turn_id, turn_id=turn_id, hint_level=item.hint_level,
                                  question_turn_id=pending.turn_id, evidence_id=hint.evidence_id))
     answer = st.last_answer
-    if (item.responds_to and answer is not None and answer.turn_id == item.responds_to and not answer.correct):
-        seen: set[str] = set()
+    if (item.responds_to and answer is not None and answer.turn_id == item.responds_to
+            and answer.grade == "INCORRECT"):
+        graded = {evidence_id_for(session.session_id, answer.turn_id, EvidenceType.MISCONCEPTION, f"a{i}")
+                  for i in range(len(st.misconceptions))}  # already recorded from the answer's assessment
+        seen = {normalize(m.misconception) for m in st.misconceptions if m.evidence_id in graded}
         for i, candidate in enumerate(out.misconceptions):
             label = normalize(candidate.misconception)
             if candidate.confidence < session.config.misconception_min_confidence or label in seen:
                 continue
             seen.add(label)
-            ev = InteractionEvidence(
-                evidence_id=evidence_id_for(session.session_id, answer.turn_id, EvidenceType.MISCONCEPTION, i),
-                session_id=session.session_id, turn_id=answer.turn_id, learner_id=session.learner_id,
-                concept_id=candidate.concept_id, evidence_type=EvidenceType.MISCONCEPTION, correct=False,
-                difficulty=st.difficulty, practice=session.mode == "practice", misconception=candidate.misconception,
-                confidence=candidate.confidence, created_at=at, metadata={"proposed_with": turn_id})
+            ev = _misconception(session, answer.turn_id, i, candidate.concept_id, candidate.misconception,
+                                candidate.confidence, at, {"proposed_with": turn_id})
             evidence.append(ev)
-            st.misconceptions.append(MisconceptionRecord(evidence_id=ev.evidence_id, concept_id=ev.concept_id,
-                                                         misconception=candidate.misconception,
-                                                         confidence=candidate.confidence))
             outbox.append(event_item(session, EventType.MISCONCEPTION_DETECTED, ev.evidence_id,
                                      turn_id=answer.turn_id, concept_id=ev.concept_id, evidence_id=ev.evidence_id,
                                      confidence=candidate.confidence))

@@ -31,6 +31,10 @@ def build_summary(session: TeachingSession, narrative: str = "") -> TeachingSess
     difficulties = []
     if st.incorrect_answers:
         difficulties.append(f"{st.incorrect_answers} incorrect answer(s)")
+    if st.partial_answers:
+        difficulties.append(f"{st.partial_answers} partially correct answer(s)")
+    if st.uncertain_answers:
+        difficulties.append(f"{st.uncertain_answers} answer(s) could not be graded and were asked again")
     if st.hints_used:
         difficulties.append(f"needed {st.hints_used} hint(s)")
     difficulties += [f"difficulty lowered {c.before} -> {c.after}" for c in st.difficulty_history if c.after < c.before]

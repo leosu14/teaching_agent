@@ -60,6 +60,11 @@ class EventType:
     ASSESSMENT_CREATED = "assessment.created"
     ASSESSMENT_WAITING = "assessment.waiting"
     ASSESSMENT_SUBMITTED = "assessment.submitted"
+    # Semantic assessment (the AssessmentService): every graded answer, whoever asked for it.
+    ASSESSMENT_STARTED = "assessment.started"
+    ASSESSMENT_GRADED = "assessment.graded"
+    ASSESSMENT_UNCERTAIN = "assessment.uncertain"
+    ASSESSMENT_COMPLETED = "assessment.completed"
     EVALUATION_STARTED = "evaluation.started"
     EVALUATION_COMPLETED = "evaluation.completed"
     RECOMMENDATION_CREATED = "recommendation.created"

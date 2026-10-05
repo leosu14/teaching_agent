@@ -55,6 +55,11 @@ class LearnerEvaluationAgent(Agent[EvaluationInput, EvaluationStep]):
                 raise OutputRejected("grade every assessment question exactly once")
             if any(e.concept_id != asked[e.question_id].concept_id for e in output.result.evaluations):
                 raise OutputRejected("evaluations must keep each question's concept")
+            grades = {g.question_id: g for g in source.grades}
+            disagree = sorted(e.question_id for e in output.result.evaluations
+                              if e.question_id in grades and e.correct != (grades[e.question_id].outcome == "CORRECT"))
+            if disagree:  # the assessment service graded the answers; the evaluation reports, never regrades
+                raise OutputRejected(f"evaluations must keep the validated grades; {disagree} disagree")
             if {c.concept_id for c in output.result.concepts} != {q.concept_id for q in asked.values()}:
                 raise OutputRejected("concept outcomes must cover exactly the assessed concepts")
             rec = output.result.recommendation

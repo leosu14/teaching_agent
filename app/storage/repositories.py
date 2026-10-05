@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.schemas.artifact import Artifact
+from app.schemas.assessment import (
+    AssessmentAttempt,
+    AssessmentGrade,
+    AssessmentItem,
+    AssessmentRubric,
+    AttemptExists,
+    AttemptOutcome,
+    ItemConflict,
+)
 from app.schemas.curriculum import CurriculumProgress, CurriculumRecord, CurriculumVersion, VersionConflict
 from app.schemas.events import Event
 from app.schemas.learner import EvidenceConflict, LearnerProfile, LearningEvent, LearningEvidence, LearningGoal
@@ -22,6 +31,10 @@ from app.schemas.teaching import (
 )
 from app.storage.orm import (
     ArtifactRow,
+    AssessmentAttemptRow,
+    AssessmentGradeRow,
+    AssessmentItemRow,
+    AssessmentRubricRow,
     CurriculumProgressRow,
     CurriculumRow,
     CurriculumVersionRow,
@@ -356,3 +369,95 @@ class SqlTeachingRepository:
     def mark_published(self, item_id: str) -> None:
         with self._sessions.begin() as s:
             s.execute(update(TeachingOutboxRow).where(TeachingOutboxRow.item_id == item_id).values(published=True))
+
+
+class SqlAssessmentRepository:
+    """Assessment items and rubrics (immutable), attempts and their grades (append-only, stored together)."""
+
+    ATTEMPT_RETRIES = 5  # a concurrent attempt took the same attempt number: take the next one
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def _save(self, row_type, key: str, value, **columns) -> bool:
+        digest = value.content_hash()
+        try:
+            with self._sessions.begin() as s:
+                current = s.get(row_type, key)
+                if current is None:
+                    s.add(row_type(**columns, content_hash=digest, body=value.model_dump_json()))
+                    return True
+        except IntegrityError:
+            pass
+        with self._sessions() as s:
+            current = s.get(row_type, key)
+        if current is None or current.content_hash != digest:
+            raise ItemConflict(f"{key} is already stored with different content")
+        return False
+
+    def save_item(self, item: AssessmentItem) -> bool:
+        return self._save(AssessmentItemRow, item.assessment_item_id, item, item_id=item.assessment_item_id,
+                          lesson_id=item.lesson_id)
+
+    def item(self, item_id: str) -> AssessmentItem | None:
+        with self._sessions() as s:
+            row = s.get(AssessmentItemRow, item_id)
+            return AssessmentItem.model_validate_json(row.body) if row else None
+
+    def save_rubric(self, rubric: AssessmentRubric) -> bool:
+        return self._save(AssessmentRubricRow, rubric.rubric_id, rubric, rubric_id=rubric.rubric_id)
+
+    def rubric(self, rubric_id: str) -> AssessmentRubric | None:
+        with self._sessions() as s:
+            row = s.get(AssessmentRubricRow, rubric_id)
+            return AssessmentRubric.model_validate_json(row.body) if row else None
+
+    def add_attempt(self, attempt: AssessmentAttempt, grade: AssessmentGrade) -> AssessmentAttempt:
+        for _ in range(self.ATTEMPT_RETRIES):
+            try:
+                with self._sessions.begin() as s:
+                    if s.get(AssessmentAttemptRow, attempt.attempt_id) is not None:
+                        raise AttemptExists(attempt.attempt_id)
+                    count = s.scalar(select(func.count()).select_from(AssessmentAttemptRow).where(
+                        AssessmentAttemptRow.item_id == attempt.assessment_item_id,
+                        AssessmentAttemptRow.learner_id == attempt.learner_id)) or 0
+                    stored = attempt.model_copy(update={"attempt_number": count + 1})
+                    s.add(AssessmentAttemptRow(attempt_id=stored.attempt_id, item_id=stored.assessment_item_id,
+                                               learner_id=stored.learner_id, attempt_number=stored.attempt_number,
+                                               grade_id=grade.grade_id, body=stored.model_dump_json()))
+                    s.add(AssessmentGradeRow(grade_id=grade.grade_id, attempt_id=grade.attempt_id,
+                                             body=grade.model_dump_json()))
+                    s.flush()
+                return stored
+            except IntegrityError:
+                if self.attempt(attempt.attempt_id) is not None:
+                    raise AttemptExists(attempt.attempt_id) from None
+        raise AttemptExists(f"{attempt.attempt_id}: no attempt number available after concurrent attempts")
+
+    def attempt(self, attempt_id: str) -> AssessmentAttempt | None:
+        with self._sessions() as s:
+            row = s.get(AssessmentAttemptRow, attempt_id)
+            return AssessmentAttempt.model_validate_json(row.body) if row else None
+
+    def attempts(self, item_id: str, learner_id: str) -> list[AssessmentAttempt]:
+        with self._sessions() as s:
+            rows = s.scalars(select(AssessmentAttemptRow).where(AssessmentAttemptRow.item_id == item_id,
+                                                                AssessmentAttemptRow.learner_id == learner_id)
+                             .order_by(AssessmentAttemptRow.attempt_number))
+            return [AssessmentAttempt.model_validate_json(r.body) for r in rows]
+
+    def grade(self, grade_id: str) -> AssessmentGrade | None:
+        with self._sessions() as s:
+            row = s.get(AssessmentGradeRow, grade_id)
+            return AssessmentGrade.model_validate_json(row.body) if row else None
+
+    def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at) -> AssessmentAttempt:
+        with self._sessions.begin() as s:
+            row = s.get(AssessmentAttemptRow, attempt_id)
+            if row is None:
+                raise KeyError(attempt_id)
+            current = AssessmentAttempt.model_validate_json(row.body)
+            if current.completed_at is None:
+                current = current.model_copy(update={"completed_at": at, "outcome": outcome})
+                row.body = current.model_dump_json()
+            return current

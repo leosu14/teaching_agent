@@ -27,6 +27,9 @@ curriculum   long-term learning: CurriculumPlanner, validation, CurriculumEngine
 teaching     interactive sessions: TeachingPolicy, DifficultyController, grading, the session engine (pure
              transitions with a transactional outbox), summaries, the TeachingRepository interface; no providers,
              tools or storage
+assessment   grading: normalisation, matching, rubrics (validation, aggregation), outcome classification, validation
+             of a semantic grader's output, the grading pipeline (AssessmentEngine), the AssessmentRepository
+             interface; pure, reaches a model only through the SemanticGrader interface its caller supplies
 artifacts    ArtifactService: versioning, content-hash dedup, dependency graph, content-addressed media objects
 storage      SQLAlchemy/SQLite metadata repositories + filesystem object store (no business rules)
 schemas / config / observability / utils   shared foundation
@@ -89,7 +92,9 @@ all that is needed.
 - `lesson_evaluation`: started for a completed lesson task (`TaskService.start_evaluation`), with the lesson
   task id in `plan.inputs`. It reads the lesson and lesson plan artifacts (`artifact.read`), takes a learner
   snapshot, asks `LearnerEvaluationAgent` for an assessment sized by objectives, taught concepts, level and
-  mastery, WAITS for answers, asks the agent to grade them and recommend what's next, records the evidence
+  mastery, WAITS for answers, grades each through the AssessmentService (`assessment.grade` tool node; see
+  [semantic assessment](#semantic-assessment)), asks the agent to report on those grades and recommend what's next
+  (an evaluation that disagrees with them is rejected), records the evidence
   through `learner.record_evaluation` (idempotent per task), rebuilds the learner model, asks the pedagogical
   engine for the next recommendation (`pedagogy.recommend`) and the feedback (`pedagogy.evaluation_feedback`), and
   stores a `LEARNER_EVALUATION` artifact whose parent is the lesson, then `learning_evidence` (parent: the
@@ -474,7 +479,7 @@ What is decided by code and what by models:
 
 | Deterministic (code, `app/learner` + `app/pedagogy`) | Model (agents) |
 |---|---|
-| Mastery from evidence (`MasteryUpdater`), confidence, review dates | Grading a free answer (a model's interpretation, recorded as evidence) |
+| Mastery from evidence (`MasteryUpdater`), confidence, review dates | A candidate grade for a free-text answer (validated; the outcome is classified by code) |
 | Learner-model categories (mastered / developing / weak / unknown) | Diagnostic and assessment questions |
 | Knowledge gaps and their priority, the recommended action | Wording of the lesson plan, explanations and examples |
 | Target concepts, prerequisite review, introduce vs reinforce, activities, difficulty band, minutes | Exercises within the planned activity types |
@@ -639,6 +644,71 @@ it lives in `AgentContext`; its state is a serializable `SessionState` stored wi
   `teaching_turn.created`, `learner_answer.received`, `hint.given`, `misconception.detected`, `difficulty.changed`;
   stable ids, the concept, correctness, hint level and difficulty; no answer or turn text, no learner profile, no
   provider details.
+
+## Semantic assessment
+
+```
+Lesson → AssessmentItem (+ AssessmentRubric) → attempt → normalisation → acceptable answers → deterministic rules
+→ rubric grading → semantic grading (free text only) → validation → AssessmentGrade → LearningEvidence → mastery
+→ objective progress → next learning action
+```
+
+`AssessmentService` (`app/services/assessment.py`) is the one place answers are graded. Interactive sessions, the
+evaluation workflow (`POST /tasks/{id}/evaluation`, through the `grade_answers` tool node) and the assessment API all
+call it; nothing else grades. The pipeline is `AssessmentEngine` (`app/assessment/engine.py`):
+
+| Step | Decides | Model call |
+|---|---|---|
+| 1. Normalisation | Unicode form, case, punctuation, whitespace; accents only for `accent_insensitive_languages` (ñ is kept) | no |
+| 2. Acceptable answers | The expected and acceptable answers; a choice or its label; true/false words per language | no |
+| 3. Deterministic rules | An empty answer, an invalid choice, a known error (`known_errors`, with its misconception), any closed question that did not match | no |
+| 4. Rubric grading | A `deterministic` rubric: each criterion is met when the answer contains one of its indicators | no |
+| 5. Semantic grading | Free text (or short text with a rubric) that the steps above cannot decide | one validated call |
+
+- **Items and rubrics.** `AssessmentItem` (prompt, expected answer or meaning, acceptable answers, response type
+  SHORT_TEXT / FREE_TEXT / MULTIPLE_CHOICE / TRUE_FALSE, concept, objective, difficulty, language, known errors,
+  misconception patterns) and `AssessmentRubric` (criteria with weights that must sum to 1, `required` criteria, a
+  score scale, a passing threshold) are immutable: the same id with other content is a conflict. A free-text item
+  without a rubric gets one required "meaning" criterion.
+- **The model boundary.** The `semantic_grader` agent (standard tier) receives `SemanticGradingRequest`: the item,
+  the rubric, the answer and at most `max_context_passages` lesson sections and research findings on the item's
+  concept; no learner, task, goal or session ids, history or profile. It proposes a `SemanticGradeCandidate`;
+  `app/assessment/validation.py` checks it in the agent (so invalid output is retried) and again in the engine (so no
+  grader implementation can bypass it). Named rules: `malformed_json`, `state_mutation` (any mastery, objective, goal
+  or curriculum field), `schema` (scores outside 0-1, unknown outcomes), `unknown_criterion`, `duplicate_criterion`,
+  `missing_criterion`, `fabricated_citation`, `unknown_concept`, `contradictory_scores`, `contradictory_outcome`.
+  Criterion scores are snapped to the scale; the overall score and the outcome are always recomputed.
+- **Aggregation and outcome.** score = Σ criterion score × weight. `≥ correct_threshold` (the rubric's passing
+  threshold) CORRECT, `≥ partial_threshold` PARTIAL, otherwise INCORRECT; an unmet required criterion caps CORRECT at
+  PARTIAL. A semantic grade also needs confidence: `≥ accept_confidence` (0.85) stands; between `min_confidence`
+  (0.60) and it, `mid_confidence: partial` caps CORRECT at PARTIAL and turns INCORRECT into UNCERTAIN; below
+  `min_confidence` UNCERTAIN.
+- **UNCERTAIN** is a first-class outcome, never converted to INCORRECT: the grader failed, was rejected, said the
+  context is insufficient, or was not confident. The attempt and its grade are kept, no evidence is recorded, the
+  feedback asks for another attempt, and in a session the same question stays open.
+- **Misconceptions** come from known errors (rule, confidence 1.0) or the grader (semantic, at or above
+  `misconception_min_confidence`, only on INCORRECT or PARTIAL grades, only about the item's concepts). They are
+  recorded with the learning evidence and as `misconception.detected` events; mastery moves only by the score.
+- **Attempts.** `AssessmentAttempt` (attempt id, number, answer, submitted_at, grade id, source) is stored with its
+  grade in one write and never overwritten. The same attempt id with the same answer replays the stored grade
+  (nothing graded or recorded again); with another answer it is a 409 conflict. A crash after grading is finished on
+  the next submission without grading again.
+- **Mastery.** An API attempt that is not UNCERTAIN becomes `LearningEvidence` (`source_type: assessment`; correct,
+  partial with its score, or incorrect) recorded through `LearnerMemoryService.record_evidence`, then the objective's
+  progress is read back and `CurriculumService.next_action` selects the next action. Sessions and evaluations record
+  their graded answers through their own existing paths, with the grade's outcome and score.
+- **Sessions.** `TeachingSessionService` grades every answer through the service (`source: teaching_session`) and
+  hands the engine an `AnswerAssessment`; the engine never grades a model's output. PARTIAL closes the question with
+  feedback and partial credit; UNCERTAIN keeps it open and the teacher asks again without revealing the answer.
+- **Artifacts and events.** LESSON → ASSESSMENT_ITEM → ASSESSMENT_GRADE → ASSESSMENT_FEEDBACK, ASSESSMENT_RUBRIC →
+  ASSESSMENT_GRADE, and ASSESSMENT_GRADE → LEARNING_EVIDENCE, on the lesson's (or the evaluation's) task.
+  `assessment.started` / `graded` / `uncertain` / `completed` and `misconception.detected`, with stable ids: ids,
+  outcome, scores, grader type and the grader's provider, model, tokens and estimated cost; never the answer, the
+  prompt or a provider payload.
+- **Cost.** Steps 1-4 call no model. A semantic grade records its calls, provider, model, tokens and estimated cost
+  (`GraderUsage`, from the existing usage ledger); in the evaluation workflow they count in the task's cost.
+- **Production.** The grader routes like every agent: mock offline (the default), the configured LLM provider only
+  under `TEACHING_AGENT_MODE=production`. No new provider settings.
 
 ## Cost and observability
 
