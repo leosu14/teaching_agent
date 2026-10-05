@@ -51,3 +51,5 @@ jobs:
         run: python scripts/run_interactive_demo.py
       - name: Assessment demo (exact -> rule -> semantic -> partial -> uncertain -> rubric -> mastery -> next action)
         run: python scripts/run_assessment_demo.py
+      - name: Learning cycle demo (next action -> lesson -> WAITING -> restart -> session -> mastery -> next action -> COMPLETE)
+        run: python scripts/run_learning_cycle_demo.py

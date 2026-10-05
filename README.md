@@ -52,6 +52,12 @@ and a validated semantic grader only for free text. Rubric scores aggregate by w
 INCORRECT, UNCERTAIN) are classified by code against configurable thresholds, and an ungradable answer is UNCERTAIN,
 never INCORRECT. See [architecture](docs/architecture.md#semantic-assessment).
 
+**Learning cycles** (`LearningCycleService`) execute the curriculum's next learning action end to end: the cycle
+records the action, runs the existing lesson workflow, interactive session or evaluation for it, stops in WAITING when
+the learner is needed, folds the evidence into mastery through learner memory's updater and asks the curriculum for
+the next action. It is resumable, idempotent and auditable, and it is opt-in: lessons, sessions and evaluations work
+as before without one. See [architecture](docs/architecture.md#learning-cycles).
+
 ## Run it
 
 ```bash
@@ -62,6 +68,7 @@ python scripts/run_adaptive_demo.py    # learner model -> gaps -> plan -> lesson
 python scripts/run_curriculum_demo.py  # goal -> curriculum -> next action -> lesson -> evaluation -> progress -> done
 python scripts/run_interactive_demo.py # interactive session: adaptive turns, hints, grounded questions, restart, mastery
 python scripts/run_assessment_demo.py  # exact, rule, rubric and semantic grading, partial, uncertain, mastery, next action
+python scripts/run_learning_cycle_demo.py  # next action -> lesson -> WAITING -> restart -> session -> mastery -> COMPLETE
 python scripts/run_research_demo.py    # the lesson's research: queries, results, sources, evidence, citations
 python scripts/run_visual_demo.py      # the lesson's visuals: plan, search, selection, generation, validation, assets
 python scripts/run_presentation_demo.py --out lesson.pptx  # slide plan, validation, build, real .pptx with the images
@@ -97,6 +104,13 @@ hint, a correct easier one (1 → 2), a pause and a process restart, a grounded 
 (a structured limitation), and a final correct check that completes the session. It prints the summary, the mastery
 update, objective progress, the next action, the artifact lineage and the session's events, and exits 1 unless every
 check passes.
+`run_learning_cycle_demo.py` (`fixtures/learning_cycle/`) takes the curriculum learner and goal without a curriculum,
+starts a cycle (the curriculum is built and selects LEARN the preterite), stops WAITING on the lesson's diagnostic,
+answers it and stops on the session's first question, restarts the process and reads the cycle back, answers the
+session to completion (one missed answer), prints the evidence, the mastery update and the next action, replays the
+start and the last response (nothing runs twice), prints the artifact lineage from the goal to the evidence, and
+finally secures every objective and runs a COMPLETE cycle (no lesson, the goal completed by rule). It runs twice and
+exits 1 unless every check passes and both runs match.
 `run_assessment_demo.py` (`fixtures/assessment/`) registers three items on that lesson and grades a scripted
 learner: an exact-match miss, a free-text answer showing a misconception and a known wrong form (three misses in a row
 switch the next action to reteaching), an exact-match hit, "Porque la acción ya terminó." credited semantically for
@@ -170,6 +184,11 @@ graph, per-request traceability, usage and cost. `--mock` rehearses the same pat
 | POST | `/assessment-items/{id}/attempts` | Grade an answer (`{"learner_id", "answer", "attempt_id"}`); idempotent per `attempt_id`; updates mastery unless UNCERTAIN |
 | GET | `/assessment-items/{id}/attempts?learner_id=` | Every attempt of a learner on the item, in order |
 | GET | `/assessment-attempts/{id}` · `/grade` | An attempt / its grade (outcome, score, criteria, misconceptions, feedback) |
+| POST/GET | `/learners/{id}/learning-cycles` | Start the learner's next learning cycle (idempotent per `idempotency_key`; 409 while another is active) / list them |
+| GET | `/learning-cycles/{id}` | Cycle state, steps, the prompt when WAITING, the outcome once completed |
+| POST | `/learning-cycles/{id}/responses` | The learner's response (`{"client_response_id", "answers"}` for a sheet or `{"client_response_id", "answer", "kind"}` for a session question); idempotent per `client_response_id` |
+| POST | `/learning-cycles/{id}/resume` · `/cancel` | Retry a BLOCKED cycle's step / cancel the cycle and its running step |
+| GET | `/learning-cycles/{id}/events` · `/artifacts` | The cycle's event stream / its LEARNING_CYCLE artifacts |
 | GET | `/learners/{id}/next-action` | The next learning action across the learner's goals (`?as_of=` for a given time) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 

@@ -135,6 +135,18 @@ class EventType:
     TEACHING_SESSION_COMPLETED = "teaching_session.completed"
     TEACHING_SESSION_CANCELLED = "teaching_session.cancelled"
     TEACHING_SESSION_FAILED = "teaching_session.failed"
+    # Learning cycles: one curriculum action executed end to end (stream key: the cycle id).
+    LEARNING_CYCLE_STARTED = "learning_cycle.started"
+    LEARNING_CYCLE_ACTION_SELECTED = "learning_cycle.action_selected"
+    LEARNING_CYCLE_STEP_STARTED = "learning_cycle.step_started"
+    LEARNING_CYCLE_STEP_COMPLETED = "learning_cycle.step_completed"
+    LEARNING_CYCLE_WAITING = "learning_cycle.waiting"
+    LEARNING_CYCLE_RESPONSE_RECEIVED = "learning_cycle.response_received"
+    LEARNING_CYCLE_ACTION_COMPLETED = "learning_cycle.action_completed"
+    LEARNING_CYCLE_RESUMED = "learning_cycle.resumed"
+    LEARNING_CYCLE_COMPLETED = "learning_cycle.completed"
+    LEARNING_CYCLE_FAILED = "learning_cycle.failed"
+    LEARNING_CYCLE_CANCELLED = "learning_cycle.cancelled"
 
 
 class Event(Schema):

@@ -710,6 +710,71 @@ call it; nothing else grades. The pipeline is `AssessmentEngine` (`app/assessmen
 - **Production.** The grader routes like every agent: mock offline (the default), the configured LLM provider only
   under `TEACHING_AGENT_MODE=production`. No new provider settings.
 
+## Learning cycles
+
+```
+learner state → next learning action → cycle (RUNNING) → step: lesson workflow → step: interactive session or
+evaluation → WAITING ⇄ learner response → evidence → mastery (learner memory's updater) → objective progress
+→ next learning action → cycle COMPLETED
+```
+
+A learning cycle executes one curriculum action end to end. It is an orchestration layer, not an agent: it calls no
+model and decides nothing the existing layers already decide. `LearningCycleService` (`app/services/learning_cycles.py`)
+drives it; the state machine is pure (`app/curriculum/cycle.py`); the schemas are in `app/schemas/learning_cycle.py`
+(a file of their own, since they reference curriculum, lesson and teaching schemas).
+
+- **Dispatch.** The action comes from `CurriculumService.next_action` and is recorded on the cycle when it starts; the
+  cycle never re-selects. Each action maps to existing workflows (`STEP_POLICY`):
+
+  | Action | Steps |
+  |---|---|
+  | LEARN | a new lesson for the objective (lesson workflow, with its diagnostic) → interactive session (LEARN) |
+  | REVIEW · PRACTICE | the objective's newest completed lesson (a new one if none) → interactive session (REVIEW · PRACTICE) |
+  | EVALUATE | the objective's lesson (reused or new) → the evaluation workflow |
+  | COMPLETE | no steps: the goal's completion rule is verified by code (`progress.goal_complete`), else FAILED |
+  | WAIT | no steps: NOTHING_DUE, with the action (and `next_review_at`) as the outcome |
+
+  Before the first step the action is checked against the current curriculum (`action_problem`): an objective that
+  left the curriculum, a changed curriculum version, a blocked objective, or an already mastered one (except REVIEW)
+  fail the cycle as VALIDATION without generating anything.
+- **States.** RUNNING → WAITING (the learner is needed) → RUNNING → COMPLETED; BLOCKED (a retryable failure: resume
+  retries), FAILED (permanent), CANCELLED. Steps: PENDING → STARTED (key recorded) → RUNNING (child attached) →
+  WAITING → COMPLETED. One active (RUNNING, WAITING or BLOCKED) cycle per learner, enforced by a unique slot row.
+- **Mastery and state.** Evidence comes from the session's or the evaluation's own grading (`AssessmentService`) and
+  reaches mastery only through learner memory's updater, exactly as without a cycle; objective progress and goal
+  completion are recomputed by the curriculum. The cycle copies their results into its outcome; models never write
+  mastery, curriculum state, objective completion, task or cycle status.
+- **Persistence.** `learning_cycles` (the cycle as a versioned JSON body), `learning_cycle_slots`,
+  `learning_cycle_requests` (received responses). Every change is computed by a pure transition and applied against
+  the version it was computed from (optimistic lock); a conflicting writer reloads.
+- **Drive lease.** Only the holder of the cycle's lease (a request now, a worker later) creates, runs or resumes a
+  child or hands it a response. The lease is taken and given back in version-checked writes on the cycle record; a
+  concurrent request sees the cycle busy (`busy_until`; a response gets a 409 and can be retried) and only reads it.
+  A lease left by a crashed process expires after `DRIVE_LEASE` (10 minutes), then the cycle can be resumed.
+- **Idempotency.** The cycle id is `stable_id(learner, idempotency_key)`: the same key returns, and continues, the
+  same cycle; the same key with a different request is a 409. Before a child is created its step key is recorded; children carry the key (task metadata, the session's
+  idempotency key), so a crash between creating a child and attaching it finds it again. A response is recorded with
+  the transition that receives it (`client_response_id`, request hash); the same id and body replay, another body is
+  a 409, and the child gets it with an idempotency key derived from the cycle and response id. Artifacts reuse
+  identical content; events have ids derived from the cycle, type and version and the event store keeps one per id.
+- **Resume.** WAITING returns to the caller; nothing polls. A response, a read (`GET`, which only observes) or
+  `resume` reconciles the cycle with its child. `resume` retries a BLOCKED step through the child's own recovery
+  (`TaskService.resume` from the workflow checkpoint, `TeachingSessionService.resume`); completed side effects are
+  never repeated.
+- **Failures.** VALIDATION (a stale or invalid action, an unmet completion rule, a configuration error: FAILED),
+  PROVIDER (retryable: BLOCKED), WORKFLOW (a failed workflow stage: BLOCKED; an exhausted budget or a failed session:
+  FAILED). Invalid learner input is refused with a 422 and changes nothing; the cycle keeps waiting.
+- **Artifacts.** LEARNING_GOAL → CURRICULUM_VERSION → LEARNING_OBJECTIVE → LEARNING_CYCLE → LESSON (a cycle's lesson
+  and its LEARNING_ACTION draft hang off the cycle artifact) → ASSESSMENT_GRADE / TEACHING_SESSION → LEARNING_EVIDENCE;
+  the `learning_cycle_outcome` artifact links the cycle, the lesson and the resulting LEARNING_ACTION or evaluation.
+- **Events.** `learning_cycle.started`, `action_selected`, `step_started`, `step_completed`, `waiting`,
+  `response_received`, `action_completed`, `resumed`, `completed`, `failed`, `cancelled`, stored under the cycle id
+  and published through the event bus from an outbox on the cycle (published after the state is saved, republished
+  after a crash). Payloads carry ids, the action, kinds and counts; no learner id, answer, prompt, credential or
+  provider payload.
+- **Compatibility.** Cycles are opt-in. Lessons, sessions and evaluations started directly behave as before, and a
+  learner without goals gets a WAIT (NOTHING_DUE) cycle.
+
 ## Cost and observability
 
 `ModelRouter` maps tiers (reasoning / standard / cheap) to fallback chains of provider models and prices every

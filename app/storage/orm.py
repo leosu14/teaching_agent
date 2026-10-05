@@ -202,3 +202,32 @@ class AssessmentGradeRow(Base):
     grade_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     attempt_id: Mapped[str] = mapped_column(String(128), unique=True)
     body: Mapped[str] = mapped_column(Text)
+
+
+class LearningCycleRow(Base):
+    """A learning cycle; `version` is its optimistic lock."""
+
+    __tablename__ = "learning_cycles"
+    cycle_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    learner_id: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(32))
+    version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    body: Mapped[str] = mapped_column(Text)
+
+
+class LearningCycleSlotRow(Base):
+    """At most one active (running, waiting or blocked) cycle per learner: the row exists while it is active."""
+
+    __tablename__ = "learning_cycle_slots"
+    learner_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    cycle_id: Mapped[str] = mapped_column(String(64), unique=True)
+
+
+class LearningCycleRequestRow(Base):
+    """A learner response received by a cycle, by its client_response_id (idempotent responses)."""
+
+    __tablename__ = "learning_cycle_requests"
+    cycle_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    client_response_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    body: Mapped[str] = mapped_column(Text)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -18,6 +18,7 @@ from app.schemas.assessment import (
 )
 from app.schemas.curriculum import CurriculumProgress, CurriculumRecord, CurriculumVersion, VersionConflict
 from app.schemas.events import Event
+from app.schemas.learning_cycle import TERMINAL_CYCLE_STATUSES, CycleConflict, CycleRequestRecord, LearningCycle
 from app.schemas.learner import EvidenceConflict, LearnerProfile, LearningEvent, LearningEvidence, LearningGoal
 from app.schemas.task import Task
 from app.schemas.teaching import (
@@ -42,6 +43,9 @@ from app.storage.orm import (
     LearnerRow,
     LearningEventRow,
     LearningEvidenceRow,
+    LearningCycleRequestRow,
+    LearningCycleRow,
+    LearningCycleSlotRow,
     LearningGoalRow,
     TaskRow,
     InteractionEvidenceRow,
@@ -461,3 +465,85 @@ class SqlAssessmentRepository:
                 current = current.model_copy(update={"completed_at": at, "outcome": outcome})
                 row.body = current.model_dump_json()
             return current
+
+
+class SqlLearningCycleRepository:
+    """Learning cycles, the one-active-cycle-per-learner slot and received responses. Every change is one transaction,
+    applied only against the cycle version it was computed from."""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def create(self, cycle: LearningCycle) -> bool:
+        try:
+            with self._sessions.begin() as s:
+                if s.get(LearningCycleRow, cycle.cycle_id) is not None:
+                    return False
+                s.add(LearningCycleRow(cycle_id=cycle.cycle_id, learner_id=cycle.learner_id, status=cycle.status.value,
+                                       version=cycle.version, created_at=cycle.created_at,
+                                       body=cycle.model_dump_json()))
+                s.add(LearningCycleSlotRow(learner_id=cycle.learner_id, cycle_id=cycle.cycle_id))
+                s.flush()
+        except IntegrityError:
+            if self.get(cycle.cycle_id) is not None:
+                return False  # the same key, created concurrently
+            holder = self.active_for(cycle.learner_id)
+            raise CycleConflict(f"learner has an active learning cycle {holder.cycle_id if holder else '?'}") \
+                from None
+        return True
+
+    def apply(self, cycle: LearningCycle, expected_version: int, request: CycleRequestRecord | None = None) -> None:
+        try:
+            with self._sessions.begin() as s:
+                updated = s.execute(
+                    update(LearningCycleRow)
+                    .where(LearningCycleRow.cycle_id == cycle.cycle_id, LearningCycleRow.version == expected_version)
+                    .values(version=cycle.version, status=cycle.status.value, body=cycle.model_dump_json()))
+                if updated.rowcount != 1:
+                    raise CycleConflict(f"cycle {cycle.cycle_id} changed concurrently "
+                                        f"(expected version {expected_version})")
+                if cycle.status in TERMINAL_CYCLE_STATUSES:
+                    s.execute(delete(LearningCycleSlotRow).where(LearningCycleSlotRow.cycle_id == cycle.cycle_id))
+                if request is not None:
+                    s.add(LearningCycleRequestRow(cycle_id=request.cycle_id,
+                                                  client_response_id=request.client_response_id,
+                                                  body=request.model_dump_json()))
+                s.flush()
+        except IntegrityError as exc:
+            raise CycleConflict(f"cycle {cycle.cycle_id}: the response was already received") from exc
+
+    def get(self, cycle_id: str) -> LearningCycle | None:
+        with self._sessions() as s:
+            row = s.get(LearningCycleRow, cycle_id)
+            return LearningCycle.model_validate_json(row.body) if row else None
+
+    def active_for(self, learner_id: str) -> LearningCycle | None:
+        with self._sessions() as s:
+            slot = s.get(LearningCycleSlotRow, learner_id)
+            cycle_id = slot.cycle_id if slot else None
+        return self.get(cycle_id) if cycle_id else None
+
+    def for_learner(self, learner_id: str) -> list[LearningCycle]:
+        with self._sessions() as s:
+            rows = s.scalars(select(LearningCycleRow).where(LearningCycleRow.learner_id == learner_id)
+                             .order_by(LearningCycleRow.created_at.desc(), LearningCycleRow.cycle_id.desc()))
+            return [LearningCycle.model_validate_json(r.body) for r in rows]
+
+    def request(self, cycle_id: str, client_response_id: str) -> CycleRequestRecord | None:
+        with self._sessions() as s:
+            row = s.get(LearningCycleRequestRow, (cycle_id, client_response_id))
+            return CycleRequestRecord.model_validate_json(row.body) if row else None
+
+    def mark_applied(self, cycle_id: str, client_response_id: str) -> None:
+        with self._sessions.begin() as s:
+            row = s.get(LearningCycleRequestRow, (cycle_id, client_response_id))
+            if row is not None:
+                record = CycleRequestRecord.model_validate_json(row.body)
+                record.applied = True
+                row.body = record.model_dump_json()
+
+    def forget_request(self, cycle_id: str, client_response_id: str) -> None:
+        with self._sessions.begin() as s:
+            s.execute(delete(LearningCycleRequestRow).where(LearningCycleRequestRow.cycle_id == cycle_id,
+                                                            LearningCycleRequestRow.client_response_id ==
+                                                            client_response_id))

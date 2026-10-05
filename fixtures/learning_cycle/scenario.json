@@ -1,0 +1,8 @@
+{
+  "_comment": "The scripted learner of scripts/run_learning_cycle_demo.py. The learner, goal and knowledge base are the curriculum demo's (fixtures/curriculum): nothing is secured beyond the placement, so the curriculum's first objective is the preterite, which the lesson's diagnostic probes (memory has no evidence on it). The learner answers the diagnostic and the session's questions from the knowledge base's probes (by exact prompt, else by the verb cue in parentheses; `extra_cues` covers the lesson's own exercises). The first session answer is `wrong_first_answer`; every other answer is right.",
+  "secured_concepts": [],
+  "wrong_first_answer": "no lo sé",
+  "extra_cues": {
+    "(cenar)": "cenamos"
+  }
+}
