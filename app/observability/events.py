@@ -28,10 +28,13 @@ class EventBus:
         node_id: str | None = None,
         agent_id: str | None = None,
         tool: str | None = None,
+        event_id: str | None = None,
         **data: object,
     ) -> Event:
+        """`event_id`: a stable id for an event that may be published again (e.g. from an outbox after a restart);
+        the event store keeps one copy per id. Default: a new id."""
         event = Event(
-            event_id=new_id("evt"),
+            event_id=event_id or new_id("evt"),
             type=type,
             task_id=task_id,
             node_id=node_id,

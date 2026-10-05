@@ -119,6 +119,17 @@ class EventType:
     GENERATED_VIDEO_VALIDATED = "generated_video.validated"
     GENERATED_VIDEO_ASSET_CREATED = "generated_video.asset_created"
     GENERATED_VIDEO_FALLBACK = "generated_video.fallback"
+    TEACHING_SESSION_STARTED = "teaching_session.started"
+    TEACHING_TURN_CREATED = "teaching_turn.created"
+    LEARNER_ANSWER_RECEIVED = "learner_answer.received"
+    HINT_GIVEN = "hint.given"
+    MISCONCEPTION_DETECTED = "misconception.detected"
+    DIFFICULTY_CHANGED = "difficulty.changed"
+    TEACHING_SESSION_PAUSED = "teaching_session.paused"
+    TEACHING_SESSION_RESUMED = "teaching_session.resumed"
+    TEACHING_SESSION_COMPLETED = "teaching_session.completed"
+    TEACHING_SESSION_CANCELLED = "teaching_session.cancelled"
+    TEACHING_SESSION_FAILED = "teaching_session.failed"
 
 
 class Event(Schema):

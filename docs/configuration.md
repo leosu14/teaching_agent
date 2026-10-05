@@ -27,6 +27,16 @@ They are validated when the container is built; errors say what to fix.
 | `TA_CURRICULUM_EVIDENCE_REQUIRED` | `2` | Evidence items before a curriculum objective counts as mastered (its mastery target is `TA_PEDAGOGY_MASTERY_TARGET`) |
 | `TA_CURRICULUM_COMPLETION_RULE` | `all_required_mastered` | When a goal is complete: every required objective mastered, or `targets_mastered` (only the goal's target concepts) |
 | `TA_CURRICULUM_SESSIONS_PER_WEEK` | `3` | Pace assumed for target-date feasibility warnings (the plan is never compressed) |
+| `TA_TEACHING_START_DIFFICULTY` | `2` | Interactive sessions: the difficulty (1..max) a session starts at |
+| `TA_TEACHING_MAX_DIFFICULTY` | `3` | Highest difficulty level |
+| `TA_TEACHING_INCREASE_AFTER` | `3` | Consecutive correct answers before the difficulty goes up |
+| `TA_TEACHING_DECREASE_AFTER` | `2` | Consecutive incorrect answers before the difficulty goes down |
+| `TA_TEACHING_MAX_HINT_LEVEL` | `3` | Hint levels per question (0 disables hints; 1 conceptual, 2 targeted, 3 worked step) |
+| `TA_TEACHING_REVEAL_ANSWER_IN_HINTS` | `false` | Whether the last hint may give the answer away |
+| `TA_TEACHING_DEMONSTRATION_CORRECT` | `3` | Correct answers (the last at medium difficulty or above) that demonstrate the objective |
+| `TA_TEACHING_MAX_INCORRECT` | `5` | Incorrect answers after which the session completes as repeated failure |
+| `TA_TEACHING_MAX_QUESTIONS` | `10` | Questions per session |
+| `TA_TEACHING_MAX_TURNS` | `40` | Turns per session (the turn budget) |
 | `TA_RESEARCH_REQUIREMENT` | `mandatory` | `mandatory`: a failed research fails the lesson task; `optional`: continue with an empty bundle and a warning |
 | `TA_RESEARCH_MAX_RESULTS` | `5` | Results requested per search query |
 | `TA_RESEARCH_MAX_SOURCES` | `6` | Sources kept after ranking |

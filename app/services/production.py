@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from app.agents.registry import AgentRegistry
+from app.agents.registry import AgentRegistry, UnknownAgent
+from app.agents.teaching.agent import AGENT_ID as TEACHING_AGENT
 from app.config.production import production_readiness, required_capabilities
 from app.config.routing import ConfigError
 from app.config.settings import Settings
@@ -53,6 +54,7 @@ from app.schemas.production import (
     FinalVideo,
     GraphCheck,
     NodeTrace,
+    InteractiveTeachingPlan,
     ProductionPlan,
     ProductionReport,
     ProductionTask,
@@ -95,6 +97,12 @@ DiagnosticAnswerer = Callable[[DiagnosticQuestionSheet], Awaitable[DiagnosticAns
 # The long-term learning loop a production lesson is part of (goals are optional: without one, a lesson is planned
 # from the adaptive gaps alone).
 LEARNING_LOOP = ("Goal", "Curriculum", "Next Action", "Lesson", "Evaluation", "Mastery Update")
+# The opt-in interactive layer on a finished lesson (app/services/teaching.py).
+INTERACTIVE_LOOP = ("Lesson", "Interactive Teaching Session", "Teacher Turn", "Learner Turn", "Adaptive Response",
+                    "Evidence", "Evaluation", "Mastery")
+INTERACTIVE_ENDPOINTS = ("POST /lessons/{lesson_id}/teaching-session", "GET /teaching-sessions/{session_id}",
+                         "POST /teaching-sessions/{session_id}/answers", "POST /teaching-sessions/{session_id}/pause",
+                         "POST /teaching-sessions/{session_id}/resume", "POST /teaching-sessions/{session_id}/cancel")
 
 
 @dataclass
@@ -250,7 +258,20 @@ class ProductionService:
             estimated_llm_cost_usd=self._estimate(), knowledge_concepts=concepts,
             video_generation=video_generation, run_key=self.run_key(request, task.learner_id),
             learning_loop=list(LEARNING_LOOP), curriculum_stages=self._curriculum_stages(request),
+            interactive_teaching=self._interactive_teaching(),
         )
+
+    def _interactive_teaching(self) -> InteractiveTeachingPlan:
+        """Whether interactive sessions can run with this configuration (checked, never run: no provider call)."""
+        try:
+            self._agents.get(TEACHING_AGENT)
+            available = True
+        except UnknownAgent:
+            available = False
+        return InteractiveTeachingPlan(
+            available=available, loop=list(INTERACTIVE_LOOP), agent_id=TEACHING_AGENT,
+            llm_route=self.llm_routes().get(TEACHING_AGENT, "-"), endpoints=list(INTERACTIVE_ENDPOINTS),
+            policy=self._settings.teaching_config().model_dump())
 
     def _curriculum_stages(self, request: LessonRequest) -> list[str]:
         """The curriculum-planning workflow's nodes for the request's subject (built, never run)."""

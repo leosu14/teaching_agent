@@ -94,3 +94,22 @@ async def start_evaluation(container: Container) -> tuple[Task, Task]:
     assert lesson.status == TaskStatus.COMPLETED, lesson.errors
     evaluation = await container.task_service.start_evaluation(lesson.task_id, user_id="u1")
     return lesson, evaluation
+
+
+@pytest.fixture(scope="session")
+def teaching_lesson(tmp_path_factory) -> tuple[Path, str]:
+    """A generated curriculum lesson, once per test run: (data directory to copy, lesson task id)."""
+    from tests.teaching_fixtures import build_lesson
+
+    data_dir = tmp_path_factory.mktemp("teaching-lesson") / "data"
+    return data_dir, build_lesson(data_dir)
+
+
+@pytest.fixture
+def teaching_env(teaching_lesson, tmp_path):
+    from tests.teaching_fixtures import open_env
+
+    template, task_id = teaching_lesson
+    env = open_env(tmp_path / "data", task_id, copy_from=template)
+    yield env
+    env.close()

@@ -32,6 +32,9 @@ def test_dry_run_offline_checks_everything_and_calls_nothing(tmp_path) -> None:
                      "Knowledge base: 3 concepts", "compose_video", "set TEACHING_AGENT_MODE=production",
                      "Learning loop: Goal -> Curriculum -> Next Action -> Lesson -> Evaluation -> Mastery Update",
                      "Curriculum stage (10 workflow nodes", "draft -> propose -> finalize",
+                     "Interactive teaching (available, opt-in per lesson, not run by a dry run)",
+                     "Lesson -> Interactive Teaching Session -> Teacher Turn -> Learner Turn",
+                     "POST /lessons/{lesson_id}/teaching-session",
                      "no provider was called", "a production run is NOT possible"):
         assert expected in out, expected
     assert SECRET not in proc.stdout + proc.stderr

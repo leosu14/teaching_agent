@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -109,4 +109,57 @@ class CurriculumProgressRow(Base):
 
     __tablename__ = "curriculum_progress"
     curriculum_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    body: Mapped[str] = mapped_column(Text)
+
+
+class TeachingSessionRow(Base):
+    """An interactive teaching session; `version` is its optimistic lock."""
+
+    __tablename__ = "teaching_sessions"
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    learner_id: Mapped[str] = mapped_column(String(128), index=True)
+    lesson_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32))
+    version: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str] = mapped_column(Text)
+
+
+class TeachingTurnRow(Base):
+    """Append-only: one turn per row; a sequence number is stored once per session."""
+
+    __tablename__ = "teaching_turns"
+    __table_args__ = (UniqueConstraint("session_id", "sequence"),)
+    turn_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str] = mapped_column(Text)
+
+
+class InteractionEvidenceRow(Base):
+    """Append-only: one interaction evidence item per row, read back in recording order (seq)."""
+
+    __tablename__ = "interaction_evidence"
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    evidence_id: Mapped[str] = mapped_column(String(64), unique=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    body: Mapped[str] = mapped_column(Text)
+
+
+class TeachingRequestRow(Base):
+    """An applied learner request by its client_turn_id (idempotent answers)."""
+
+    __tablename__ = "teaching_requests"
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    client_turn_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    body: Mapped[str] = mapped_column(Text)
+
+
+class TeachingOutboxRow(Base):
+    """Events and artifacts to publish after a session change, stored in the change's transaction."""
+
+    __tablename__ = "teaching_outbox"
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    item_id: Mapped[str] = mapped_column(String(64), unique=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    published: Mapped[bool] = mapped_column(Boolean, default=False)
     body: Mapped[str] = mapped_column(Text)

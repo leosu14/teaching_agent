@@ -1,0 +1,16 @@
+{
+  "_comment": "The scripted learner of scripts/run_interactive_demo.py. The learner, goal and knowledge base are the curriculum demo's (fixtures/curriculum); the learner has already secured the preterite (secured_concepts), so the curriculum's next objective is the preterite/imperfect contrast. Questions are matched by their verb cue; 'correct' and 'incorrect' are what the scripted learner answers.",
+  "secured_concepts": ["es.preterite"],
+  "answer_key": {
+    "(sonar)": {"correct": "sonó", "incorrect": "sonaba"},
+    "(llegar)": {"correct": "llegué", "incorrect": "llegaba"}
+  },
+  "script": [
+    {"kind": "answer", "say": "incorrect", "expect": "the medium question is missed: difficulty goes down"},
+    {"kind": "answer", "say": "correct", "expect": "correct after the conceptual hint: difficulty kept, evidence recorded"},
+    {"kind": "answer", "say": "correct", "expect": "correct again: difficulty goes up"},
+    {"kind": "question", "say": "Why does the preterite interrupt the imperfect in a story?", "expect": "answered from the lesson's grounded material"},
+    {"kind": "question", "say": "What is the capital of Australia?", "expect": "outside the lesson: a structured limitation, nothing invented"},
+    {"kind": "answer", "say": "correct", "expect": "the final check is answered: the objective is demonstrated, the session completes"}
+  ]
+}

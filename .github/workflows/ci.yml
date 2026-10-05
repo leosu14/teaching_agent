@@ -47,3 +47,5 @@ jobs:
         run: python scripts/run_production_demo.py --dry-run --generated-video
       - name: Curriculum demo (goal -> curriculum -> next action -> lesson -> evaluation -> progress -> completion)
         run: python scripts/run_curriculum_demo.py
+      - name: Interactive demo (session -> adaptive turns -> hint -> grounded questions -> restart -> completion -> mastery)
+        run: python scripts/run_interactive_demo.py

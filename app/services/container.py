@@ -19,6 +19,7 @@ from app.agents.registry import AgentRegistry
 from app.agents.research.agent import ResearchAgent
 from app.agents.reviewer.agent import ContentReviewAgent
 from app.agents.slides.agent import SlidePlannerAgent
+from app.agents.teaching.agent import TeachingSessionAgent
 from app.agents.teacher.agent import TeacherAgent
 from app.agents.video.agent import VideoAgent
 from app.agents.visual.agent import VisualAgent
@@ -81,6 +82,7 @@ from app.providers.video_generation.base import VideoGenerationProvider
 from app.providers.video_generation.minimax import DEFAULT_BASE_URL as MINIMAX_BASE_URL
 from app.providers.video_generation.minimax import MiniMaxVideoGenerationProvider
 from app.providers.video_generation.mock import MockVideoGenerationProvider
+from app.runtime.interaction.teacher import TeachingRuntime
 from app.runtime.orchestrator.orchestrator import NodeObserver, Orchestrator
 from app.runtime.orchestrator.planner import WorkflowPlanner
 from app.runtime.workflow.engine import WorkflowEngine
@@ -95,6 +97,7 @@ from app.services.curriculum import CurriculumService
 from app.services.learners import LearnerService
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
+from app.services.teaching import TeachingSessionService
 from app.storage.db import create_db, dispose
 from app.storage.object_store import FilesystemObjectStore
 from app.storage.repositories import (
@@ -106,6 +109,7 @@ from app.storage.repositories import (
     SqlLearnerRepository,
     SqlLearningEventRepository,
     SqlTaskRepository,
+    SqlTeachingRepository,
 )
 from app.tools.artifacts.tools import ReadArtifactsTool, StoreArtifactsTool
 from app.tools.curriculum.tools import (
@@ -141,6 +145,7 @@ from app.tools.video.tools import VideoArtifactTool, VideoComposeTool, VideoVali
 from app.tools.video.validation import VideoPlanValidationTool
 from app.tools.research.cache import InMemoryResearchCache
 from app.tools.research.rank import RankSourcesTool
+from app.tools.teaching.grounding import TeachingGroundingTool
 from app.tools.visual.assets import ImageAssetTool
 from app.tools.visual.generate import ImageGenerationTool
 from app.tools.visual.search import ImageFetchTool, ImageSearchTool
@@ -353,6 +358,7 @@ class Container:
     task_service: TaskService
     learner_service: LearnerService
     curriculum_service: CurriculumService
+    teaching_service: TeachingSessionService
     catalog: CatalogService
     production: ProductionService
     _sessions: object
@@ -425,6 +431,7 @@ def build_container(
         RankSourcesTool(HeuristicRanker()),
         RetrievalTool(retriever),
         ConceptMapTool(retriever),
+        TeachingGroundingTool(retriever),
         LearnerSummaryTool(memory),
         LearnerSnapshotTool(memory),
         RecordLessonTool(memory),
@@ -472,7 +479,7 @@ def build_container(
     for agent in (RequestInterpreterAgent(), KnowledgeDiagnosticAgent(), ResearchAgent(),
                   CurriculumPlannerAgent(), TeacherAgent(), ContentReviewAgent(), VisualAgent(),
                   SlidePlannerAgent(), AudioPlannerAgent(), VideoAgent(), LearnerEvaluationAgent(),
-                  LearningPathPlannerAgent()):
+                  LearningPathPlannerAgent(), TeachingSessionAgent()):
         agents.register(agent)
     for agent_id in [*routing.agent_tiers, *routing.routes]:
         agents.get(agent_id)  # overrides and routes must name real agents
@@ -512,11 +519,16 @@ def build_container(
     task_service = TaskService(orchestrator, task_repo, event_repo, artifacts)
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
     curriculum_service = CurriculumService(memory, RetrieverKnowledgeBase(retriever), curriculum, task_service, events)
+    teaching_service = TeachingSessionService(
+        SqlTeachingRepository(sessions), TeachingRuntime(agents, tools, router, events), artifacts=artifacts,
+        memory=memory, knowledge=RetrieverKnowledgeBase(retriever), curriculum=curriculum_service,
+        tasks=task_service, events=events, config=settings.teaching_config())
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
         frameworks=frameworks, memory=memory, artifacts=artifacts, orchestrator=orchestrator,
         task_service=task_service, learner_service=learner_service, curriculum_service=curriculum_service,
+        teaching_service=teaching_service,
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         production=ProductionService(settings=settings, events=events, registry=providers.registry,
                                      selector=providers.selector, router=router, agents=agents, tools=tools,

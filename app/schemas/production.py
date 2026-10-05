@@ -66,6 +66,18 @@ class VideoGenerationPlan(Schema):
     fallback: str = "the slide's existing image, else the slide itself"
 
 
+class InteractiveTeachingPlan(Schema):
+    """Interactive teaching sessions on a finished lesson: opt-in (a lesson never starts one by itself)."""
+
+    available: bool
+    opt_in: bool = True
+    loop: list[str]
+    agent_id: str
+    llm_route: str  # provider/model chain of the teacher agent
+    endpoints: list[str]
+    policy: dict  # the deterministic policy's thresholds (TeachingConfig)
+
+
 class ProductionPlan(Schema):
     """Everything known before a single provider call: the resolved request, providers, budget and stages."""
 
@@ -89,6 +101,7 @@ class ProductionPlan(Schema):
     # learner with a learning goal; goals are optional).
     learning_loop: list[str] = Field(default_factory=list)
     curriculum_stages: list[str] = Field(default_factory=list)
+    interactive_teaching: InteractiveTeachingPlan | None = None
 
 
 class ArtifactNode(Schema):

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.schemas.artifact import Artifact
@@ -10,6 +11,15 @@ from app.schemas.curriculum import CurriculumProgress, CurriculumRecord, Curricu
 from app.schemas.events import Event
 from app.schemas.learner import EvidenceConflict, LearnerProfile, LearningEvent, LearningEvidence, LearningGoal
 from app.schemas.task import Task
+from app.schemas.teaching import (
+    InteractionEvidence,
+    OutboxItem,
+    SessionChange,
+    SessionConflict,
+    TeachingRequestRecord,
+    TeachingSession,
+    TeachingTurn,
+)
 from app.storage.orm import (
     ArtifactRow,
     CurriculumProgressRow,
@@ -21,6 +31,11 @@ from app.storage.orm import (
     LearningEvidenceRow,
     LearningGoalRow,
     TaskRow,
+    InteractionEvidenceRow,
+    TeachingOutboxRow,
+    TeachingRequestRow,
+    TeachingSessionRow,
+    TeachingTurnRow,
 )
 
 
@@ -59,6 +74,8 @@ class SqlEventRepository:
 
     def append(self, event: Event) -> None:
         with self._sessions.begin() as s:
+            if s.scalar(select(EventRow.seq).where(EventRow.event_id == event.event_id)) is not None:
+                return  # an event with a stable id published again (e.g. after a restart) is stored once
             s.add(EventRow(event_id=event.event_id, task_id=event.task_id, type=event.type, at=event.at,
                            body=event.model_dump_json()))
 
@@ -243,3 +260,99 @@ class SqlCurriculumRepository:
         with self._sessions() as s:
             row = s.get(CurriculumProgressRow, curriculum_id)
             return CurriculumProgress.model_validate_json(row.body) if row else None
+
+
+class SqlTeachingRepository:
+    """Teaching sessions, turns, interaction evidence, applied requests and the outbox. Every change is one
+    transaction, applied only against the session version it was computed from."""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def create(self, change: SessionChange) -> bool:
+        try:
+            with self._sessions.begin() as s:
+                if s.get(TeachingSessionRow, change.session.session_id) is not None:
+                    return False
+                s.add(self._session_row(change.session))
+                self._add(s, change)
+        except IntegrityError:
+            return False
+        return True
+
+    def apply(self, change: SessionChange, expected_version: int, request: TeachingRequestRecord | None = None) -> None:
+        session = change.session
+        try:
+            with self._sessions.begin() as s:
+                updated = s.execute(
+                    update(TeachingSessionRow)
+                    .where(TeachingSessionRow.session_id == session.session_id,
+                           TeachingSessionRow.version == expected_version)
+                    .values(version=session.version, status=session.status.value, body=session.model_dump_json()))
+                if updated.rowcount != 1:
+                    raise SessionConflict(f"session {session.session_id} changed concurrently "
+                                          f"(expected version {expected_version})")
+                self._add(s, change)
+                if request is not None:
+                    s.add(TeachingRequestRow(session_id=request.session_id, client_turn_id=request.client_turn_id,
+                                             body=request.model_dump_json()))
+                s.flush()
+        except IntegrityError as exc:
+            raise SessionConflict(f"session {session.session_id}: the turn or request was already stored") from exc
+
+    @staticmethod
+    def _session_row(session: TeachingSession) -> TeachingSessionRow:
+        return TeachingSessionRow(session_id=session.session_id, learner_id=session.learner_id,
+                                  lesson_id=session.lesson_id, status=session.status.value, version=session.version,
+                                  body=session.model_dump_json())
+
+    @staticmethod
+    def _add(s: Session, change: SessionChange) -> None:
+        sid = change.session.session_id
+        for turn in change.turns:
+            s.add(TeachingTurnRow(turn_id=turn.turn_id, session_id=sid, sequence=turn.sequence,
+                                  body=turn.model_dump_json()))
+        for ev in change.evidence:
+            s.add(InteractionEvidenceRow(evidence_id=ev.evidence_id, session_id=sid, body=ev.model_dump_json()))
+        for item in change.outbox:
+            s.add(TeachingOutboxRow(item_id=item.item_id, session_id=sid, published=False,
+                                    body=item.model_dump_json()))
+
+    def get(self, session_id: str) -> TeachingSession | None:
+        with self._sessions() as s:
+            row = s.get(TeachingSessionRow, session_id)
+            return TeachingSession.model_validate_json(row.body) if row else None
+
+    def for_learner(self, learner_id: str) -> list[TeachingSession]:
+        with self._sessions() as s:
+            rows = s.scalars(select(TeachingSessionRow).where(TeachingSessionRow.learner_id == learner_id))
+            return sorted((TeachingSession.model_validate_json(r.body) for r in rows),
+                          key=lambda x: (x.started_at, x.session_id))
+
+    def turns(self, session_id: str) -> list[TeachingTurn]:
+        with self._sessions() as s:
+            rows = s.scalars(select(TeachingTurnRow).where(TeachingTurnRow.session_id == session_id)
+                             .order_by(TeachingTurnRow.sequence))
+            return [TeachingTurn.model_validate_json(r.body) for r in rows]
+
+    def evidence(self, session_id: str) -> list[InteractionEvidence]:
+        with self._sessions() as s:
+            rows = s.scalars(select(InteractionEvidenceRow).where(InteractionEvidenceRow.session_id == session_id)
+                             .order_by(InteractionEvidenceRow.seq))
+            return [InteractionEvidence.model_validate_json(r.body) for r in rows]
+
+    def request(self, session_id: str, client_turn_id: str) -> TeachingRequestRecord | None:
+        with self._sessions() as s:
+            row = s.get(TeachingRequestRow, (session_id, client_turn_id))
+            return TeachingRequestRecord.model_validate_json(row.body) if row else None
+
+    def pending_outbox(self, session_id: str) -> list[OutboxItem]:
+        with self._sessions() as s:
+            rows = s.scalars(select(TeachingOutboxRow).where(TeachingOutboxRow.session_id == session_id,
+                                                             TeachingOutboxRow.published.is_(False))
+                             .order_by(TeachingOutboxRow.seq))
+            return [OutboxItem.model_validate_json(r.body) for r in rows]
+
+    def mark_published(self, item_id: str) -> None:
+        with self._sessions.begin() as s:
+            s.execute(update(TeachingOutboxRow).where(TeachingOutboxRow.item_id == item_id).values(published=True))

@@ -24,6 +24,9 @@ pedagogy     the adaptive engine: ConceptGraph, KnowledgeBase interface, Knowled
 curriculum   long-term learning: CurriculumPlanner, validation, CurriculumEngine (versions, progress, completion,
              replanning), priority model, NextActionEngine, review policy, CurriculumTracker; reads the learner
              model and the concept graph, never providers, tools or storage
+teaching     interactive sessions: TeachingPolicy, DifficultyController, grading, the session engine (pure
+             transitions with a transactional outbox), summaries, the TeachingRepository interface; no providers,
+             tools or storage
 artifacts    ArtifactService: versioning, content-hash dedup, dependency graph, content-addressed media objects
 storage      SQLAlchemy/SQLite metadata repositories + filesystem object store (no business rules)
 schemas / config / observability / utils   shared foundation
@@ -574,6 +577,68 @@ without one keeps the adaptive loop exactly as before.
   action (a LEARNING_ACTION artifact). Nothing happens for a learner without curricula.
 - **Target dates.** Feasibility (`sessions needed / sessions_per_week` against the days left) is reported as a
   structured warning (`deadline_infeasible`, `deadline_passed`); the plan is never compressed.
+
+## Interactive teaching sessions
+
+```
+Lesson → Interactive Teaching Session → Teacher Turn → Learner Turn → Adaptive Response → Interaction Evidence
+→ (completion) summary → LearningEvidence → mastery update → objective progress → next learning action
+```
+
+A session (`TeachingSession`, `app/teaching/`) is opt-in per lesson: `POST /lessons/{lesson_id}/teaching-session`
+starts one on a generated lesson (the LESSON artifact, or the completed lesson task). It does not replace the
+evaluation workflow, the learner model or the curriculum: it is one more source of evidence for them. Nothing about
+it lives in `AgentContext`; its state is a serializable `SessionState` stored with the session.
+
+| Deterministic (code, `app/teaching`) | Model (`teaching_session` agent) |
+|---|---|
+| The next action (EXPLAIN, ASK, HINT, FEEDBACK, RETEACH, PRACTICE, CHECK, SUMMARIZE, COMPLETE) | The wording of that one turn |
+| Grading (normalised expected and accepted answers, multiple-choice labels) | The question's wording and its expected answer (validated) |
+| Difficulty (`DifficultyController`), hint levels, misconception thresholds | Misconception candidates (validated, stored as evidence) |
+| Completion (objective demonstrated, repeated failure, question limit, turn budget, learner stop) | Answers to learner questions, from the grounded material only |
+| The summary's numbers, mastery (learner memory's updater), objective progress, the next action | The summary's narrative |
+
+- **Lifecycle.** ACTIVE (the teacher owes turns) → WAITING_FOR_LEARNER → ... → COMPLETED; PAUSED, CANCELLED (keeps
+  the history; cancelling again is a no-op) and FAILED. Every transition is a pure function in
+  `app/teaching/engine.py` that returns a `SessionChange` (the new session, its new turns and evidence, and outbox
+  items); `TeachingRepository.apply` writes it in one transaction.
+- **Two phases.** A learner answer is first recorded and graded deterministically (the session stays ACTIVE with the
+  teacher turns it owes planned in its state), then each owed teacher turn is generated and committed. If the model
+  fails, nothing is lost: the session stays ACTIVE, and a resume, a read or the replayed request generates the turns.
+- **Difficulty.** `increase_after_successes` consecutive correct answers raise it, `decrease_after_failures`
+  consecutive misses lower it; a correct answer after a hint keeps it; an incorrect answer after a recorded
+  misconception (`reteach_after_misconceptions`) reteaches. Every change is a DIFFICULTY change with its reason.
+- **Hints.** Level 1 conceptual, 2 targeted, 3 a worked step; a hint never reveals the expected answer unless
+  `reveal_answer_in_hints`. Hint use and the answer after a hint are evidence; a hinted correct answer counts as
+  partial credit (`1 - hint_penalty × level`).
+- **Learner questions** are answered only from the lesson's sections, its research and the knowledge base
+  (`teaching.ground`). Citations must be refs of that material; with nothing relevant the answer is a structured
+  limitation (`grounded: false`), never an invented source.
+- **Validation of the model's output** (`TeachingSessionAgent.check`): the turn is exactly the requested action and
+  concept at the requested difficulty; no COMPLETE; one question for question turns and none otherwise; a short-answer
+  question does not contain its answer; hints do not reveal it; citations exist; misconceptions only for an incorrect
+  answer about the session's concept. The output schema has no field for mastery, objective or session status
+  (unknown fields fail validation). Invalid output is retried, then the turn fails as above.
+- **Context window** (`TeachingTurnInput`): the objective, the lesson's sections, practice items, a compact state,
+  the last `recent_turns` turns, this question and answer, and grounding passages. No learner, session, task or goal
+  ids, no learner history, profile or other sessions.
+- **Persistence and resume.** Sessions, turns (unique `(session_id, sequence)`), interaction evidence, request records
+  and the outbox are SQL tables. A new process reads the session back and continues where it was; the outbox
+  publishes events (stable ids, so never twice) and artifacts (deduplicated by content) that a crash left behind.
+- **Idempotency and concurrency.** An answer carries a `client_turn_id`: the same id with the same answer replays the
+  stored result, with a different answer is a 409. Starting a session is idempotent per `idempotency_key`. Every
+  write is an optimistic-locking update (`version`); a concurrent answer gets a 409 conflict and is never silently
+  dropped or applied twice.
+- **Completion.** The summary (`TeachingSessionSummary`) is stored, then, once: each graded answer becomes
+  `LearningEvidence` (`source_type: interaction`) recorded through `LearnerMemoryService.record_evidence` (practice
+  sessions record none), the curriculum's objective progress is read back and `CurriculumService.next_action` selects
+  the next action. TEACHING_SESSION_SUMMARY → LEARNING_EVIDENCE → LEARNER_MODEL → LEARNING_ACTION artifacts.
+- **Artifacts.** LEARNING_GOAL → CURRICULUM_VERSION → LEARNING_OBJECTIVE → LESSON → TEACHING_SESSION →
+  TEACHING_TURN → INTERACTION_EVIDENCE, all on the lesson task.
+- **Events.** `teaching_session.started` / `paused` / `resumed` / `completed` / `cancelled` / `failed`,
+  `teaching_turn.created`, `learner_answer.received`, `hint.given`, `misconception.detected`, `difficulty.changed`;
+  stable ids, the concept, correctness, hint level and difficulty; no answer or turn text, no learner profile, no
+  provider details.
 
 ## Cost and observability
 

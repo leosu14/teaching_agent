@@ -142,3 +142,16 @@ def test_curriculum_demo_script_runs_to_completion(tmp_path) -> None:
                      "action: COMPLETE", "goal status: COMPLETED", "all checks passed"):
         assert expected in out, expected
     assert "[FAIL]" not in out
+
+
+def test_interactive_demo_script_runs_to_completion(tmp_path) -> None:
+    proc = subprocess.run([sys.executable, "scripts/run_interactive_demo.py", "--data-dir", str(tmp_path)],
+                          cwd=REPO_ROOT, capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    for expected in ("difficulty 2 -> 1", "teacher HINT", "evidence MISCONCEPTION", "difficulty 1 -> 2",
+                     "answer while paused refused", "process restarted", "[cites lesson:", "[not grounded:",
+                     "the session completes", "completion: OBJECTIVE_DEMONSTRATED", "mastery es.past_contrast:",
+                     "next action:", "INTERACTION_EVIDENCE", "teaching_session.completed x1", "all checks passed"):
+        assert expected in out, expected
+    assert "[FAIL]" not in out
