@@ -38,6 +38,9 @@ def test_a_cycle_over_http(cycle_env_at) -> None:
         assert again.status_code == 200 and again.json()["cycle_id"] == cid and not again.json()["created"]
         other = client.post(f"/learners/{LEARNER}/learning-cycles", json={"idempotency_key": "other"})
         assert other.status_code == 409
+        changed = client.post(f"/learners/{LEARNER}/learning-cycles", json={"idempotency_key": "web",
+                                                                            "user_id": "someone-else"})
+        assert changed.status_code == 409  # the same key with a different request
 
         wrong = client.post(f"/learning-cycles/{cid}/responses", json={"client_response_id": "w", "answer": "x"})
         assert wrong.status_code == 422  # a sheet is asked for, not a session answer

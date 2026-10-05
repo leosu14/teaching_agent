@@ -747,8 +747,12 @@ drives it; the state machine is pure (`app/curriculum/cycle.py`); the schemas ar
 - **Persistence.** `learning_cycles` (the cycle as a versioned JSON body), `learning_cycle_slots`,
   `learning_cycle_requests` (received responses). Every change is computed by a pure transition and applied against
   the version it was computed from (optimistic lock); a conflicting writer reloads.
+- **Drive lease.** Only the holder of the cycle's lease (a request now, a worker later) creates, runs or resumes a
+  child or hands it a response. The lease is taken and given back in version-checked writes on the cycle record; a
+  concurrent request sees the cycle busy (`busy_until`; a response gets a 409 and can be retried) and only reads it.
+  A lease left by a crashed process expires after `DRIVE_LEASE` (10 minutes), then the cycle can be resumed.
 - **Idempotency.** The cycle id is `stable_id(learner, idempotency_key)`: the same key returns, and continues, the
-  same cycle. Before a child is created its step key is recorded; children carry the key (task metadata, the session's
+  same cycle; the same key with a different request is a 409. Before a child is created its step key is recorded; children carry the key (task metadata, the session's
   idempotency key), so a crash between creating a child and attaching it finds it again. A response is recorded with
   the transition that receives it (`client_response_id`, request hash); the same id and body replay, another body is
   a 409, and the child gets it with an idempotency key derived from the cycle and response id. Artifacts reuse

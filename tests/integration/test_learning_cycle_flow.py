@@ -53,17 +53,29 @@ def evaluations(env: CycleEnv) -> list:
 
 
 def footprint(env: CycleEnv) -> dict:
-    """Everything a duplicated side effect would change."""
-    tasks = env.container.task_service.list_for_learner(LEARNER)
-    grades = sum(1 for t in tasks for a in env.container.task_service.artifacts(t.task_id)
-                 if a.type.value == "ASSESSMENT_GRADE")
-    profile = env.container.memory.get(LEARNER)
-    return {"tasks": len(tasks), "sessions": len(env.container.teaching_service.sessions(LEARNER)),
-            "evidence": len(env.container.memory.evidence(LEARNER)), "grades": grades,
-            "learning_events": len(env.container.memory.history(LEARNER)),
-            "mastery": {c: round(m.mastery, 6) for c, m in sorted(profile.concepts.items())},
-            "evidence_counts": {c: m.evidence_count for c, m in sorted(profile.concepts.items())},
-            "cycles": len(env.cycles.repository.for_learner(LEARNER))}
+    """Everything a duplicated side effect would change: tasks, sessions, teaching turns, grades, evidence, learning
+    events, mastery, the curricula and their progress, artifacts, cycles."""
+    c = env.container
+    tasks = c.task_service.list_for_learner(LEARNER)
+    artifacts = [a for t in tasks for a in c.task_service.artifacts(t.task_id)]
+    cycles = env.cycles.repository.for_learner(LEARNER)
+    artifacts += [a for cy in cycles for a in env.cycles.artifacts(cy.cycle_id)]
+    sessions = c.teaching_service.sessions(LEARNER)
+    profile = c.memory.get(LEARNER)
+    curricula = []
+    for goal in c.curriculum_service.goals(LEARNER):
+        cur = c.curriculum_service.curriculum(goal.goal_id)
+        curricula.append((goal.status.value, cur.version if cur else None, [
+            (o.concept_id, o.status.value, o.evidence_count) for o in cur.progress.objectives] if cur else None))
+    return {"tasks": sorted((t.plan.workflow_id if t.plan else "-", t.status.value) for t in tasks),
+            "sessions": sorted(s.status.value for s in sessions),
+            "turns": sum(len(c.teaching_service.turns(s.session_id)) for s in sessions),
+            "artifacts": dict(sorted(Counter(a.type.value for a in artifacts).items())),
+            "evidence": len(c.memory.evidence(LEARNER)),
+            "learning_events": len(c.memory.history(LEARNER)),
+            "mastery": {k: round(m.mastery, 4) for k, m in sorted(profile.concepts.items())},
+            "evidence_counts": {k: m.evidence_count for k, m in sorted(profile.concepts.items())},
+            "curricula": curricula, "cycles": sorted(cy.status.value for cy in cycles)}
 
 
 def cycle_events(env: CycleEnv, cid: str) -> Counter:
@@ -120,7 +132,12 @@ async def test_a_learn_cycle_runs_the_lesson_and_the_session_into_mastery_and_th
     assert o.result.value == "TAUGHT" and o.learning_evidence_ids == session.outcome.learning_evidence_ids
     stored = {e.evidence_id: e for e in env.container.memory.evidence(LEARNER)}
     assert all(stored[e].source_type == "interaction" for e in o.learning_evidence_ids)
-    assert any(c["concept_id"] == CONCEPT for c in o.mastery_changes)
+    # Mastery is learner memory's: the cycle reports the session's own MasteryChange, which is the stored value.
+    [change] = [c for c in o.mastery_changes if c["concept_id"] == CONCEPT]
+    assert change == session.outcome.mastery_changes[[c["concept_id"] for c in session.outcome.mastery_changes]
+                                                     .index(CONCEPT)]
+    assert round(env.container.memory.get(LEARNER).concepts[CONCEPT].mastery, 6) == round(change["after"], 6)
+    assert o.objective_progress == session.outcome.objective_progress
     fresh = await env.container.curriculum_service.next_action(LEARNER)
     assert (o.next_action.action, o.next_action.concept_id) == (fresh.action, fresh.concept_id)
     assert o.objective_progress["concept_id"] == CONCEPT
@@ -288,68 +305,121 @@ def crash_once(monkeypatch, target, name: str, when=lambda *a, **k: True):
     return state
 
 
+def restart(env: CycleEnv, monkeypatch) -> CycleEnv:
+    """The crashed process is gone: a new process on the same data. The crashed request still holds the drive lease
+    until it expires; the new process's clock is past that."""
+    monkeypatch.undo()
+    env = env.reopen()
+    env.cycles._clock = lambda: utcnow() + cycle_service.DRIVE_LEASE + timedelta(seconds=1)
+    return env
+
+
+def crashed_holding_the_lease(env: CycleEnv, cid: str) -> None:
+    cycle = env.cycles.repository.get(cid)
+    assert cycle.lease is not None and cycle.lease.until > utcnow()
+
+
+def ran_once(env: CycleEnv, cid: str, steps: int = 2) -> None:
+    """Each lifecycle event, each step event and each cycle artifact exactly once."""
+    events = cycle_events(env, cid)
+    assert all(events[t] == 1 for t in LIFECYCLE), events
+    assert events["learning_cycle.step_started"] == events["learning_cycle.step_completed"] == steps, events
+    ids = [e.event_id for e in env.cycles.events(cid)]
+    assert len(ids) == len(set(ids))
+    assert Counter(a.name for a in env.cycles.artifacts(cid)) == {"learning_cycle": 1, "learning_cycle_outcome": 1}
+    assert not env.cycles.repository.get(cid).pending_events
+
+
 async def test_a_crash_after_the_cycle_is_created_continues_with_the_same_action(cycle_env_at, monkeypatch) -> None:
+    baseline = footprint(cycle_env_at("diagnostic"))
     env = cycle_env_at("base")
     crash_once(monkeypatch, cycle_service.LearningCycleService, "_store_cycle_artifact")
     with pytest.raises(SimulatedCrash):
         await env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="c1"))
-    stored = env.cycles.repository.get(cycle_service.engine.cycle_id_for(LEARNER, "c1"))
+    cid = cycle_id(env)
+    stored = env.cycles.repository.get(cid)
     assert stored.status == CycleStatus.RUNNING and lessons(env) == []
-    monkeypatch.undo()
-    env = env.reopen()
+    crashed_holding_the_lease(env, cid)
+    env = restart(env, monkeypatch)
     view = await env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="c1"))
-    assert view.action == stored.action and view.status == CycleStatus.WAITING
-    assert len(lessons(env)) == 1
+    assert view.action == stored.action and view.prompt.kind == "DIAGNOSTIC_QUESTIONS"
+    assert footprint(env) == baseline  # exactly the state of a run without the crash
 
 
 async def test_a_crash_after_the_lesson_is_created_finds_it_by_key(cycle_env_at, monkeypatch) -> None:
+    baseline = footprint(cycle_env_at("diagnostic"))
     env = cycle_env_at("base")
     crash_once(monkeypatch, cycle_service.engine, "attach_child")
     with pytest.raises(SimulatedCrash):
         await env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="c1"))
     [created] = lessons(env)
-    assert created.status == TaskStatus.CREATED
-    monkeypatch.undo()
-    env = env.reopen()
+    assert created.status == TaskStatus.CREATED and env.cycles.repository.get(cycle_id(env)).steps[0].child_id is None
+    env = restart(env, monkeypatch)
     view = await env.cycles.resume(cycle_id(env))
-    assert view.steps[0].child_id == created.task_id and len(lessons(env)) == 1
-    assert view.status == CycleStatus.WAITING and view.prompt.kind == "DIAGNOSTIC_QUESTIONS"
+    assert view.steps[0].child_id == created.task_id and view.prompt.kind == "DIAGNOSTIC_QUESTIONS"
+    assert footprint(env) == baseline
 
 
-async def test_a_crash_while_the_lesson_runs_resumes_it_from_its_checkpoint(cycle_env_at, monkeypatch) -> None:
+async def test_a_crash_while_the_lesson_runs_resumes_it_and_the_lease_stops_a_second_run(cycle_env_at,
+                                                                                       monkeypatch) -> None:
+    baseline = footprint(cycle_env_at("diagnostic"))
     env = cycle_env_at("base")
-    crash_once(monkeypatch, env.container.task_service, "run")
+    tasks = env.container.task_service
+    crash_once(monkeypatch, tasks, "run",  # the lesson's run (the curriculum's planning task runs before it)
+               when=lambda task_id: tasks.get(task_id).plan.workflow_id == "lesson_generation")
     with pytest.raises(SimulatedCrash):
         await env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="c1"))
+    cid = cycle_id(env)
+    crashed_holding_the_lease(env, cid)
     monkeypatch.undo()
     env = env.reopen()
+    runs = []
+    original = env.container.task_service.run
+
+    async def counted(task_id):
+        runs.append(task_id)
+        return await original(task_id)
+
+    monkeypatch.setattr(env.container.task_service, "run", counted)
+    busy = await env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="c1"))  # a client retry, too early
+    assert busy.status == CycleStatus.RUNNING and busy.busy_until is not None and busy.prompt is None
+    assert runs == []  # the retry did not run the lesson a second time
+    env.cycles._clock = lambda: utcnow() + cycle_service.DRIVE_LEASE + timedelta(seconds=1)
     view = await env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="c1"))
-    assert view.prompt.kind == "DIAGNOSTIC_QUESTIONS" and len(lessons(env)) == 1
+    assert view.prompt.kind == "DIAGNOSTIC_QUESTIONS" and view.busy_until is None and len(runs) == 1
+    monkeypatch.undo()
+    assert footprint(env) == baseline
 
 
 async def test_a_crash_after_a_response_is_received_delivers_it_once(cycle_env_at, monkeypatch) -> None:
+    baseline = footprint(cycle_env_at("done"))
     env = cycle_env_at("session")
     cid = cycle_id(env)
     view = await env.cycles.get(cid)
+    sid = view.steps[1].child_id
+    turns = len(env.container.teaching_service.turns(sid))
     response = ScriptedLearner(prefix="x").respond(view.prompt)
     crash_once(monkeypatch, cycle_service.LearningCycleService, "_deliver")
     with pytest.raises(SimulatedCrash):
         await env.cycles.respond(cid, response)
-    sid = view.steps[1].child_id
-    turns = len(env.container.teaching_service.turns(sid))
-    monkeypatch.undo()
-    env = env.reopen()
-    assert (await env.cycles.get(cid)).status == CycleStatus.WAITING  # the session never got the answer
+    assert env.cycles.repository.request(cid, response.client_response_id) is not None  # received, durable
+    assert len(env.container.teaching_service.turns(sid)) == turns  # but never delivered
+    env = restart(env, monkeypatch)
+    assert (await env.cycles.get(cid)).status == CycleStatus.WAITING  # the session still waits for it
     replay = await env.cycles.respond(cid, response)
-    assert replay.replayed
-    learner_turns = [t for t in env.container.teaching_service.turns(sid)[turns:] if t.speaker.value == "LEARNER"]
-    assert len(learner_turns) == 1
-    again = await env.cycles.respond(cid, response)
-    assert len(env.container.teaching_service.turns(sid)) == len(env.container.teaching_service.turns(sid))
-    assert again.steps == replay.steps
+    assert replay.replayed and replay.prompt.kind == "SESSION_QUESTION"
+    after = env.container.teaching_service.turns(sid)
+    assert [t.speaker.value for t in after[turns:]].count("LEARNER") == 1
+    again = await env.cycles.respond(cid, response)  # and once more: nothing new
+    assert len(env.container.teaching_service.turns(sid)) == len(after) and again.steps == replay.steps
+    done = await answer(env, again, ScriptedLearner(prefix="s"))
+    assert done.status == CycleStatus.COMPLETED
+    assert footprint(env) == baseline
+    ran_once(env, cid)
 
 
 async def test_a_crash_after_the_child_finished_is_reconciled(cycle_env_at, monkeypatch) -> None:
+    baseline = footprint(cycle_env_at("session"))
     env = cycle_env_at("diagnostic")
     cid = cycle_id(env)
     view = await env.cycles.get(cid)
@@ -357,28 +427,41 @@ async def test_a_crash_after_the_child_finished_is_reconciled(cycle_env_at, monk
                when=lambda cycle, step_id, obs, at: obs.state == "completed")
     with pytest.raises(SimulatedCrash):
         await env.cycles.respond(cid, ScriptedLearner(prefix="d").respond(view.prompt))
-    assert lessons(env)[0].status == TaskStatus.COMPLETED
-    monkeypatch.undo()
-    env = env.reopen()
-    before = footprint(env)
+    assert lessons(env)[0].status == TaskStatus.COMPLETED  # the side effect is durable
+    assert env.cycles.repository.get(cid).steps[0].status.value == "RUNNING"  # the cycle had not recorded it
+    env = restart(env, monkeypatch)
     view = await env.cycles.resume(cid)
-    assert view.prompt.kind == "SESSION_QUESTION" and len(lessons(env)) == 1
-    assert footprint(env)["evidence"] == before["evidence"]  # the diagnostic's evidence was recorded once
+    assert view.prompt.kind == "SESSION_QUESTION"
+    assert footprint(env) == baseline  # one lesson, one session, the diagnostic's evidence and mastery once
 
 
 async def test_a_crash_before_the_outcome_is_recorded_finishes_once(cycle_env_at, monkeypatch) -> None:
+    baseline = footprint(cycle_env_at("done"))
     env = cycle_env_at("session")
     cid = cycle_id(env)
     crash_once(monkeypatch, cycle_service.LearningCycleService, "_finish")
     with pytest.raises(SimulatedCrash):
         await answer(env, await env.cycles.get(cid), ScriptedLearner(prefix="s"))
-    monkeypatch.undo()
-    env = env.reopen()
-    before = footprint(env)
+    assert env.cycles.repository.get(cid).status == CycleStatus.RUNNING
+    env = restart(env, monkeypatch)
     view = await env.cycles.resume(cid)
     assert view.status == CycleStatus.COMPLETED
-    assert footprint(env) == before  # no evidence, mastery or task twice
-    assert cycle_events(env, cid)["learning_cycle.completed"] == 1
+    assert footprint(env) == baseline  # no evidence, mastery update, curriculum change or task twice
+    ran_once(env, cid)
+
+
+async def test_a_crash_after_the_outcome_artifact_completes_without_a_second_one(cycle_env_at, monkeypatch) -> None:
+    baseline = footprint(cycle_env_at("done"))
+    env = cycle_env_at("session")
+    cid = cycle_id(env)
+    crash_once(monkeypatch, cycle_service.engine, "complete")
+    with pytest.raises(SimulatedCrash):
+        await answer(env, await env.cycles.get(cid), ScriptedLearner(prefix="s"))
+    assert [a.name for a in env.cycles.artifacts(cid)].count("learning_cycle_outcome") == 1
+    env = restart(env, monkeypatch)
+    assert (await env.cycles.resume(cid)).status == CycleStatus.COMPLETED
+    assert footprint(env) == baseline
+    ran_once(env, cid)
 
 
 async def test_a_crash_before_events_are_published_publishes_them_once(cycle_env_at, monkeypatch) -> None:
@@ -396,13 +479,22 @@ async def test_a_crash_before_events_are_published_publishes_them_once(cycle_env
         await answer(env, await env.cycles.get(cid), ScriptedLearner(prefix="s"))
     assert env.cycles.repository.get(cid).status == CycleStatus.COMPLETED
     assert cycle_events(env, cid)["learning_cycle.completed"] == 0
-    monkeypatch.undo()
-    env = env.reopen()
+    env = restart(env, monkeypatch)
     for _ in range(3):
         await env.cycles.get(cid)
-    events = cycle_events(env, cid)
-    assert all(events[t] == 1 for t in LIFECYCLE)
-    assert not env.cycles.repository.get(cid).pending_events
+    types = [e.type for e in env.cycles.events(cid) if e.type.startswith("learning_cycle.")]
+    assert types[-2:] == ["learning_cycle.action_completed", "learning_cycle.completed"]  # in order
+    ran_once(env, cid)
+
+
+async def test_a_completed_cycle_ran_each_event_and_artifact_once(cycle_env_at) -> None:
+    env = cycle_env_at("done")
+    cid = cycle_id(env)
+    ran_once(env, cid)
+    types = [e.type.removeprefix("learning_cycle.") for e in env.cycles.events(cid)
+             if e.type.startswith("learning_cycle.")]
+    assert types[:3] == ["started", "action_selected", "step_started"] and types[-2:] == ["action_completed",
+                                                                                          "completed"]
 
 
 # --- failures ------------------------------------------------------------------------------------------------------
@@ -505,17 +597,22 @@ async def test_a_complete_cycle_verifies_the_completion_rule_and_generates_nothi
     env = cycle_env_at("done")
     await secure(env, "es.present", "es.preterite", "es.past_contrast", "es.subjunctive")
     before = footprint(env)
+    calls = sum(env.llm.calls.values())
     view = await env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="complete"))
     assert view.action.action == LearningActionType.COMPLETE and view.steps == []
     assert view.status == CycleStatus.COMPLETED and view.outcome.result.value == "GOAL_COMPLETED"
     assert view.outcome.goal_complete and view.outcome.next_action is not None
+    assert view.outcome.learning_evidence_ids == [] and view.outcome.mastery_changes == []
+    assert sum(env.llm.calls.values()) == calls  # no model call
     after = footprint(env)
-    assert (after["tasks"], after["sessions"], after["evidence"]) == (before["tasks"], before["sessions"],
-                                                                        before["evidence"])
+    assert after.pop("cycles") == ["COMPLETED", "COMPLETED"] and before.pop("cycles") == ["COMPLETED"]
+    assert after["artifacts"].pop("LEARNING_CYCLE") == before["artifacts"].pop("LEARNING_CYCLE") + 2
+    # The goal is completed by the curriculum (its tracker, when it selected COMPLETE), not by the cycle.
+    [(status_before, *rest_before)], [(status_after, *rest_after)] = before.pop("curricula"), after.pop("curricula")
+    assert (status_before, status_after) == ("ACTIVE", "COMPLETED") and rest_before == rest_after
+    assert after == before  # no teaching, assessment, evidence or mastery change
     events = cycle_events(env, view.cycle_id)
-    assert all(events[t] == 1 for t in LIFECYCLE)
-    goal = env.container.curriculum_service.goals(LEARNER)[0]
-    assert goal.status.value == "COMPLETED"
+    assert all(events[t] == 1 for t in LIFECYCLE) and "goal.completed" not in events
 
 
 async def test_complete_fails_when_the_completion_rule_does_not_hold(cycle_env_at, monkeypatch) -> None:
@@ -580,33 +677,65 @@ async def test_cancel_stops_the_child_and_frees_the_slot(cycle_env_at) -> None:
 # --- concurrency ---------------------------------------------------------------------------------------------------
 
 
-async def test_concurrent_starts_execute_one_action(cycle_env_at) -> None:
+def yielding(monkeypatch, target, name: str) -> None:
+    """Let other requests run while this call is in progress (the mocks never yield on their own, so without this
+    "concurrent" requests would simply run one after the other)."""
+    original = getattr(target, name)
+
+    async def slow(*args, **kwargs):
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(target, name, slow)
+
+
+async def test_concurrent_starts_execute_one_action(cycle_env_at, monkeypatch) -> None:
+    baseline = footprint(cycle_env_at("diagnostic"))
     env = cycle_env_at("base")
-    results = await asyncio.gather(
-        env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="a")),
-        env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="b")),
-        env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="a")),
-        return_exceptions=True)
+    yielding(monkeypatch, env.container.task_service, "run")
+    yielding(monkeypatch, env.container.curriculum_service, "next_action")
+    yielding(monkeypatch, env.container.curriculum_service, "create_lesson")
+    results = await asyncio.gather(*(env.cycles.start(LEARNER, StartLearningCycle(idempotency_key=key))
+                                      for key in ("c1", "other", "c1", "c1", "other")), return_exceptions=True)
     views = [r for r in results if not isinstance(r, BaseException)]
     errors = [r for r in results if isinstance(r, BaseException)]
-    assert views and all(isinstance(e, CycleConflict) for e in errors)
-    assert len({v.cycle_id for v in views}) == 1
-    assert len(env.cycles.repository.for_learner(LEARNER)) == 1 and len(lessons(env)) == 1
+    assert views and all(isinstance(e, CycleConflict) for e in errors), errors
+    assert {v.cycle_id for v in views} == {cycle_id(env)}  # "c1" won; "other" was refused
+    assert sum(v.prompt is not None for v in views) >= 1
+    assert all(v.busy_until is not None for v in views if v.prompt is None)  # the others saw it busy
+    monkeypatch.undo()
+    assert footprint(env) == baseline  # one cycle, one curriculum, one lesson, run once
 
 
-async def test_concurrent_responses_are_delivered_once(cycle_env_at) -> None:
+async def test_concurrent_responses_are_delivered_once(cycle_env_at, monkeypatch) -> None:
     env = cycle_env_at("session")
     cid = cycle_id(env)
     view = await env.cycles.get(cid)
-    response = ScriptedLearner(prefix="x").respond(view.prompt)
+    learner = ScriptedLearner(prefix="x")
+    response = learner.respond(view.prompt)
+    other = CycleResponse(client_response_id="y1", answer=response.answer)
     sid = view.steps[1].child_id
     turns = len(env.container.teaching_service.turns(sid))
+    evidence = len(env.container.memory.evidence(LEARNER))
+    yielding(monkeypatch, env.container.teaching_service, "submit")
     results = await asyncio.gather(env.cycles.respond(cid, response), env.cycles.respond(cid, response),
-                                   return_exceptions=True)
-    assert any(not isinstance(r, BaseException) for r in results)
-    assert all(isinstance(r, CycleConflict) for r in results if isinstance(r, BaseException))
+                                   env.cycles.respond(cid, other), return_exceptions=True)
+    ok = [r for r in results if not isinstance(r, BaseException)]
+    assert ok and all(isinstance(r, CycleConflict) for r in results if isinstance(r, BaseException)), results
     new = env.container.teaching_service.turns(sid)[turns:]
-    assert sum(t.speaker.value == "LEARNER" for t in new) == 1
+    assert sum(t.speaker.value == "LEARNER" for t in new) == 1  # one answer applied, none lost silently
+    assert len(env.container.memory.evidence(LEARNER)) <= evidence + 1
+    replay = await env.cycles.respond(cid, response)  # the refused requests can retry: the winner replays
+    assert replay.replayed or replay.prompt is not None
+
+
+async def test_the_same_key_with_another_request_is_refused(cycle_env_at) -> None:
+    env = cycle_env_at("diagnostic")
+    before = footprint(env)
+    with pytest.raises(CycleConflict, match="different request"):
+        await env.cycles.start(LEARNER, StartLearningCycle(idempotency_key="c1", user_id="someone-else"))
+    assert footprint(env) == before
 
 
 # --- security ------------------------------------------------------------------------------------------------------

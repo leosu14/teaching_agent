@@ -121,6 +121,15 @@ class CycleEvent(Schema):
     data: dict = Field(default_factory=dict)
 
 
+class CycleLease(Schema):
+    """Who may drive the cycle's children now: one request (or, later, one worker) at a time. Taken in a
+    version-checked write before a child is created, run, resumed or given a response, released when the request
+    returns; a lease left by a crashed process expires at `until` and can then be taken over."""
+
+    token: str
+    until: datetime
+
+
 class LearningCycle(Schema):
     cycle_id: str  # stable: learner + idempotency key
     learner_id: str
@@ -134,6 +143,7 @@ class LearningCycle(Schema):
     outcome: CycleOutcome | None = None
     artifact_ids: dict[str, str] = Field(default_factory=dict)  # "cycle" (at start), "outcome" (at completion)
     pending_events: list[CycleEvent] = Field(default_factory=list)
+    lease: CycleLease | None = None
     version: int = 1  # optimistic lock
     created_at: datetime
     updated_at: datetime
@@ -214,6 +224,7 @@ class LearningCycleView(Schema):
     artifact_ids: dict[str, str] = Field(default_factory=dict)
     created: bool = False  # this request created the cycle
     replayed: bool = False  # this response had been received before
+    busy_until: datetime | None = None  # another request is driving the cycle (its lease); read it again later
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None

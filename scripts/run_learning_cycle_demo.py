@@ -161,6 +161,23 @@ def artifact_path(container: Container, start: str, target: str | None) -> list[
     return []
 
 
+def footprint(container: Container, learner_id: str) -> dict:
+    """What a repeated side effect would change, read from storage."""
+    tasks = container.task_service.list_for_learner(learner_id)
+    cycles = container.learning_cycle_service
+    cycle_ids = [c.cycle_id for c in cycles.repository.for_learner(learner_id)]
+    sessions = container.teaching_service.sessions(learner_id)
+    return {"tasks": len(tasks), "sessions": len(sessions),
+            "turns": sum(len(container.teaching_service.turns(x.session_id)) for x in sessions),
+            "evidence": len(container.memory.evidence(learner_id)),
+            "mastery": {k: round(v.mastery, 6) for k, v in sorted(container.memory.get(learner_id).concepts.items())},
+            "artifacts": sum(len(container.task_service.artifacts(t.task_id)) for t in tasks)
+            + sum(len(cycles.artifacts(c)) for c in cycle_ids),
+            "events": sum(len(container.task_service.events(t.task_id)) for t in tasks)
+            + sum(len(cycles.events(c)) for c in cycle_ids),
+            "cycles": len(cycle_ids)}
+
+
 def mastery(container: Container, learner_id: str, concept: str) -> float:
     c = container.memory.get(learner_id).concepts.get(concept)
     return round(c.mastery, 3) if c else 0.0
@@ -277,6 +294,21 @@ async def run_learning_cycle_demo(data_dir: Path, *, out=print) -> tuple[bool, d
               and done.outcome.result.value == "GOAL_COMPLETED" and done.outcome.goal_complete,
               "COMPLETE: the completion rule holds and the cycle completes")
         check(len(container.task_service.list_for_learner(learner_id)) == tasks, "COMPLETE generates no lesson")
+
+        out("\n" + RULE + "\n10. A restart, then every request of this run again on the same data\n" + RULE)
+        container.close()
+        container = build_container(settings(data_dir))
+        cycles = container.learning_cycle_service
+        stored = footprint(container, learner_id)
+        replays = [await cycles.start(learner_id, StartLearningCycle(idempotency_key="cycle-1", user_id="demo"))]
+        replays += [await cycles.respond(view.cycle_id, response) for response in learner.sent]
+        replays.append(await cycles.start(learner_id, StartLearningCycle(idempotency_key="cycle-2", user_id="demo")))
+        out(f"  replayed 2 starts and {len(learner.sent)} responses; stored before and after: "
+            + ", ".join(f"{k} {v}" for k, v in stored.items() if k != "mastery"))
+        check(all(r.status == CycleStatus.COMPLETED for r in replays) and all(r.replayed for r in replays[1:-1])
+              and not any(r.created for r in replays), "every request returns the stored result")
+        check(footprint(container, learner_id) == stored,
+              "no task, session, turn, evidence, mastery change, artifact, event or cycle twice")
         summary = {"actions": [view.action.action.value, done.action.action.value],
                    "steps": [s.kind.value for s in view.steps], "mastery": [mastery_before, mastery_after],
                    "evidence": len(o.learning_evidence_ids), "next": nxt.concept_id if nxt else None,

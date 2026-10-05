@@ -202,6 +202,21 @@ def test_cancel_is_idempotent() -> None:
         engine.resume(c, at(2))
 
 
+def test_one_drive_lease_at_a_time_until_it_expires() -> None:
+    c = started()
+    held = engine.claim(c, at(0), at(10))
+    assert held.lease.token.startswith("lclease_") and held.version == c.version + 1
+    assert engine.claim(held, at(5), at(15)) is None  # held by another request
+    observed = engine.observe(engine.attach_child(engine.begin_step(held, held.steps[0].step_id, at(1)),
+                                                  held.steps[0].step_id, "t", at(1)),
+                              held.steps[0].step_id, engine.Observation("running"), at(2))
+    assert (observed or held).lease == held.lease  # other transitions keep the lease
+    taken = engine.claim(held, at(11), at(21))  # a crashed holder's lease expired: taken over
+    assert taken.lease.token != held.lease.token
+    assert engine.release(taken, held.lease.token, at(12)) is None  # the old holder cannot release it
+    assert engine.release(taken, taken.lease.token, at(12)).lease is None
+
+
 def test_event_payloads_carry_ids_only() -> None:
     c = started()
     for event in c.pending_events:
@@ -239,10 +254,10 @@ def test_one_active_cycle_per_learner(repo) -> None:
 def test_changes_apply_only_against_the_version_they_came_from(repo) -> None:
     c = started()
     repo.create(c)
-    first = engine.touch(c, at(1))
+    first = engine.claim(c, at(1), at(30))
     repo.apply(first, expected_version=1)
     with pytest.raises(CycleConflict):
-        repo.apply(engine.touch(c, at(2)), expected_version=1)  # computed from a stale read
+        repo.apply(engine.claim(c, at(2), at(30)), expected_version=1)  # computed from a stale read
     assert repo.get(c.cycle_id).version == 2
 
 
@@ -258,7 +273,7 @@ def test_a_response_is_received_once(repo) -> None:
     received = engine.receive(c, at(1))
     repo.apply(received, expected_version=c.version, request=record)
     with pytest.raises(CycleConflict):
-        repo.apply(engine.touch(received, at(2)), expected_version=received.version, request=record)
+        repo.apply(engine.claim(received, at(2), at(30)), expected_version=received.version, request=record)
     assert repo.get(c.cycle_id).version == received.version  # the whole change was refused
     assert not repo.request(c.cycle_id, "r1").applied
     repo.mark_applied(c.cycle_id, "r1")

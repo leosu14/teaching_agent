@@ -31,6 +31,7 @@ from app.schemas.learning_cycle import (
     CycleConflict,
     CycleEvent,
     CycleFailure,
+    CycleLease,
     CycleOutcome,
     CycleStatus,
     CycleStep,
@@ -45,7 +46,7 @@ from app.schemas.learning_cycle import (
 __all__ = ["CycleConflict", "CycleNotFound", "InvalidCycleRequest", "InvalidCycleTransition", "Observation",
            "STEP_POLICY", "action_problem", "attach_child", "begin_step", "cancel", "classify_task_failure",
            "complete", "cycle_id_for", "fail", "observe", "plan_steps", "published", "receive", "record_artifact",
-           "resume", "start", "touch"]
+           "release", "resume", "claim", "start"]
 
 
 class CycleNotFound(KeyError):
@@ -136,10 +137,24 @@ def start(*, learner_id: str, user_id: str, idempotency_key: str, action: NextLe
     return cycle
 
 
-def touch(cycle: LearningCycle, at: datetime) -> LearningCycle:
-    """A claim: the next version, nothing else. Written before a child is driven, so two requests never drive the
-    same cycle's child at once (the second gets a conflict)."""
-    return _next(cycle, at)
+def claim(cycle: LearningCycle, at: datetime, until: datetime) -> LearningCycle | None:
+    """The drive lease, or None while another holder's lease runs. Written (version-checked) before any child is
+    created, run, resumed or given a response, so two requests never drive the same cycle's children at once; a
+    lease left by a crash expires at `until`. The token is the claiming version: unique, not random."""
+    if cycle.lease is not None and cycle.lease.until > at:
+        return None
+    new = _next(cycle, at)
+    new.lease = CycleLease(token=stable_id("lclease", cycle.cycle_id, str(new.version)), until=until)
+    return new
+
+
+def release(cycle: LearningCycle, token: str, at: datetime) -> LearningCycle | None:
+    """Give the lease back (None when it is not held under `token`: it expired and was taken over)."""
+    if cycle.lease is None or cycle.lease.token != token:
+        return None
+    new = _next(cycle, at)
+    new.lease = None
+    return new
 
 
 def record_artifact(cycle: LearningCycle, key: str, artifact_id: str, at: datetime) -> LearningCycle | None:
