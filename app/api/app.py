@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api.routes import assessment, curriculum, learners, system, tasks, teaching
+from app.api.routes import assessment, curriculum, learners, learning_cycles, system, tasks, teaching
 from app.config.routing import ConfigError
 from app.learner.frameworks import UnknownFramework
 from app.learner.memory import UnknownGoal, UnknownLearner
@@ -22,6 +22,7 @@ from app.services.assessment import (
 )
 from app.services.container import Container, build_container
 from app.services.curriculum import InvalidGoal
+from app.services.learning_cycles import CycleConflict, CycleNotFound, InvalidCycleRequest, InvalidCycleTransition
 from app.services.teaching import (
     InvalidSessionTransition,
     InvalidTeachingRequest,
@@ -50,7 +51,9 @@ def create_app(container: Container | None = None) -> FastAPI:
                              (TeachingSessionNotFound, 404), (InvalidSessionTransition, 409), (SessionConflict, 409),
                              (InvalidTeachingRequest, 422), (TeacherUnavailable, 503),
                              (AssessmentItemNotFound, 404), (AttemptNotFound, 404), (AttemptConflict, 409),
-                             (ItemConflict, 409), (InvalidAssessmentRequest, 422)):
+                             (ItemConflict, 409), (InvalidAssessmentRequest, 422),
+                             (CycleNotFound, 404), (CycleConflict, 409), (InvalidCycleTransition, 409),
+                             (InvalidCycleRequest, 422)):
         app.add_exception_handler(exc_type, _handler(status))
 
     app.include_router(system.router)
@@ -59,6 +62,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(curriculum.router)
     app.include_router(teaching.router)
     app.include_router(assessment.router)
+    app.include_router(learning_cycles.router)
     return app
 
 

@@ -237,6 +237,13 @@ class CurriculumService:
 
     async def start_lesson(self, action: NextLearningAction, *, user_id: str) -> Task:
         """Start the lesson a LEARN / REVIEW / PRACTICE / EVALUATE action asks for, planned around its objective."""
+        task = await self.create_lesson(action, user_id=user_id)
+        return await self._tasks.run(task.task_id)
+
+    async def create_lesson(self, action: NextLearningAction, *, user_id: str, metadata: dict | None = None,
+                            cycle_artifact_id: str | None = None) -> Task:
+        """The lesson task for the action, created but not run. `metadata` is added to the task's (a learning cycle's
+        step key); `cycle_artifact_id` makes the lesson's LEARNING_ACTION derive from that LEARNING_CYCLE artifact."""
         if action.action not in LESSON_ACTIONS:
             raise InvalidGoal(f"a {action.action.value} action does not start a lesson")
         assert action.goal_id and action.objective_id and action.concept_id and action.curriculum_id
@@ -251,14 +258,21 @@ class CurriculumService:
                             objective_id=objective.objective_id, description=objective.description,
                             goal_id=goal.goal_id, curriculum_id=version.curriculum_id,
                             curriculum_version=version.version, action_id=action.action_id,
-                            objective_artifact_id=version.artifact_ids.get(objective.objective_id))
+                            objective_artifact_id=version.artifact_ids.get(objective.objective_id),
+                            cycle_artifact_id=cycle_artifact_id)
         profile = self._memory.get_or_create(goal.learner_id)
         request = LessonRequest(
             raw_request=f"{action.action.value.title()} {concept.name} ({goal.title or goal.domain})",
             subject=goal.domain, topic=concept.topic or concept.name,
             framework_id=goal.metadata.get(FRAMEWORK_KEY) or DEFAULT_FRAMEWORK, target_level=goal.target_level,
             language_of_instruction=profile.preferences.language_of_instruction, capabilities=LESSON_CAPABILITIES)
-        task = self._tasks.create_lesson(lesson_request=request, learner_id=goal.learner_id, user_id=user_id,
-                                         metadata={GOAL_KEY: goal.goal_id,
+        return self._tasks.create_lesson(lesson_request=request, learner_id=goal.learner_id, user_id=user_id,
+                                         metadata={**(metadata or {}), GOAL_KEY: goal.goal_id,
                                                    FOCUS_KEY: focus.model_dump(mode="json")})
-        return await self._tasks.run(task.task_id)
+
+    def lesson_for(self, learner_id: str, goal_id: str, concept_id: str) -> Task | None:
+        """The learner's newest completed lesson for a goal's concept (started from one of its actions), if any."""
+        found = [t for t in self._tasks.list_for_learner(learner_id)
+                 if t.status == TaskStatus.COMPLETED and t.metadata.get(GOAL_KEY) == goal_id
+                 and (t.metadata.get(FOCUS_KEY) or {}).get("concept_id") == concept_id]
+        return max(found, key=lambda t: (t.created_at, t.task_id), default=None)

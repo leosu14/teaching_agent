@@ -722,12 +722,14 @@ def _pedagogy_batch(v: StateView) -> ArtifactBatch:
                                 "minutes": plan.estimated_duration, "strategy": plan.strategy_id}),
     ]
     if plan.focus is not None:
-        # The curriculum action the lesson serves, derived from the LEARNING_OBJECTIVE artifact it was chosen from.
+        # The curriculum action the lesson serves, derived from the LEARNING_OBJECTIVE artifact it was chosen from
+        # (through the LEARNING_CYCLE artifact when a learning cycle started the lesson).
         focus = plan.focus
+        action_parent = focus.cycle_artifact_id or focus.objective_artifact_id
         drafts.insert(-1, ArtifactDraft(
             key="learning_action", name="learning_action", type=ArtifactType.LEARNING_ACTION,
             media_type="application/json", content=_json(focus),
-            parent_ids=[focus.objective_artifact_id] if focus.objective_artifact_id else [],
+            parent_ids=[action_parent] if action_parent else [],
             metadata={"action": focus.action, "action_id": focus.action_id, "goal_id": focus.goal_id,
                       "objective_id": focus.objective_id, "concept_id": focus.concept_id,
                       "curriculum_version": focus.curriculum_version}))
@@ -839,7 +841,10 @@ def _package(v: StateView) -> ArtifactBatch:
     visuals = _visuals(v)
     image_ids = [a.artifact_id for a in visuals.assets] if visuals else []
     focus = _pedagogical_plan(v).focus
-    objective_ids = [focus.objective_artifact_id] if focus is not None and focus.objective_artifact_id else []
+    # The lesson derives from its LEARNING_OBJECTIVE artifact, through the LEARNING_CYCLE artifact when a cycle
+    # started it (Objective -> Learning Cycle -> Lesson).
+    origin = (focus.cycle_artifact_id or focus.objective_artifact_id) if focus is not None else None
+    objective_ids = [origin] if origin else []
     return ArtifactBatch(drafts=[
         ArtifactDraft(key="lesson_plan", name="lesson_plan", type=ArtifactType.LESSON_PLAN,
                       media_type="application/json", content=_json(v.output("plan", LessonPlan)),

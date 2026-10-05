@@ -71,15 +71,20 @@ class TaskService:
 
     async def start_evaluation(self, lesson_task_id: str, *, user_id: str) -> Task:
         """Start the post-lesson evaluation of a completed lesson task. Runs until it waits for answers."""
+        task = self.create_evaluation(lesson_task_id, user_id=user_id)
+        return await self._orchestrator.run(task.task_id)
+
+    def create_evaluation(self, lesson_task_id: str, *, user_id: str, metadata: dict | None = None) -> Task:
+        """The evaluation task of a completed lesson task, created but not run (`metadata`: e.g. a learning cycle's
+        step key)."""
         lesson = self._tasks.get(lesson_task_id)
         if lesson.status != TaskStatus.COMPLETED or lesson.plan is None or lesson.plan.workflow_id != LESSON_WORKFLOW:
             raise InvalidTransition(f"task {lesson_task_id} is not a completed lesson")
-        task = self._orchestrator.create_planned_task(
+        return self._orchestrator.create_planned_task(
             request=f"Evaluate lesson {lesson_task_id}", learner_id=lesson.learner_id, user_id=user_id,
             workflow_id=EVALUATION_WORKFLOW, lesson_request=lesson.plan.lesson_request,
-            inputs={LESSON_TASK: lesson_task_id},
+            inputs={LESSON_TASK: lesson_task_id}, metadata=metadata,
         )
-        return await self._orchestrator.run(task.task_id)
 
     async def resume(self, task_id: str) -> Task:
         return await self._orchestrator.resume(task_id)

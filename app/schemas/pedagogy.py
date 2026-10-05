@@ -12,7 +12,7 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from app.schemas.common import Schema
 from app.schemas.concepts import Concept
@@ -383,11 +383,22 @@ class LessonFocus(Schema):
     curriculum_version: int = Field(ge=1)
     action_id: str = Field(min_length=1)
     objective_artifact_id: str | None = None  # the LEARNING_OBJECTIVE artifact the lesson derives from
+    # The LEARNING_CYCLE artifact when a learning cycle started the lesson (it derives from the LEARNING_OBJECTIVE
+    # artifact): the lesson's LEARNING_ACTION then derives from the cycle. Excluded when unset, so lessons started
+    # without a cycle serialise exactly as before.
+    cycle_artifact_id: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _without_unset_cycle(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("cycle_artifact_id", "") is None:
+            del data["cycle_artifact_id"]
+        return data
 
     def brief(self) -> LessonFocus:
         """What a model may see: the objective and the action, without goal, curriculum or artifact ids."""
         return self.model_copy(update={"goal_id": "goal", "curriculum_id": "curriculum", "action_id": "action",
-                                       "objective_artifact_id": None})
+                                       "objective_artifact_id": None, "cycle_artifact_id": None})
 
 
 class PlanBrief(Schema):

@@ -113,3 +113,28 @@ def teaching_env(teaching_lesson, tmp_path):
     env = open_env(tmp_path / "data", task_id, copy_from=template)
     yield env
     env.close()
+
+
+@pytest.fixture(scope="session")
+def cycle_stages(tmp_path_factory) -> dict[str, Path]:
+    """The learning-cycle stages (base, diagnostic, session, done), built once per test run."""
+    from tests.learning_cycle_fixtures import build_stages
+
+    return build_stages(tmp_path_factory.mktemp("learning-cycle"))
+
+
+@pytest.fixture
+def cycle_env_at(cycle_stages, tmp_path):
+    """`cycle_env_at("session")`: a fresh copy of that stage, opened; closed at teardown."""
+    from tests.learning_cycle_fixtures import open_cycle_env
+
+    envs = []
+
+    def open_at(stage: str, **overrides):
+        env = open_cycle_env(tmp_path / f"{stage}-{len(envs)}", copy_from=cycle_stages[stage], **overrides)
+        envs.append(env)
+        return env
+
+    yield open_at
+    for env in envs:
+        env.close()

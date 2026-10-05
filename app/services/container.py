@@ -100,6 +100,7 @@ from app.services.learners import LearnerService
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
 from app.services.assessment import AssessmentService
+from app.services.learning_cycles import LearningCycleService
 from app.services.teaching import TeachingSessionService
 from app.storage.db import create_db, dispose
 from app.storage.object_store import FilesystemObjectStore
@@ -113,6 +114,7 @@ from app.storage.repositories import (
     SqlLearningEventRepository,
     SqlTaskRepository,
     SqlAssessmentRepository,
+    SqlLearningCycleRepository,
     SqlTeachingRepository,
 )
 from app.tools.artifacts.tools import ReadArtifactsTool, StoreArtifactsTool
@@ -379,6 +381,7 @@ class Container:
     learner_service: LearnerService
     curriculum_service: CurriculumService
     teaching_service: TeachingSessionService
+    learning_cycle_service: LearningCycleService
     assessment_service: AssessmentService
     catalog: CatalogService
     production: ProductionService
@@ -552,12 +555,16 @@ def build_container(
         SqlTeachingRepository(sessions), TeachingRuntime(agents, tools, router, events), artifacts=artifacts,
         memory=memory, knowledge=RetrieverKnowledgeBase(retriever), curriculum=curriculum_service,
         tasks=task_service, events=events, assessment=assessment_service, config=settings.teaching_config())
+    learning_cycle_service = LearningCycleService(
+        SqlLearningCycleRepository(sessions), curriculum=curriculum_service, tasks=task_service,
+        teaching=teaching_service, memory=memory, artifacts=artifacts, events=events, event_log=event_repo)
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
         frameworks=frameworks, memory=memory, artifacts=artifacts, orchestrator=orchestrator,
         task_service=task_service, learner_service=learner_service, curriculum_service=curriculum_service,
         teaching_service=teaching_service,
+        learning_cycle_service=learning_cycle_service,
         assessment_service=assessment_service,
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         production=ProductionService(settings=settings, events=events, registry=providers.registry,
