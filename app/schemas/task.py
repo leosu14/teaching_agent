@@ -119,3 +119,82 @@ class Task(Schema):
             StepSummary(node_id=nid, status=s.status, attempts=s.attempts, duration_ms=s.duration_ms)
             for nid, s in self.workflow.node_states.items()
         ]
+
+
+# --- What a learner sees -----------------------------------------------------------------------------------------
+# `Task` is the internal record: its workflow state holds every node's output, answer keys included (diagnostic items
+# and evaluation assessments carry `expected_answer` and `accepted_answers`), plus provider requests and metadata.
+# Learner-facing routes serve `TaskView` instead, built field by field so a new internal field never leaks by default.
+
+
+class ArtifactRef(Schema):
+    """An artifact as a task result names it: no storage location."""
+
+    artifact_id: str
+    type: ArtifactType
+    name: str
+    version: int
+    parent_ids: list[str]
+
+
+class TaskResultView(Schema):
+    title: str
+    artifacts: list[ArtifactRef]
+    mastery_changes: list[MasteryChange]
+    review_verdict: str = ""
+    revisions: int = 0
+    estimated_level: str | None = None
+    score: float | None = None
+    remaining_gaps: list[str] = Field(default_factory=list)
+    recommendation: LearningRecommendation | None = None
+    next_recommendation: NextLearningRecommendation | None = None
+    feedback: EvaluationFeedback | None = None
+    warnings: list[str] = Field(default_factory=list)
+    curriculum: CurriculumPlan | None = None
+    learning_action: NextLearningAction | None = None
+
+    @classmethod
+    def of(cls, result: TaskResult) -> TaskResultView:
+        data = result.model_dump(include=set(cls.model_fields) - {"artifacts"})
+        return cls(**data, artifacts=[ArtifactRef(**a.model_dump(include=set(ArtifactRef.model_fields)))
+                                      for a in result.artifacts])
+
+
+class WaitingView(Schema):
+    """What the task is waiting for. The prompt is the public request a waiting node publishes (question sheets
+    without answer keys)."""
+
+    kind: str
+    prompt: dict
+
+
+class TaskCostView(Schema):
+    estimated_cost_usd: float
+    actual_cost_usd: float
+
+
+class TaskView(Schema):
+    task_id: str
+    learner_id: str
+    request: str
+    status: TaskStatus
+    current_step: str | None
+    waiting: WaitingView | None
+    errors: list[TaskError]
+    artifact_ids: list[str]
+    cost: TaskCostView
+    result: TaskResultView | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def of(cls, task: Task) -> TaskView:
+        return cls(
+            task_id=task.task_id, learner_id=task.learner_id, request=task.request, status=task.status,
+            current_step=task.current_step,
+            waiting=WaitingView(kind=task.waiting.kind, prompt=task.waiting.prompt) if task.waiting else None,
+            errors=task.errors, artifact_ids=task.artifact_ids,
+            cost=TaskCostView(estimated_cost_usd=task.cost.estimated_cost_usd,
+                              actual_cost_usd=task.cost.actual_cost_usd),
+            result=TaskResultView.of(task.result) if task.result is not None else None,
+            created_at=task.created_at, updated_at=task.updated_at)

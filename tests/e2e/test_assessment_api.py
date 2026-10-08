@@ -7,14 +7,16 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.app import create_app
 from scripts.run_assessment_demo import fixture
+from app.api.auth import AUTHOR
+from tests.auth import client_for
 from tests.teaching_fixtures import Env
 
 
 @pytest.fixture
 def client(teaching_env: Env):
-    with TestClient(create_app(teaching_env.container)) as c:
+    learner = teaching_env.container.task_service.get(teaching_env.lesson_task).learner_id
+    with client_for(teaching_env.container, learner, roles=(AUTHOR,)) as c:
         c.env = teaching_env
         yield c
 
