@@ -7,6 +7,8 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Response
 from pydantic import Field
 
+from app.api.auth import Principal
+from app.api.authorization import owned_goal, principal, require_learner
 from app.api.deps import container
 from app.schemas.common import Schema
 from app.schemas.curriculum import (
@@ -31,7 +33,8 @@ class GoalChange(Schema):
 
 
 class BuildCurriculum(Schema):
-    user_id: str = Field(default="anonymous", min_length=1, max_length=128)
+    # Deprecated and ignored: the planning task's user is the authenticated principal.
+    user_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class CurriculumBuild(Schema):
@@ -43,7 +46,8 @@ class CurriculumBuild(Schema):
     errors: list[TaskError] = Field(default_factory=list)
 
 
-@router.post("/learners/{learner_id}/goals", response_model=LearningGoal, status_code=201)
+@router.post("/learners/{learner_id}/goals", response_model=LearningGoal, status_code=201,
+             dependencies=[Depends(require_learner)])
 async def create_goal(learner_id: str, body: GoalInput, response: Response,
                       c: Container = Depends(container)) -> LearningGoal:
     goal, created = await c.curriculum_service.create_goal(learner_id, body)
@@ -52,33 +56,36 @@ async def create_goal(learner_id: str, body: GoalInput, response: Response,
     return goal
 
 
-@router.get("/learners/{learner_id}/goals", response_model=list[LearningGoal])
+@router.get("/learners/{learner_id}/goals", response_model=list[LearningGoal], dependencies=[Depends(require_learner)])
 def list_goals(learner_id: str, c: Container = Depends(container)) -> list[LearningGoal]:
     return c.curriculum_service.goals(learner_id)
 
 
-@router.get("/learners/{learner_id}/next-action", response_model=NextLearningAction)
+@router.get("/learners/{learner_id}/next-action", response_model=NextLearningAction,
+            dependencies=[Depends(require_learner)])
 async def next_action(learner_id: str, as_of: datetime | None = None,
                       c: Container = Depends(container)) -> NextLearningAction:
     return await c.curriculum_service.next_action(learner_id, as_of=as_of)
 
 
-@router.get("/goals/{goal_id}", response_model=LearningGoal)
+@router.get("/goals/{goal_id}", response_model=LearningGoal, dependencies=[Depends(owned_goal)])
 def get_goal(goal_id: str, c: Container = Depends(container)) -> LearningGoal:
     return c.curriculum_service.goal(goal_id)
 
 
-@router.patch("/goals/{goal_id}", response_model=GoalChange)
-async def update_goal(goal_id: str, body: GoalUpdate, c: Container = Depends(container)) -> GoalChange:
-    goal, task = await c.curriculum_service.update_goal(goal_id, body, user_id="anonymous")
+@router.patch("/goals/{goal_id}", response_model=GoalChange, dependencies=[Depends(owned_goal)])
+async def update_goal(goal_id: str, body: GoalUpdate, p: Principal = Depends(principal),
+                      c: Container = Depends(container)) -> GoalChange:
+    goal, task = await c.curriculum_service.update_goal(goal_id, body, user_id=p.user_id)
     return GoalChange(goal=goal, curriculum=c.curriculum_service.curriculum(goal_id) if task is not None else None)
 
 
-@router.post("/goals/{goal_id}/curriculum", response_model=CurriculumBuild, status_code=201)
+@router.post("/goals/{goal_id}/curriculum", response_model=CurriculumBuild, status_code=201,
+             dependencies=[Depends(owned_goal)])
 async def build_curriculum(goal_id: str, response: Response, body: BuildCurriculum | None = None,
-                           c: Container = Depends(container)) -> CurriculumBuild:
+                           p: Principal = Depends(principal), c: Container = Depends(container)) -> CurriculumBuild:
     """Plan the goal's curriculum (or replan it: a new version only when the path changed)."""
-    task = await c.curriculum_service.build_curriculum(goal_id, user_id=(body or BuildCurriculum()).user_id)
+    task = await c.curriculum_service.build_curriculum(goal_id, user_id=p.user_id)
     result = task.result
     plan = result.curriculum if result is not None else None
     if task.status == TaskStatus.FAILED:
@@ -90,7 +97,7 @@ async def build_curriculum(goal_id: str, response: Response, body: BuildCurricul
                            warnings=plan.warnings if plan is not None else [], errors=task.errors)
 
 
-@router.get("/goals/{goal_id}/curriculum", response_model=Curriculum)
+@router.get("/goals/{goal_id}/curriculum", response_model=Curriculum, dependencies=[Depends(owned_goal)])
 def get_curriculum(goal_id: str, c: Container = Depends(container)) -> Curriculum:
     found = c.curriculum_service.curriculum(goal_id)
     if found is None:
@@ -98,6 +105,7 @@ def get_curriculum(goal_id: str, c: Container = Depends(container)) -> Curriculu
     return found
 
 
-@router.get("/goals/{goal_id}/curriculum/versions", response_model=list[CurriculumVersion])
+@router.get("/goals/{goal_id}/curriculum/versions", response_model=list[CurriculumVersion],
+            dependencies=[Depends(owned_goal)])
 def curriculum_versions(goal_id: str, c: Container = Depends(container)) -> list[CurriculumVersion]:
     return c.curriculum_service.versions(goal_id)

@@ -130,6 +130,65 @@ class LearnerProfile(Schema):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class AnswerOutcomeView(Schema):
+    """A graded answer as the learner sees it: never the expected answer, nor feedback that quotes it (diagnostic
+    questions recur, so a past key is a future key)."""
+
+    question_id: str
+    concept_id: str
+    answer: str
+    correct: bool
+    difficulty: float
+    outcome: Literal["CORRECT", "PARTIAL", "INCORRECT", "UNCERTAIN"] | None = None
+    score: float | None = None
+
+
+class AssessmentRecordView(Schema):
+    task_id: str
+    subject: str
+    at: datetime
+    estimated_level: str | None
+    kind: str
+    evaluations: list[AnswerOutcomeView]
+    mastery_changes: list[MasteryChange]
+
+
+class MistakeView(Schema):
+    task_id: str
+    concept_id: str
+    question_id: str
+    answer: str
+    at: datetime
+
+
+class LearnerProfileView(Schema):
+    """`LearnerProfile` as the API serves it. The stored profile keeps every answer key it was graded against
+    (`expected`); the view drops them."""
+
+    learner_id: str
+    display_name: str
+    subjects: dict[str, SubjectState]
+    concepts: dict[str, ConceptMastery]
+    assessments: list[AssessmentRecordView]
+    mistakes: list[MistakeView]
+    lessons: list[LessonRecord]
+    interactions: list[InteractionRecord]
+    preferences: LearnerPreferences
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def of(cls, profile: LearnerProfile) -> LearnerProfileView:
+        def only(model: type[Schema], value: Schema) -> dict:
+            return value.model_dump(include=set(model.model_fields))
+
+        return cls(
+            **profile.model_dump(include=set(cls.model_fields) - {"assessments", "mistakes"}),
+            assessments=[AssessmentRecordView(**only(AssessmentRecordView, a) | {
+                "evaluations": [only(AnswerOutcomeView, e) for e in a.evaluations]}) for a in profile.assessments],
+            mistakes=[only(MistakeView, m) for m in profile.mistakes])
+
+
 class LearnerProfileInput(Schema):
     """What a client may set directly; history fields are only written by the learning loop."""
 

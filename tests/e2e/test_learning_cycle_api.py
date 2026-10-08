@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from app.api.app import create_app
 from app.schemas.learning_cycle import LearnerPrompt
+from tests.auth import client_for
 from tests.learning_cycle_fixtures import LEARNER, ScriptedLearner
 
 
 def client_at(cycle_env_at, stage: str) -> TestClient:
-    return TestClient(create_app(cycle_env_at(stage).container))
+    return client_for(cycle_env_at(stage).container, LEARNER)
 
 
 def answer_over_http(client: TestClient, body: dict, learner: ScriptedLearner) -> dict:
@@ -38,9 +38,13 @@ def test_a_cycle_over_http(cycle_env_at) -> None:
         assert again.status_code == 200 and again.json()["cycle_id"] == cid and not again.json()["created"]
         other = client.post(f"/learners/{LEARNER}/learning-cycles", json={"idempotency_key": "other"})
         assert other.status_code == 409
-        changed = client.post(f"/learners/{LEARNER}/learning-cycles", json={"idempotency_key": "web",
+        ignored = client.post(f"/learners/{LEARNER}/learning-cycles", json={"idempotency_key": "web",
                                                                             "user_id": "someone-else"})
-        assert changed.status_code == 409  # the same key with a different request
+        assert ignored.status_code == 200 and ignored.json()["cycle_id"] == cid  # the body cannot choose the user
+        guardian = client.test_auth.headers(LEARNER, user_id="guardian")  # another user who may act for the learner
+        changed = client.post(f"/learners/{LEARNER}/learning-cycles", json={"idempotency_key": "web"},
+                              headers=guardian)
+        assert changed.status_code == 409  # the same key from another principal is a different request
 
         wrong = client.post(f"/learning-cycles/{cid}/responses", json={"client_response_id": "w", "answer": "x"})
         assert wrong.status_code == 422  # a sheet is asked for, not a session answer

@@ -101,3 +101,34 @@ class ArtifactBatch(Schema):
 class StoredArtifacts(Schema):
     artifacts: list[Artifact]
     by_key: dict[str, str]
+
+
+class ArtifactView(Schema):
+    """An artifact as the API serves it: no storage locations (an object store `uri` is a host path), neither the
+    artifact's own nor any in its metadata (e.g. an image asset's stored object)."""
+
+    artifact_id: str
+    task_id: str
+    type: ArtifactType
+    name: str
+    media_type: str
+    content_hash: str
+    size_bytes: int
+    version: int
+    provider: str
+    parent_ids: list[str]
+    metadata: dict
+    created_at: datetime
+
+    @classmethod
+    def of(cls, artifact: Artifact) -> ArtifactView:
+        data = artifact.model_dump(include=set(cls.model_fields))
+        return cls(**data | {"metadata": _without_locations(data["metadata"])})
+
+
+def _without_locations(value):
+    if isinstance(value, dict):
+        return {k: _without_locations(v) for k, v in value.items() if k != "uri"}
+    if isinstance(value, list):
+        return [_without_locations(v) for v in value]
+    return value

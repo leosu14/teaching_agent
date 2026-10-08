@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.app import create_app
+from tests.auth import client_for
 from tests.conftest import ANSWERS, EVALUATION_ANSWERS, LEARNER
 
 
 @pytest.fixture
 def client(container):
-    with TestClient(create_app(container)) as c:
+    with client_for(container, LEARNER["learner_id"], "l1", "x") as c:
         yield c
 
 
