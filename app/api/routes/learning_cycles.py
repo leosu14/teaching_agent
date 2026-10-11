@@ -9,7 +9,7 @@ from app.api.auth import Principal
 from app.api.authorization import owned_cycle, principal, require_learner
 from app.api.deps import container
 from app.schemas.artifact import ArtifactView
-from app.schemas.events import Event
+from app.schemas.events import LearnerEvent
 from app.schemas.learning_cycle import CycleResponse, LearningCycleView, StartLearningCycle
 from app.services.container import Container
 
@@ -63,10 +63,10 @@ async def cancel_cycle(cycle_id: str, c: Container = Depends(container)) -> Lear
     return await c.learning_cycle_service.cancel(cycle_id)
 
 
-@router.get("/learning-cycles/{cycle_id}/events", response_model=list[Event],
+@router.get("/learning-cycles/{cycle_id}/events", response_model=list[LearnerEvent],
             dependencies=[Depends(owned_cycle)])
-def cycle_events(cycle_id: str, c: Container = Depends(container)) -> list[Event]:
-    return c.learning_cycle_service.events(cycle_id)
+def cycle_events(cycle_id: str, c: Container = Depends(container)) -> list[LearnerEvent]:
+    return [LearnerEvent.of(e) for e in c.learning_cycle_service.events(cycle_id)]
 
 
 @router.get("/learning-cycles/{cycle_id}/artifacts", response_model=list[ArtifactView],

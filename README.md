@@ -173,7 +173,7 @@ development tokens and the test mechanism.
 | POST | `/tasks/{id}/evaluation` | Start the post-lesson evaluation of a COMPLETED lesson task; returns the new task, WAITING for answers |
 | GET | `/tasks/{id}` | Task state, what it is waiting for, cost totals, result (never the workflow state or answer keys) |
 | POST | `/tasks/{id}/pause` · `/resume` · `/cancel` | Task control; resume also recovers crashed or failed tasks |
-| GET | `/tasks/{id}/artifacts` · `/events` | Artifacts with parent links; the persisted event log |
+| GET | `/tasks/{id}/artifacts` · `/events` | Artifacts with parent links; the event log as learner events (type, status, fixed message) |
 | PUT/GET | `/learners/{id}` | Learner profile (subjects with a level framework, preferences) |
 | GET | `/learners/{id}/progress` | Mastery, weak concepts, due reviews |
 | POST | `/learners/{id}/assessment` | Submit diagnostic answers for a WAITING task |
@@ -193,7 +193,7 @@ development tokens and the test mechanism.
 | GET | `/learning-cycles/{id}` | Cycle state, steps, the prompt when WAITING, the outcome once completed |
 | POST | `/learning-cycles/{id}/responses` | The learner's response (`{"client_response_id", "answers"}` for a sheet or `{"client_response_id", "answer", "kind"}` for a session question); idempotent per `client_response_id` |
 | POST | `/learning-cycles/{id}/resume` · `/cancel` | Retry a BLOCKED cycle's step / cancel the cycle and its running step |
-| GET | `/learning-cycles/{id}/events` · `/artifacts` | The cycle's event stream / its LEARNING_CYCLE artifacts |
+| GET | `/learning-cycles/{id}/events` · `/artifacts` | The cycle's event stream as learner events / its LEARNING_CYCLE artifacts |
 | GET | `/learners/{id}/next-action` | The next learning action across the learner's goals (`?as_of=` for a given time) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 

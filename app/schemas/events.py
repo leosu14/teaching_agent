@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 
 from pydantic import Field
 
@@ -158,3 +159,77 @@ class Event(Schema):
     tool: str | None = None
     at: datetime = Field(default_factory=utcnow)
     data: dict = Field(default_factory=dict)
+
+
+# --- What a learner sees -----------------------------------------------------------------------------------------
+# `Event` is the internal diagnostic record: its free-form `data` carries whatever the emitter attached, including raw
+# exception and validation text (which can quote model output, answer keys among it), storage URIs, provider and model
+# names, token counts and costs. Learner-facing routes serve `LearnerEvent` instead: the type, a status and a fixed
+# message chosen from that type, and the event's ids. Nothing is copied out of `data`, so a new payload field never
+# leaks by default. The internal event log is unchanged.
+
+KNOWN_EVENT_TYPES = frozenset(v for k, v in vars(EventType).items() if k.isupper() and isinstance(v, str))
+
+
+class EventStatus(str, Enum):
+    STARTED = "started"
+    PROGRESS = "progress"
+    WAITING = "waiting"
+    RETRYING = "retrying"
+    PAUSED = "paused"
+    RESUMED = "resumed"
+    COMPLETED = "completed"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+# A step that is retried or replaced is not a failure the learner needs to act on.
+_RETRY_TYPES = frozenset({EventType.NODE_RETRY, EventType.AGENT_VALIDATION_FAILED, EventType.IMAGE_VALIDATION_FAILED,
+                          EventType.AUDIO_VALIDATION_FAILED, EventType.PROVIDER_FALLBACK,
+                          EventType.PROVIDER_RATE_LIMITED, EventType.GENERATED_VIDEO_FALLBACK})
+# The last word of an event type names its outcome.
+_STATUS_BY_OUTCOME: dict[str, EventStatus] = {
+    "started": EventStatus.STARTED, "waiting": EventStatus.WAITING, "paused": EventStatus.PAUSED,
+    "resumed": EventStatus.RESUMED, "skipped": EventStatus.SKIPPED, "failed": EventStatus.FAILED,
+    "cancelled": EventStatus.CANCELLED, "completed": EventStatus.COMPLETED, "finished": EventStatus.COMPLETED,
+}
+LEARNER_EVENT_MESSAGES: dict[EventStatus, str] = {
+    EventStatus.STARTED: "A step started.",
+    EventStatus.PROGRESS: "Work is in progress.",
+    EventStatus.WAITING: "Waiting for your answer.",
+    EventStatus.RETRYING: "A step is being retried.",
+    EventStatus.PAUSED: "Paused.",
+    EventStatus.RESUMED: "Resumed.",
+    EventStatus.COMPLETED: "A step completed.",
+    EventStatus.SKIPPED: "A step was skipped.",
+    EventStatus.FAILED: "A step failed.",
+    EventStatus.CANCELLED: "Cancelled.",
+}
+OTHER_EVENT_TYPE = "other"
+
+
+def event_status(event_type: str) -> EventStatus:
+    if event_type in _RETRY_TYPES:
+        return EventStatus.RETRYING
+    return _STATUS_BY_OUTCOME.get(event_type.rsplit(".", 1)[-1].rsplit("_", 1)[-1], EventStatus.PROGRESS)
+
+
+class LearnerEvent(Schema):
+    """An event as a learner sees it: built from approved fields and fixed messages only, never from `data`."""
+
+    event_id: str
+    type: str
+    status: EventStatus
+    message: str
+    task_id: str | None = None
+    node_id: str | None = None
+    at: datetime
+
+    @classmethod
+    def of(cls, event: Event) -> LearnerEvent:
+        known = event.type in KNOWN_EVENT_TYPES
+        status = event_status(event.type) if known else EventStatus.PROGRESS
+        return cls(event_id=event.event_id, type=event.type if known else OTHER_EVENT_TYPE, status=status,
+                   message=LEARNER_EVENT_MESSAGES[status], task_id=event.task_id, node_id=event.node_id,
+                   at=event.at)

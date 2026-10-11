@@ -20,7 +20,7 @@ from app.schemas.curriculum import (
     NextLearningAction,
 )
 from app.schemas.learner import LearningGoal
-from app.schemas.task import TaskError, TaskStatus
+from app.schemas.task import TaskErrorView, TaskStatus
 from app.services.container import Container
 from app.storage.repositories import NotFound
 
@@ -43,7 +43,7 @@ class CurriculumBuild(Schema):
     new_version: bool = False  # False: the curriculum was already up to date (nothing new stored)
     curriculum: Curriculum | None = None
     warnings: list[CurriculumWarning] = Field(default_factory=list)
-    errors: list[TaskError] = Field(default_factory=list)
+    errors: list[TaskErrorView] = Field(default_factory=list)
 
 
 @router.post("/learners/{learner_id}/goals", response_model=LearningGoal, status_code=201,
@@ -94,7 +94,8 @@ async def build_curriculum(goal_id: str, response: Response, body: BuildCurricul
         response.status_code = 200
     return CurriculumBuild(task_id=task.task_id, status=task.status, new_version=bool(plan and plan.changed),
                            curriculum=c.curriculum_service.curriculum(goal_id),
-                           warnings=plan.warnings if plan is not None else [], errors=task.errors)
+                           warnings=plan.warnings if plan is not None else [],
+                           errors=[TaskErrorView.of(e) for e in task.errors])
 
 
 @router.get("/goals/{goal_id}/curriculum", response_model=Curriculum, dependencies=[Depends(owned_goal)])

@@ -35,13 +35,11 @@ def keys_in(value) -> set[str]:
     return set()
 
 
-def assert_no_internals(response, *, events: bool = False) -> None:
-    """No answer key or internal grading state in a learner-facing response. Event payloads describe pipeline steps
-    (an image's "expected" size, an artifact's stored location), so only answer-key names are checked there."""
+def assert_no_internals(response) -> None:
+    """No answer key, internal grading state, workflow state, provider record or host path in a learner-facing
+    response (event routes included: they serve `LearnerEvent`, never the internal payload)."""
     assert SENTINEL not in response.text
     found = keys_in(response.json()) & FORBIDDEN_KEYS
-    if events:
-        found -= {"uri"}
     assert not found, (response.request.url, found)
 
 
@@ -208,7 +206,7 @@ def test_learner_a_reaches_their_own_resources_without_internal_state(world) -> 
             r = a.get(path)
             assert r.status_code == 200, (path, r.text)
             if path not in ("/agents", "/tools"):  # the catalog describes schemas, not anyone's data
-                assert_no_internals(r, events=path.endswith("/events"))
+                assert_no_internals(r)
         # the internal records still carry what grading needs: only the responses changed
         internal = env.container.task_service.get(ids["evaluation"]).model_dump_json()
         assert "expected_answer" in internal

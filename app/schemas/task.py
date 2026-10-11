@@ -160,6 +160,45 @@ class TaskResultView(Schema):
                                       for a in result.artifacts])
 
 
+# `TaskError.message` is raw exception text, kept for trusted diagnostics: a structured-output failure quotes the
+# model's invalid output there, answer keys included. Learners get `TaskErrorView`: the failure's classification and a
+# fixed message chosen by its category, never the exception text.
+TASK_ERROR_MESSAGES: dict[str, str] = {
+    "ConfigurationError": "The service is not configured to run this task.",
+    "BudgetExceededError": "The task stopped because it reached its spending limit.",
+    "ProviderError": "An external service failed while running the task.",
+    "PlanningError": "The task failed while planning the lesson.",
+    "ResearchError": "The task failed while researching the topic.",
+    "TeachingError": "The task failed while writing the lesson.",
+    "ReviewError": "The task failed while reviewing the lesson.",
+    "VisualError": "The task failed while preparing visuals.",
+    "PresentationError": "The task failed while building the presentation.",
+    "AudioError": "The task failed while producing audio.",
+    "VideoError": "The task failed while producing video.",
+    "LearnerMemoryError": "The task failed while updating the learner record.",
+    "EvaluationError": "The task failed while evaluating answers.",
+    "WorkflowError": "The task failed.",
+}
+GENERIC_TASK_ERROR = "The task failed."
+
+
+class TaskErrorView(Schema):
+    """A task failure as a learner sees it: its classification and a predefined message."""
+
+    category: str | None
+    stage: str | None
+    node_id: str | None
+    message: str
+    at: datetime
+
+    @classmethod
+    def of(cls, error: TaskError) -> TaskErrorView:
+        category = error.category if error.category in TASK_ERROR_MESSAGES else None
+        stage = error.stage if error.stage in TASK_ERROR_MESSAGES else None
+        return cls(category=category, stage=stage, node_id=error.node_id,
+                   message=TASK_ERROR_MESSAGES.get(category or "", GENERIC_TASK_ERROR), at=error.at)
+
+
 class WaitingView(Schema):
     """What the task is waiting for. The prompt is the public request a waiting node publishes (question sheets
     without answer keys)."""
@@ -180,7 +219,7 @@ class TaskView(Schema):
     status: TaskStatus
     current_step: str | None
     waiting: WaitingView | None
-    errors: list[TaskError]
+    errors: list[TaskErrorView]
     artifact_ids: list[str]
     cost: TaskCostView
     result: TaskResultView | None
@@ -193,7 +232,7 @@ class TaskView(Schema):
             task_id=task.task_id, learner_id=task.learner_id, request=task.request, status=task.status,
             current_step=task.current_step,
             waiting=WaitingView(kind=task.waiting.kind, prompt=task.waiting.prompt) if task.waiting else None,
-            errors=task.errors, artifact_ids=task.artifact_ids,
+            errors=[TaskErrorView.of(e) for e in task.errors], artifact_ids=task.artifact_ids,
             cost=TaskCostView(estimated_cost_usd=task.cost.estimated_cost_usd,
                               actual_cost_usd=task.cost.actual_cost_usd),
             result=TaskResultView.of(task.result) if task.result is not None else None,

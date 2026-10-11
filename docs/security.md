@@ -121,17 +121,22 @@ and `/providers` describe the system, not anyone's data: any authenticated princ
 The internal records are unchanged: tasks keep their workflow state with every node's output (diagnostic items and
 evaluation questions with `expected_answer` and `accepted_answers`), assessment items keep their answer keys, rubrics
 and known errors, and the learner profile keeps the expected answer of every graded question. Grading uses them as
-before. Responses are built from explicit DTOs instead:
+before, and the event log and `TaskError.message` keep the full diagnostic text for operators (the services'
+`events()` and `get()`, and the logs). Responses are built from explicit DTOs instead:
 
 | Route | Served as | Not served |
 |---|---|---|
 | every `/tasks` route, `POST /learners/{id}/assessment` | `TaskView` | `workflow` (answer keys, every node's output), `plan`, `metadata`, `control`, provider requests and per-model cost lines, artifact storage locations |
 | `GET/PUT /learners/{id}` | `LearnerProfileView` | `expected` answers and the feedback that quotes them, in past assessments and mistakes (diagnostic questions recur, so a past key is a future key) |
 | task and cycle `/artifacts` | `ArtifactView` | `uri` (a host path), in the artifact and in its metadata |
+| `GET /tasks/{id}/events`, `GET /learning-cycles/{id}/events` | `LearnerEvent`: `event_id`, `type`, `status`, a fixed `message` chosen by the status, `task_id`, `node_id`, `at` | the event's `data` (raw exception and validation text, which can quote model output and so answer keys; storage URIs; provider, model, token and cost records), `agent_id`, `tool` |
+| `TaskView.errors`, `CurriculumBuild.errors` | `TaskErrorView`: `category`, `stage`, `node_id`, `at` and a fixed message per failure category | the internal `TaskError.message` (raw exception text: a structured-output failure quotes the invalid output, answer keys included) |
 | teaching sessions, attempts, grades, cycles | already public views (`TeachingSessionView`, `AttemptView`, `PublicGrade`, `LearnerPrompt`) | unchanged |
 
 `POST /assessment-items` returns the registered item, answer key included, to its author (the `author` role is required).
 
 `tests/unit/test_auth.py` walks every response schema in the OpenAPI document for answer-key and internal field
 names; `tests/e2e/test_security_api.py` checks the actual responses of every route (including free-form metadata and
-events) for those names and for a sentinel answer key.
+events) for those names and for a sentinel answer key. `tests/e2e/test_learner_event_sanitization.py` injects a
+structured-output validation failure that quotes a canary answer key and checks that the canary reaches the internal
+log and task record but none of the task, cycle or event responses.

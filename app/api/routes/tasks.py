@@ -11,7 +11,7 @@ from app.api.authorization import authorize, owned_task, principal
 from app.api.deps import container
 from app.schemas.artifact import ArtifactView
 from app.schemas.common import Schema
-from app.schemas.events import Event
+from app.schemas.events import LearnerEvent
 from app.schemas.lesson import LearnerAnswer
 from app.schemas.task import TaskView
 from app.services.container import Container
@@ -81,6 +81,6 @@ def task_artifacts(task_id: str, c: Container = Depends(container)) -> list[Arti
     return [ArtifactView.of(a) for a in c.task_service.artifacts(task_id)]
 
 
-@router.get("/{task_id}/events", response_model=list[Event], dependencies=[Depends(owned_task)])
-def task_events(task_id: str, c: Container = Depends(container)) -> list[Event]:
-    return c.task_service.events(task_id)
+@router.get("/{task_id}/events", response_model=list[LearnerEvent], dependencies=[Depends(owned_task)])
+def task_events(task_id: str, c: Container = Depends(container)) -> list[LearnerEvent]:
+    return [LearnerEvent.of(e) for e in c.task_service.events(task_id)]
