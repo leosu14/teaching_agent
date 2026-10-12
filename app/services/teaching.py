@@ -425,8 +425,7 @@ class TeachingSessionService:
                 output, _usage = await self._runtime.teacher_turn(data, task_id=session.task_id)
                 part = engine.apply_teacher(work, item, output, now)
             except (TeacherTurnFailed, ValueError) as exc:
-                raise TeacherUnavailable(f"the teacher's {item.action.value} turn could not be produced; what the "
-                                         f"learner sent is stored and resuming the session retries ({exc})") from exc
+                raise TeacherUnavailable() from exc  # fixed text; the cause stays internal
             change.turns += part.turns
             change.evidence += part.evidence
             change.outbox += part.outbox
