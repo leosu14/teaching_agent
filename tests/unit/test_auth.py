@@ -188,7 +188,7 @@ def test_an_app_without_an_authenticator_rejects_everything(container) -> None:
 
 FORBIDDEN_FIELDS = {"expected_answer", "accepted_answers", "acceptable_answers", "answer_key", "correct_answer",
                     "reference_answer", "known_errors", "expected", "answer_hash", "workflow", "provider_requests",
-                    "node_states", "uri"}
+                    "node_states", "uri", "uncertainty_reason"}
 AUTHOR_FACING = {("post", "/assessment-items")}  # the item's author registers (and gets back) the answer key
 
 

@@ -131,7 +131,8 @@ before, and the event log and `TaskError.message` keep the full diagnostic text 
 | task and cycle `/artifacts` | `ArtifactView` | `uri` (a host path), in the artifact and in its metadata |
 | `GET /tasks/{id}/events`, `GET /learning-cycles/{id}/events` | `LearnerEvent`: `event_id`, `type`, `status`, a fixed `message` chosen by the status, `task_id`, `node_id`, `at` | the event's `data` (raw exception and validation text, which can quote model output and so answer keys; storage URIs; provider, model, token and cost records), `agent_id`, `tool` |
 | `TaskView.errors`, `CurriculumBuild.errors` | `TaskErrorView`: `category`, `stage`, `node_id`, `at` and a fixed message per failure category | the internal `TaskError.message` (raw exception text: a structured-output failure quotes the invalid output, answer keys included) |
-| teaching sessions, attempts, grades, cycles | already public views (`TeachingSessionView`, `AttemptView`, `PublicGrade`, `LearnerPrompt`) | unchanged |
+| `POST /assessment-items/{id}/attempts`, `GET /assessment-attempts/{id}/grade`, `AnswerResult.assessment` of the teaching `/answers` route | `PublicGrade` | `uncertainty_reason` (the semantic grader's raw error text, which quotes its invalid output and so can quote the item's expected answer; an UNCERTAIN grade's fixed `feedback` asks for another attempt), `matched`, grader usage |
+| teaching sessions, attempts, cycles | already public views (`TeachingSessionView`, `AttemptView`, `LearnerPrompt`) | unchanged |
 
 `POST /assessment-items` returns the registered item, answer key included, to its author (the `author` role is required).
 
