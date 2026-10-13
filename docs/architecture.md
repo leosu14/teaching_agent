@@ -620,8 +620,10 @@ it lives in `AgentContext`; its state is a serializable `SessionState` stored wi
   (`teaching.ground`). Citations must be refs of that material; with nothing relevant the answer is a structured
   limitation (`grounded: false`), never an invented source.
 - **Validation of the model's output** (`TeachingSessionAgent.check`): the turn is exactly the requested action and
-  concept at the requested difficulty; no COMPLETE; one question for question turns and none otherwise; a short-answer
-  question does not contain its answer; hints do not reveal it; citations exist; misconceptions only for an incorrect
+  concept at the requested difficulty; no COMPLETE; one question for question turns and none otherwise; neither a
+  short-answer question's prompt nor the text of the turn asking it states its expected or an accepted answer; hints
+  and each misconception label proposed with a hint do not reveal it; an answer to a learner question (its response
+  and limitation) does not reveal the open question's answer; citations exist; misconceptions only for an incorrect
   answer about the session's concept. The output schema has no field for mastery, objective or session status
   (unknown fields fail validation). Invalid output is retried, then the turn fails as above.
 - **Context window** (`TeachingTurnInput`): the objective, the lesson's sections, practice items, a compact state,

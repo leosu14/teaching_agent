@@ -486,6 +486,24 @@ def test_a_question_cannot_contain_its_answer_and_misconceptions_need_a_wrong_an
             concept_id=CONCEPT, misconception="none", confidence=0.9)]), feedback)
 
 
+def test_a_question_turn_cannot_state_its_answer() -> None:
+    """The turn that asks a question is served while that question is open: its text and the prompt are checked
+    against the expected and every accepted answer."""
+    ask = turn_input(TeachingAction.ASK, learner_answer=None, answer_correct=None, question=None)
+    q = TeachingQuestion(kind="short_answer", prompt="Yesterday I ___ home (go).", expected_answer="went",
+                         accepted_answers=["did go"])
+    AGENT.check(good(ask, question=q, response=f"Question 2: {q.prompt}"), ask)
+    with pytest.raises(OutputRejected, match="must not state its answer"):
+        AGENT.check(good(ask, question=q, response=f"Question 2: {q.prompt} (it is WENT)"), ask)
+    with pytest.raises(OutputRejected, match="must not state its answer"):
+        AGENT.check(good(ask, question=q, response=f"Question 2: {q.prompt} Hint: did go."), ask)
+    with pytest.raises(OutputRejected, match="its own answer"):
+        AGENT.check(good(ask, question=q.model_copy(update={"prompt": "Yesterday I did go home: rewrite it."})), ask)
+    mc = TeachingQuestion(kind="multiple_choice", prompt="Pick one.", choices=["went", "goed"], expected_answer="went")
+    AGENT.check(good(ask, question=mc, expected_response_type="multiple_choice",
+                     response="Question 2: Pick one. Options: went / goed"), ask)  # choices list the answer
+
+
 def test_a_revealing_hint_is_allowed_only_when_configured() -> None:
     source = turn_input(reveal_answer=True)
     AGENT.check(good(source, response="The answer is went."), source)
@@ -497,6 +515,42 @@ def test_grounded_answers_cite_only_the_material() -> None:
     AGENT.check(GroundedAnswer(response="Because ...", citations=["lesson:sec_1", "cit_1"], grounded=True), source)
     with pytest.raises(OutputRejected, match="not in the grounding material"):
         AGENT.check(GroundedAnswer(response="Because ...", citations=["doi:10.1/fake"], grounded=True), source)
+
+
+def test_grounded_answers_cannot_reveal_the_open_question() -> None:
+    """N6: a learner question asked while a question is open is answered with that question still open."""
+    source = turn_input(TeachingAction.EXPLAIN, stage="answer", learner_question="what is the answer?",
+                        question=QuestionBrief(kind="short_answer", prompt=QUESTION.prompt, expected_answer="went",
+                                               accepted_answers=["had gone"], difficulty=2),
+                        sources=[GroundingItem(ref="lesson:sec_1", kind="lesson", title="Past", text="...",
+                                               citations=["cit_1"])])
+    AGENT.check(GroundedAnswer(response="Irregular verbs change their stem.", citations=["lesson:sec_1"],
+                               grounded=True), source)
+    for leak in (GroundedAnswer(response="The answer is Went.", citations=["lesson:sec_1"], grounded=True),
+                 GroundedAnswer(response="It is: had gone!", citations=["lesson:sec_1"], grounded=True),
+                 GroundedAnswer(response="I cannot say.", grounded=False, limitation="unless it is went")):
+        with pytest.raises(OutputRejected, match="do not reveal") as rejected:
+            AGENT.check(leak, source)
+        assert "went" not in str(rejected.value) and "gone" not in str(rejected.value)
+    closed = source.model_copy(update={"question": None})  # no open question: nothing to protect
+    AGENT.check(GroundedAnswer(response="Went is the past of go.", citations=["lesson:sec_1"], grounded=True), closed)
+
+
+def test_hint_misconception_labels_cannot_reveal_the_answer() -> None:
+    """N5: every misconception label on a HINT turn is checked on its own; safe labels pass."""
+    source = turn_input(question=QuestionBrief(kind="short_answer", prompt=QUESTION.prompt, expected_answer="went",
+                                               accepted_answers=["had gone"], difficulty=2))
+    safe = [MisconceptionCandidate(concept_id=CONCEPT, misconception="regularises an irregular verb", confidence=0.9),
+            MisconceptionCandidate(concept_id=CONCEPT, misconception="confuses the tenses", confidence=0.8)]
+    AGENT.check(good(source, misconceptions=safe), source)
+    for label in ("thinks it is not WENT", "forgets had gone"):
+        leaky = [safe[0], MisconceptionCandidate(concept_id=CONCEPT, misconception=label, confidence=0.9), safe[1]]
+        with pytest.raises(OutputRejected, match=r"misconceptions \[1\] reveal") as rejected:
+            AGENT.check(good(source, misconceptions=leaky), source)
+        assert "went" not in str(rejected.value).lower() and "gone" not in str(rejected.value)
+    revealing = turn_input(reveal_answer=True)  # hints configured to reveal the answer: labels may say it too
+    AGENT.check(good(revealing, misconceptions=[MisconceptionCandidate(
+        concept_id=CONCEPT, misconception="thinks it is not went", confidence=0.9)]), revealing)
 
 
 def test_the_output_schemas_have_no_way_to_change_mastery_or_complete_anything() -> None:

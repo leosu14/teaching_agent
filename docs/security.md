@@ -145,6 +145,13 @@ naming only the fields; if every attempt leaks, the grade is UNCERTAIN with the 
 in the internal grade reason and `agent.validation_failed` events. Like the teacher's check, it matches whole words after
 normalisation, so a paraphrase is not caught.
 
+The teacher is given the open question's expected and acceptable answers too. While that question is open,
+`TeachingSessionAgent.check` applies `reveals()` against all of them to everything of the teacher's served next to it:
+the HINT response and each misconception label proposed with it, the UNCERTAIN feedback, the answer to a learner
+question (`response` and `limitation`), and the text of the turn that asks a short-answer question. A leaking output
+is sent back to the model without the answer; if every attempt leaks, the turn fails with the fixed
+`TeacherUnavailable` text and the question stays open (`tests/e2e/test_teacher_answer_leak.py`).
+
 `tests/unit/test_auth.py` walks every response schema in the OpenAPI document for answer-key and internal field
 names; `tests/e2e/test_security_api.py` checks the actual responses of every route (including free-form metadata and
 events) for those names and for a sentinel answer key. `tests/e2e/test_learner_event_sanitization.py` injects a
