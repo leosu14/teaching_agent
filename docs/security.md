@@ -131,10 +131,19 @@ before, and the event log and `TaskError.message` keep the full diagnostic text 
 | task and cycle `/artifacts` | `ArtifactView` | `uri` (a host path), in the artifact and in its metadata |
 | `GET /tasks/{id}/events`, `GET /learning-cycles/{id}/events` | `LearnerEvent`: `event_id`, `type`, `status`, a fixed `message` chosen by the status, `task_id`, `node_id`, `at` | the event's `data` (raw exception and validation text, which can quote model output and so answer keys; storage URIs; provider, model, token and cost records), `agent_id`, `tool` |
 | `TaskView.errors`, `CurriculumBuild.errors` | `TaskErrorView`: `category`, `stage`, `node_id`, `at` and a fixed message per failure category | the internal `TaskError.message` (raw exception text: a structured-output failure quotes the invalid output, answer keys included) |
-| `POST /assessment-items/{id}/attempts`, `GET /assessment-attempts/{id}/grade`, `AnswerResult.assessment` of the teaching `/answers` route | `PublicGrade` | `uncertainty_reason` (the semantic grader's raw error text, which quotes its invalid output and so can quote the item's expected answer; an UNCERTAIN grade's fixed `feedback` asks for another attempt), `matched`, grader usage |
+| `POST /assessment-items/{id}/attempts`, `GET /assessment-attempts/{id}/grade`, `AnswerResult.assessment` of the teaching `/answers` route | `PublicGrade` | `uncertainty_reason` (the semantic grader's raw error text, which quotes its invalid output and so can quote the item's expected answer; an UNCERTAIN grade's fixed `feedback` asks for another attempt), `matched`, grader usage. Grader-written text it does serve (`feedback`, criterion `rationale`, misconception `type` and `description`) is checked first: see below |
 | teaching sessions, attempts, cycles | already public views (`TeachingSessionView`, `AttemptView`, `LearnerPrompt`) | unchanged |
 
 `POST /assessment-items` returns the registered item, answer key included, to its author (the `author` role is required).
+
+The semantic grader is given the item's expected and acceptable answers, and the text it writes is served in
+`PublicGrade`. The `answer_revealed` validation rule (`app/assessment/validation.py`) applies the teacher's
+`reveals()` check to every learner-visible grader text (`feedback.explanation`, `next_hint`, each `strengths` and
+`errors` entry, each criterion `rationale`, each misconception `type` and `description`) against the expected and every
+acceptable answer, except an answer the learner's own text already says. A leaking candidate is sent back to the grader
+naming only the fields; if every attempt leaks, the grade is UNCERTAIN with the fixed feedback. The rule and fields stay
+in the internal grade reason and `agent.validation_failed` events. Like the teacher's check, it matches whole words after
+normalisation, so a paraphrase is not caught.
 
 `tests/unit/test_auth.py` walks every response schema in the OpenAPI document for answer-key and internal field
 names; `tests/e2e/test_security_api.py` checks the actual responses of every route (including free-form metadata and

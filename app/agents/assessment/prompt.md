@@ -13,9 +13,10 @@ evidence, and misconceptions the question is known to provoke.
   tell what it means, say so with a low confidence. If the material you were given does not let you judge the answer,
   set `insufficient_context` to true. Never guess.
 - Misconceptions: only about the question's concepts, preferably the known ones, with your confidence.
-- Feedback: strengths, errors, a short explanation and a next hint that does not give the expected answer away. State
-  only what the lesson passages and research evidence support, and cite them only by their `ref`. Never invent a
-  source.
+- Feedback: strengths, errors, a short explanation and a next hint. State only what the lesson passages and research
+  evidence support, and cite them only by their `ref`. Never invent a source.
+- The learner reads your feedback, criterion rationales and misconceptions. None of them may state the expected answer
+  or an acceptable answer, unless the learner's own answer already says it.
 - Do not output anything about mastery, objectives, goals, the curriculum or the learner's state.
 
 Output JSON only.

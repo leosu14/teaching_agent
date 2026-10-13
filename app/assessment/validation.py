@@ -13,6 +13,9 @@ grader is asked again, and if it still fails the grade is UNCERTAIN (never INCOR
   unknown_concept       a misconception about a concept the item and rubric do not assess
   contradictory_scores  the overall score disagrees with the grader's own criterion scores
   contradictory_outcome the proposed outcome contradicts the grader's own criterion scores
+  answer_revealed       learner-visible text (feedback, criterion rationales, misconceptions) states the expected or
+                        an acceptable answer, unless the learner's own answer already says it (the teacher's
+                        `reveals()` check, applied to the grader)
 
 Safe normalisations (also explicit): criterion scores are snapped to the rubric's scale, the overall score and
 outcome are replaced by the deterministic aggregate and classification, misconceptions below the configured
@@ -22,7 +25,7 @@ confidence or on a grade that is not INCORRECT / PARTIAL are dropped.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 from pydantic import ValidationError
 
@@ -32,6 +35,7 @@ from app.schemas.assessment import (
     SemanticGradeCandidate,
     SemanticGradingRequest,
 )
+from app.utils.text import normalize, reveals
 
 FORBIDDEN_FIELDS = frozenset({
     "mastery", "mastery_level", "mastery_update", "concept_mastery", "mastered", "objective_status",
@@ -86,9 +90,34 @@ def raw_aggregate(candidate: SemanticGradeCandidate, request: SemanticGradingReq
     return sum(r.score * weights.get(r.criterion_id, 0.0) for r in candidate.criterion_results)
 
 
+def learner_visible_texts(candidate: SemanticGradeCandidate) -> Iterator[tuple[str, str]]:
+    """(field, text) for every grader-written text a grade can serve to the learner (`PublicGrade.feedback`,
+    `.criterion_results[].rationale` and `.misconceptions[]`)."""
+    f = candidate.feedback
+    yield "feedback.explanation", f.explanation
+    yield "feedback.next_hint", f.next_hint
+    for i, text in enumerate(f.strengths):
+        yield f"feedback.strengths[{i}]", text
+    for i, text in enumerate(f.errors):
+        yield f"feedback.errors[{i}]", text
+    for r in candidate.criterion_results:
+        yield f"criterion_results[{r.criterion_id}].rationale", r.rationale
+    for i, m in enumerate(candidate.misconceptions):
+        yield f"misconceptions[{i}].type", m.type
+        yield f"misconceptions[{i}].description", m.description
+
+
+def protected_answers(request: SemanticGradingRequest) -> list[str]:
+    """The expected and acceptable answers the grader must not state, less any the learner's answer already says:
+    quoting the learner's own words back discloses nothing."""
+    keys = [request.item.expected_answer, *request.item.acceptable_answers]
+    return [k for k in keys if normalize(k) and not reveals(request.learner_answer, [k])]
+
+
 def check_candidate(candidate: SemanticGradeCandidate, request: SemanticGradingRequest,
                     config: AssessmentConfig) -> None:
-    """The rules that need the request: criteria, citations, concepts, consistency. Raises CandidateRejected."""
+    """The rules that need the request: criteria, citations, concepts, consistency, answer disclosure. Raises
+    CandidateRejected."""
     rubric = request.rubric
     known = [c.criterion_id for c in rubric.criteria]
     given = [r.criterion_id for r in candidate.criterion_results]
@@ -115,6 +144,11 @@ def check_candidate(candidate: SemanticGradeCandidate, request: SemanticGradingR
             or (candidate.outcome == AssessmentOutcome.INCORRECT and aggregate >= rubric.passing_threshold)):
         raise CandidateRejected("contradictory_outcome", f"outcome {candidate.outcome.value} contradicts the "
                                                          f"criterion scores ({aggregate:.2f})")
+    keys = protected_answers(request)
+    leaking = [field for field, text in learner_visible_texts(candidate) if reveals(text, keys)]
+    if leaking:  # names the fields only: the detail is sent back to the model and kept as the grade's internal reason
+        raise CandidateRejected("answer_revealed", f"learner-visible text must not state the expected or an "
+                                                   f"acceptable answer; rewrite {leaking}")
 
 
 def validate_candidate(raw: str | dict | SemanticGradeCandidate, request: SemanticGradingRequest,

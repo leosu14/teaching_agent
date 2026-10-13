@@ -85,6 +85,7 @@ from app.schemas.teaching import (
     TeachingTurnInput,
 )
 from app.schemas.visual import VisualPlanProposal
+from app.utils.text import reveals
 
 LEVEL_RE = re.compile(r"\b(A1|A2|B1|B2|C1|C2)\b", re.IGNORECASE)
 TOPIC_RE = re.compile(r"\b(?:about|on|regarding)\s+(.+?)[\s.!?]*$", re.IGNORECASE)
@@ -900,11 +901,20 @@ def grade_semantically(request: LLMRequest) -> dict:
     if source is not None:
         first = sentences(source.text)
         explanation = f"{source.title}: {first[0] if first else source.text}"
+    # Like the prompt asks, no feedback states an answer the learner has not written: a criterion whose description
+    # quotes the key is named by its id instead, and a passage that quotes it is not paraphrased.
+    keys = [r for r in references if not reveals(answer, [r])]
+
+    def described(c) -> str:
+        return f"criterion {c.criterion_id}" if reveals(c.description, keys) else c.description
+
+    misconceptions = [m for m in misconceptions if not reveals(f"{m['type']} {m['description']}", keys)]
+    explanation = "" if reveals(explanation, keys) else explanation
     return {"score": total, "criterion_results": results, "outcome": outcome, "confidence": confidence,
             "misconceptions": misconceptions,
-            "feedback": {"strengths": [c.description for c in met], "errors": [c.description for c in unmet],
+            "feedback": {"strengths": [described(c) for c in met], "errors": [described(c) for c in unmet],
                          "explanation": explanation[:1000],
-                         "next_hint": f"Think about this: {unmet[0].description}" if unmet else ""},
+                         "next_hint": f"Think about this: {described(unmet[0])}" if unmet else ""},
             "citations": [source.ref] if source is not None else []}
 
 

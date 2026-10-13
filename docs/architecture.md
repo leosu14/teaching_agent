@@ -676,7 +676,9 @@ call it; nothing else grades. The pipeline is `AssessmentEngine` (`app/assessmen
   `app/assessment/validation.py` checks it in the agent (so invalid output is retried) and again in the engine (so no
   grader implementation can bypass it). Named rules: `malformed_json`, `state_mutation` (any mastery, objective, goal
   or curriculum field), `schema` (scores outside 0-1, unknown outcomes), `unknown_criterion`, `duplicate_criterion`,
-  `missing_criterion`, `fabricated_citation`, `unknown_concept`, `contradictory_scores`, `contradictory_outcome`.
+  `missing_criterion`, `fabricated_citation`, `unknown_concept`, `contradictory_scores`, `contradictory_outcome`,
+  `answer_revealed` (a learner-visible text, i.e. feedback, a criterion rationale or a misconception, states the
+  expected or an acceptable answer that the learner's own answer does not already say: the teacher's `reveals()`).
   Criterion scores are snapped to the scale; the overall score and the outcome are always recomputed.
 - **Aggregation and outcome.** score = Σ criterion score × weight. `≥ correct_threshold` (the rubric's passing
   threshold) CORRECT, `≥ partial_threshold` PARTIAL, otherwise INCORRECT; an unmet required criterion caps CORRECT at
