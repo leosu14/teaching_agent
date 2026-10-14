@@ -235,12 +235,30 @@ def test_task_view_drops_internal_state() -> None:
     assert set(view["cost"]) == {"estimated_cost_usd", "actual_cost_usd"}
 
 
-def test_artifact_view_drops_storage_locations() -> None:
+def test_artifact_view_drops_storage_locations_digests_and_sizes() -> None:
     artifact = Artifact(artifact_id="a", task_id="t", type=ArtifactType.IMAGE_ASSET, name="img", uri="file:///srv/x",
-                        media_type="image/png", content_hash="h", size_bytes=1, version=1, provider="mock",
-                        metadata={"object": {"uri": "file:///srv/y", "checksum": "c"}, "items": [{"uri": "z"}]})
+                        media_type="image/png", content_hash="h" * 64, size_bytes=4321, version=1, provider="mock",
+                        metadata={"object": {"uri": "file:///srv/y", "checksum": "c", "key": "objects/sha256/cc/c.png",
+                                             "size_bytes": 9, "media_type": "image/png"},
+                                  "items": [{"uri": "z", "timeline_checksum": "d", "bytes": 3}],
+                                  "generation_key": "g", "concept_id": "preterite"})
     view = ArtifactView.of(artifact).model_dump(mode="json")
-    assert "uri" not in json.dumps(view) and view["metadata"] == {"object": {"checksum": "c"}, "items": [{}]}
+    assert "content_hash" not in view and "size_bytes" not in view
+    assert view["metadata"] == {"object": {"media_type": "image/png"}, "items": [{}], "concept_id": "preterite"}
+    assert "uri" not in json.dumps(view) and "h" * 64 not in json.dumps(view) and "4321" not in json.dumps(view)
+    # the internal model is unchanged
+    assert artifact.content_hash == "h" * 64 and artifact.size_bytes == 4321 and artifact.metadata["object"]["checksum"]
+
+
+def test_artifact_view_schema_has_no_digest_or_length_field() -> None:
+    """NEW-1: the served artifact schema (both artifact routes use it) has no content digest or byte length."""
+    spec = create_app(authenticator=TestAuth().authenticator).openapi()
+    served = set(spec["components"]["schemas"]["ArtifactView"]["properties"])
+    assert not served & {"content_hash", "size_bytes", "checksum", "hash", "digest", "sha256", "uri", "bytes",
+                         "content_length", "byte_length", "file_size"}, served
+    for path in ("/tasks/{task_id}/artifacts", "/learning-cycles/{cycle_id}/artifacts"):
+        ok = spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert ok["items"]["$ref"].endswith("/ArtifactView"), (path, ok)
 
 
 def test_learner_profile_view_drops_the_answers_it_was_graded_against() -> None:

@@ -105,15 +105,17 @@ class StoredArtifacts(Schema):
 
 class ArtifactView(Schema):
     """An artifact as the API serves it: no storage locations (an object store `uri` is a host path), neither the
-    artifact's own nor any in its metadata (e.g. an image asset's stored object)."""
+    artifact's own nor any in its metadata (e.g. an image asset's stored object). No content digest or byte length
+    either, the artifact's own (`content_hash`, `size_bytes`) or any in its metadata: an artifact can hold an answer
+    key (an open teaching question is stored as an ASSESSMENT_ITEM whose other fields the learner already sees), so
+    its hash would verify guessed keys offline and its size would give the key's length. The internal `Artifact`
+    keeps both for storage, deduplication and integrity checks."""
 
     artifact_id: str
     task_id: str
     type: ArtifactType
     name: str
     media_type: str
-    content_hash: str
-    size_bytes: int
     version: int
     provider: str
     parent_ids: list[str]
@@ -123,12 +125,25 @@ class ArtifactView(Schema):
     @classmethod
     def of(cls, artifact: Artifact) -> ArtifactView:
         data = artifact.model_dump(include=set(cls.model_fields))
-        return cls(**data | {"metadata": _without_locations(data["metadata"])})
+        return cls(**data | {"metadata": _public_metadata(data["metadata"])})
 
 
-def _without_locations(value):
+# Metadata keys never served: storage locations, and digests or byte lengths of stored content (an object store key
+# embeds the content's sha256; generation and composition keys are digests of their inputs).
+SERVER_ONLY_METADATA = frozenset({
+    "uri", "key", "object_key", "checksum", "content_hash", "hash", "digest", "sha256", "generation_key",
+    "composition_key", "size_bytes", "bytes", "file_size", "content_length", "byte_length",
+})
+SERVER_ONLY_SUFFIXES = ("_checksum", "_hash", "_digest", "_sha256", "_size_bytes")
+
+
+def _server_only(key: str) -> bool:
+    return key in SERVER_ONLY_METADATA or key.endswith(SERVER_ONLY_SUFFIXES)
+
+
+def _public_metadata(value):
     if isinstance(value, dict):
-        return {k: _without_locations(v) for k, v in value.items() if k != "uri"}
+        return {k: _public_metadata(v) for k, v in value.items() if not _server_only(k)}
     if isinstance(value, list):
-        return [_without_locations(v) for v in value]
+        return [_public_metadata(v) for v in value]
     return value

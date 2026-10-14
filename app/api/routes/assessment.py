@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Response
 
 from app.api.auth import AUTHOR, Principal
-from app.api.authorization import authorize, owned_attempt, owned_item, principal, require_role
+from app.api.authorization import ResourceNotFound, authorize, owned_attempt, owned_item, principal, require_role
 from app.api.deps import container
 from app.schemas.assessment import (
     AssessmentItem,
@@ -51,8 +51,12 @@ async def list_attempts(item_id: str, learner_id: str, p: Principal = Depends(pr
 async def submit_attempt(item_id: str, body: AttemptSubmission, response: Response,
                          p: Principal = Depends(principal), c: Container = Depends(container)) -> AttemptResult:
     """Grade an answer. Idempotent per `attempt_id`: the same answer returns the stored grade, a different answer
-    under the same id is a conflict."""
+    under the same id is a conflict. A teaching session's own question item is answered through the session only
+    (its penalties, hints and open-question state apply): here it is not found, like a foreign item."""
     authorize(p, body.learner_id)
+    item = c.assessment_service.repository.item(item_id)
+    if item is not None and item.metadata.get("session_id"):
+        raise ResourceNotFound()
     if body.attempt_id is not None and (owner := c.ownership.assessment_attempt(body.attempt_id)) is not None:
         authorize(p, owner)  # another learner's attempt id is never replayed or compared against
     result = await c.assessment_service.submit_attempt(item_id, body)

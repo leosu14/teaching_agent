@@ -128,13 +128,17 @@ before, and the event log and `TaskError.message` keep the full diagnostic text 
 |---|---|---|
 | every `/tasks` route, `POST /learners/{id}/assessment` | `TaskView` | `workflow` (answer keys, every node's output), `plan`, `metadata`, `control`, provider requests and per-model cost lines, artifact storage locations |
 | `GET/PUT /learners/{id}` | `LearnerProfileView` | `expected` answers and the feedback that quotes them, in past assessments and mistakes (diagnostic questions recur, so a past key is a future key) |
-| task and cycle `/artifacts` | `ArtifactView` | `uri` (a host path), in the artifact and in its metadata |
+| task and cycle `/artifacts` | `ArtifactView` | `uri` (a host path), and every content digest or byte length (`content_hash`, `size_bytes`, and in metadata `checksum`, storage `key`, `*_hash`, `bytes` and the like), in the artifact and in its metadata. An artifact can hold an answer key (an open teaching question is stored as an `ASSESSMENT_ITEM` whose other fields the learner already sees), so its hash would check guessed keys offline and its size would give the key's length. The internal `Artifact` keeps both |
 | `GET /tasks/{id}/events`, `GET /learning-cycles/{id}/events` | `LearnerEvent`: `event_id`, `type`, `status`, a fixed `message` chosen by the status, `task_id`, `node_id`, `at` | the event's `data` (raw exception and validation text, which can quote model output and so answer keys; storage URIs; provider, model, token and cost records), `agent_id`, `tool` |
 | `TaskView.errors`, `CurriculumBuild.errors` | `TaskErrorView`: `category`, `stage`, `node_id`, `at` and a fixed message per failure category | the internal `TaskError.message` (raw exception text: a structured-output failure quotes the invalid output, answer keys included) |
 | `POST /assessment-items/{id}/attempts`, `GET /assessment-attempts/{id}/grade`, `AnswerResult.assessment` of the teaching `/answers` route | `PublicGrade` | `uncertainty_reason` (the semantic grader's raw error text, which quotes its invalid output and so can quote the item's expected answer; an UNCERTAIN grade's fixed `feedback` asks for another attempt), `matched`, grader usage. Grader-written text it does serve (`feedback`, criterion `rationale`, misconception `type` and `description`) is checked first: see below |
 | teaching sessions, attempts, cycles | already public views (`TeachingSessionView`, `AttemptView`, `LearnerPrompt`) | unchanged |
 
 `POST /assessment-items` returns the registered item, answer key included, to its author (the `author` role is required).
+
+A teaching session's own question item (`metadata.session_id`) is answered through the session only:
+`POST /assessment-items/{id}/attempts` returns the uniform 404 for it, so the open question cannot be graded outside the
+session's hints and penalties (`tests/e2e/test_artifact_answer_oracle.py`).
 
 The semantic grader is given the item's expected and acceptable answers, and the text it writes is served in
 `PublicGrade`. The `answer_revealed` validation rule (`app/assessment/validation.py`) applies the teacher's
