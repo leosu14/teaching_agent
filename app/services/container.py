@@ -6,8 +6,9 @@ so they run the exact same application services.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from app.agents.audio.agent import AudioPlannerAgent
 from app.agents.curriculum.agent import LearningPathPlannerAgent
@@ -91,6 +92,7 @@ from app.runtime.workflow.engine import WorkflowEngine
 from app.runtime.workflows.curriculum_planning import curriculum_template
 from app.runtime.workflows.lesson_evaluation import evaluation_template
 from app.runtime.workflows.lesson_generation import LessonWorkflowOptions, lesson_template
+from app.schemas.common import utcnow
 from app.schemas.presentation import PresentationConfig
 from app.schemas.providers import Capability
 from app.schemas.workflow import RevisionPolicy
@@ -408,15 +410,17 @@ def build_container(
     video_prober: VideoProber | None = None,
     video_generation_provider: VideoGenerationProvider | None = None,
     video_normalizer: VideoNormalizer | None = None,
+    clock: Callable[[], datetime] = utcnow,
 ) -> Container:
+    """`clock` judges lease expiry (task leases and the learning cycle's drive lease); tests move it."""
     settings = settings or Settings()
     settings.validate_runtime()
 
     sessions = create_db(settings.resolved_database_url)
-    task_repo = SqlTaskRepository(sessions)
-    event_repo = SqlEventRepository(sessions)
+    task_repo = SqlTaskRepository(sessions, clock)
+    event_repo = SqlEventRepository(sessions, clock)
     events = EventBus()
-    events.subscribe(event_repo.append)
+    events.subscribe_fenced(event_repo.append)  # a task worker's events are stored only while it holds its lease
     events.subscribe(log_event)
 
     injected = {Capability.TTS: tts_provider, Capability.IMAGE: image_generation_provider,
@@ -434,7 +438,8 @@ def build_container(
     memory = LearnerMemoryService(SqlLearnerRepository(sessions), frameworks,
                                   evidence=SqlEvidenceRepository(sessions), events=SqlLearningEventRepository(sessions),
                                   goals=SqlGoalRepository(sessions), config=pedagogy)
-    artifacts = ArtifactService(SqlArtifactRepository(sessions), FilesystemObjectStore(settings.resolved_object_store_dir))
+    artifacts = ArtifactService(SqlArtifactRepository(sessions, clock),
+                                FilesystemObjectStore(settings.resolved_object_store_dir))
     curriculum = CurriculumEngine(SqlCurriculumRepository(sessions), settings.curriculum_config())
 
     retriever = retriever or LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json")
@@ -559,7 +564,8 @@ def build_container(
         tasks=task_service, events=events, assessment=assessment_service, config=settings.teaching_config())
     learning_cycle_service = LearningCycleService(
         SqlLearningCycleRepository(sessions), curriculum=curriculum_service, tasks=task_service,
-        teaching=teaching_service, memory=memory, artifacts=artifacts, events=events, event_log=event_repo)
+        teaching=teaching_service, memory=memory, artifacts=artifacts, events=events, event_log=event_repo,
+        clock=clock)
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,

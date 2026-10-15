@@ -16,6 +16,7 @@ from app.observability.scope import ExecutionScope
 from app.schemas.artifact import Artifact, ArtifactDraft, ArtifactType, StoredArtifacts, StoredObject
 from app.schemas.common import new_id
 from app.schemas.events import EventType
+from app.schemas.lease import Lease
 
 EXTENSIONS = {
     "application/json": ".json",
@@ -41,7 +42,7 @@ CHUNK = 1 << 20
 
 
 class ArtifactRepository(Protocol):
-    def add(self, artifact: Artifact) -> None: ...
+    def add(self, artifact: Artifact, fence: Lease | None = None) -> None: ...
 
     def get(self, artifact_id: str) -> Artifact: ...
 
@@ -96,9 +97,14 @@ class ArtifactService:
             return reused
         latest = self._repo.latest(task_id, name)
         version = latest.version + 1 if latest else 1
-        uri = self._store.put(f"{task_id}/{name}/v{version}{_extension(media_type)}", content)
+        # Never overwrite an object: when another writer already put this version's key (a worker that lost its lease,
+        # whose row is then refused, or a concurrent one), this artifact gets a key of its own.
+        artifact_id = new_id("art")
+        uri, created = self._store.put_if_absent(f"{task_id}/{name}/v{version}{_extension(media_type)}", content)
+        if not created:
+            uri = self._store.put(f"{task_id}/{name}/v{version}-{artifact_id}{_extension(media_type)}", content)
         return self._add(Artifact(
-            artifact_id=new_id("art"), task_id=task_id, type=type, name=name, uri=uri, media_type=media_type,
+            artifact_id=artifact_id, task_id=task_id, type=type, name=name, uri=uri, media_type=media_type,
             content_hash=digest, size_bytes=len(content), version=version, provider=provider,
             parent_ids=parent_ids, metadata=metadata,
         ), scope)
@@ -195,7 +201,7 @@ class ArtifactService:
         return None
 
     def _add(self, artifact: Artifact, scope: ExecutionScope) -> Artifact:
-        self._repo.add(artifact)
+        self._repo.add(artifact, fence=scope.fence)  # refused (LeaseLost) once the storing worker lost its lease
         scope.emit(EventType.ARTIFACT_CREATED, artifact_id=artifact.artifact_id, artifact_type=artifact.type.value,
                    name=artifact.name, version=artifact.version, parent_ids=artifact.parent_ids, uri=artifact.uri)
         return artifact

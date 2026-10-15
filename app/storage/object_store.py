@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import uuid
 from pathlib import Path
 from typing import BinaryIO
 
@@ -23,11 +25,21 @@ class FilesystemObjectStore:
         return path.as_uri()
 
     def put_if_absent(self, key: str, data: bytes) -> tuple[str, bool]:
-        """Write `data` unless `key` already exists. Returns (uri, created). For content-addressed keys."""
+        """Write `data` unless `key` already exists. Returns (uri, created). Atomic: of two concurrent writers of one
+        key exactly one creates it, and an existing object is never replaced."""
         path = self._path(key)
         if path.exists():
             return path.as_uri(), False
-        return self.put(key, data), True
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_bytes(data)
+        try:
+            os.link(tmp, path)  # fails if the key exists, whoever created it meanwhile
+        except FileExistsError:
+            return path.as_uri(), False
+        finally:
+            tmp.unlink(missing_ok=True)
+        return path.as_uri(), True
 
     def put_file_if_absent(self, key: str, source: Path) -> tuple[str, bool]:
         """Copy a file into the store unless `key` exists, streaming it (large media never sits in memory)."""

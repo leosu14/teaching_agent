@@ -18,6 +18,7 @@ waits in the process.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
@@ -37,6 +38,7 @@ from app.schemas.common import utcnow
 from app.schemas.curriculum import LESSON_ACTIONS, LearningActionType, NextLearningAction
 from app.schemas.events import Event
 from app.schemas.learner import stable_id
+from app.schemas.lease import LeaseLost
 from app.schemas.learning_cycle import (
     ACTIVE_CYCLE_STATUSES,
     CycleConflict,
@@ -63,7 +65,7 @@ from app.schemas.teaching import (
     TeachingSessionStatus,
 )
 from app.services.curriculum import CurriculumService, InvalidGoal
-from app.services.tasks import TaskService
+from app.services.tasks import TaskBusy, TaskService
 from app.services.teaching import (
     InvalidSessionTransition,
     InvalidTeachingRequest,
@@ -122,7 +124,11 @@ class LearningCycleService:
             if active is not None:
                 raise CycleConflict(f"learner {learner_id} has an active learning cycle {active.cycle_id} "
                                     f"({active.status.value}): continue, resume or cancel it first")
-            await self._ensure_curricula(learner_id, data.user_id)
+            try:
+                await self._ensure_curricula(learner_id, data.user_id)
+            except TaskBusy as exc:  # another request is planning the curriculum this cycle needs: nothing ran twice
+                raise CycleConflict(f"learner {learner_id}'s curriculum is being prepared by another request: "
+                                    f"retry") from exc
             now = self._clock()
             action = await self._curriculum.next_action(learner_id, as_of=now)
             created = self._repo.create(engine.start(learner_id=learner_id, user_id=data.user_id,
@@ -149,7 +155,7 @@ class LearningCycleService:
                                     f"response")
             stored = record
 
-            async def redeliver(held: LearningCycle) -> None:
+            async def redeliver(held: LearningCycle, token: str | None) -> None:
                 if not stored.applied:  # received, but a crash came before the child got it
                     await self._deliver(held, stored, data)
 
@@ -158,7 +164,7 @@ class LearningCycleService:
         _check_shape(cycle, data)
         self._check_sheet(cycle, data)
 
-        async def receive(held: LearningCycle) -> None:
+        async def receive(held: LearningCycle, token: str | None) -> None:
             self._require_waiting(held)  # checked again under the lease: the waiting point may have moved
             _check_shape(held, data)
             self._check_sheet(held, data)
@@ -167,8 +173,10 @@ class LearningCycleService:
             received = CycleRequestRecord(cycle_id=cycle_id, client_response_id=data.client_response_id,
                                           request_hash=digest, step_id=w.step_id, waiting_ref=w.ref,
                                           created_at=self._clock())
-            change = engine.receive(held, self._clock())
-            self._repo.apply(change, expected_version=held.version, request=received)  # the id is stored once
+            now = self._clock()
+            change = engine.receive(held, now)
+            self._repo.apply(change, expected_version=held.version, request=received,  # the id is stored once
+                             lease_token=token, at=now)
             await self._deliver(await self._publish(change), received, data)
 
         try:
@@ -210,6 +218,8 @@ class LearningCycleService:
                 try:
                     await self._tasks.submit_answers(child, {"answers": [a.model_dump(mode="json")
                                                                          for a in data.answers or []]})
+                except (TaskBusy, LeaseLost) as exc:  # another worker has the child: not applied, delivered later
+                    raise CycleConflict(f"cycle {cycle.cycle_id}'s current step is busy: retry") from exc
                 except (InvalidInput, InvalidTransition) as exc:
                     await self._refused(cycle.cycle_id, record, exc)
         self._repo.mark_applied(cycle.cycle_id, record.client_response_id)
@@ -228,10 +238,10 @@ class LearningCycleService:
         driven. A permanently failed or cancelled cycle cannot be resumed."""
         engine.resume(await self._load(cycle_id), self._clock())  # FAILED or CANCELLED: rejected before any claim
 
-        async def unblock(held: LearningCycle) -> None:
+        async def unblock(held: LearningCycle, token: str | None) -> None:
             change = engine.resume(held, self._clock())
             if change is not None:
-                held = await self._commit(held, change)
+                held = await self._commit(held, change, token)
                 step = held.current_step
                 if step is not None and step.child_id is not None:
                     await self._recover(step)
@@ -249,8 +259,8 @@ class LearningCycleService:
                 task = self._tasks.get(step.child_id)
                 if task.status in (TaskStatus.FAILED, TaskStatus.PAUSED):
                     await self._tasks.resume(step.child_id)
-        except (TeacherUnavailable, InvalidTransition, InvalidSessionTransition):
-            pass  # still failing: the next observation blocks the cycle again, with the child's own reason
+        except (TeacherUnavailable, InvalidTransition, InvalidSessionTransition, LeaseLost):
+            pass  # still failing, or another worker runs it (TaskBusy): the next observation says which
 
     async def cancel(self, cycle_id: str) -> LearningCycleView:
         """Stop the cycle and its running child (whose history is kept). Idempotent; evidence already recorded by a
@@ -303,7 +313,8 @@ class LearningCycleService:
 
     # --- the driver ----------------------------------------------------------------------------------------------
 
-    async def _drive(self, cycle_id: str, *, before: Callable[[LearningCycle], Awaitable[None]] | None = None,
+    async def _drive(self, cycle_id: str, *,
+                     before: Callable[[LearningCycle, str | None], Awaitable[None]] | None = None,
                      busy_error: bool = False, created: bool = False, replayed: bool = False) -> LearningCycleView:
         """Take the drive lease, run `before` (a response, an unblock) and drive the cycle until the learner is needed
         or it ends, then give the lease back. While another request holds the lease nothing is driven: the cycle is
@@ -315,14 +326,14 @@ class LearningCycleService:
             if busy_error and cycle.status in ACTIVE_CYCLE_STATUSES:
                 raise CycleConflict(f"cycle {cycle_id} is being driven by another request: retry")
             if before is not None and cycle.status not in ACTIVE_CYCLE_STATUSES:
-                await before(cycle)  # a final cycle: `before` rejects the request or only settles a stored response
+                await before(cycle, None)  # a final cycle: `before` rejects the request or settles a stored response
             return await self._view(await self._advance(cycle_id, token=None), created=created, replayed=replayed)
         try:
             if before is not None:
-                await before(cycle)
+                await before(cycle, token)
             await self._advance(cycle_id, token=token)
-        except Exception:
-            await self._release(cycle_id, token)
+        except (Exception, asyncio.CancelledError):  # a cancelled request gives the lease back too (a killed process
+            await self._release(cycle_id, token)     # cannot: its lease runs out instead)
             raise
         return await self._view(await self._release(cycle_id, token), created=created, replayed=replayed)
 
@@ -364,48 +375,54 @@ class LearningCycleService:
         cycle = await self._load(cycle_id)
         drive = token is not None
         for _ in range(MAX_TRANSITIONS):
-            if drive and (cycle.lease is None or cycle.lease.token != token):
-                drive = False  # the lease expired and was taken over: stop driving
+            now = self._clock()
+            if drive and (cycle.lease is None or cycle.lease.token != token or cycle.lease.until <= now):
+                drive = False  # the lease expired or was taken over: stop driving (expiry alone is enough)
             if cycle.status not in (CycleStatus.RUNNING, CycleStatus.WAITING):
                 break
             try:
-                cycle, more = await self._step(cycle, drive=drive)
-            except CycleConflict:
+                if drive and cycle.lease is not None and cycle.lease.until - now < self._lease / 2:
+                    cycle = await self._commit(cycle, engine.renew(cycle, token, now, now + self._lease), token)
+                cycle, more = await self._step(cycle, token=token if drive else None)
+            except CycleConflict:  # a newer version (reload and recompute), or the lease was lost (stop driving)
                 cycle = await self._load(cycle_id)
                 continue
             if not more:
                 break
         return cycle
 
-    async def _step(self, cycle: LearningCycle, *, drive: bool) -> tuple[LearningCycle, bool]:
-        """One transition of the driver; (cycle, False) when nothing more can happen in this request."""
+    async def _step(self, cycle: LearningCycle, *, token: str | None) -> tuple[LearningCycle, bool]:
+        """One transition of the driver; (cycle, False) when nothing more can happen in this request. With the lease
+        `token` every write is fenced by it."""
+        drive = token is not None
         now = self._clock()
         if "cycle" not in cycle.artifact_ids:
             if not drive:
                 return cycle, False
             stored = self._store_cycle_artifact(cycle)
-            return await self._commit(cycle, engine.record_artifact(cycle, "cycle", stored.artifact_id, now)), True
+            return await self._commit(cycle, engine.record_artifact(cycle, "cycle", stored.artifact_id, now),
+                                      token), True
         step = cycle.current_step
         if step is None:
             if not drive:
                 return cycle, False
-            return await self._finish(cycle), True
+            return await self._finish(cycle, token), True
         if step.status.value == "PENDING":
             if not drive:
                 return cycle, False
             problem = await self._action_problem(cycle) if step.index == 0 else None
             change = engine.fail(cycle, self._failure(FailureKind.VALIDATION, problem, step), now) if problem \
                 else engine.begin_step(cycle, step.step_id, now)
-            return await self._commit(cycle, change), True
+            return await self._commit(cycle, change, token), True
         if step.child_id is None:
             if not drive:
                 return cycle, False
-            return await self._create_child(cycle, step), True
+            return await self._create_child(cycle, step, token), True
         obs = await self._observe(cycle, step, drive=drive)
         change = engine.observe(cycle, step.step_id, obs, self._clock())
         if change is None:
             return cycle, False
-        return await self._commit(cycle, change), True
+        return await self._commit(cycle, change, token), True
 
     async def _action_problem(self, cycle: LearningCycle) -> str | None:
         a = cycle.action
@@ -421,7 +438,7 @@ class LearningCycleService:
         progress = next((p for p in curriculum.progress.objectives if p.objective_id == a.objective_id), None)
         return engine.action_problem(a, progress)
 
-    async def _create_child(self, cycle: LearningCycle, step: CycleStep) -> LearningCycle:
+    async def _create_child(self, cycle: LearningCycle, step: CycleStep, token: str | None) -> LearningCycle:
         """Find the step's child by its key, else create it, and record it (only under the drive lease, so no
         concurrent request creates a second one)."""
         child_id, reused = self._find_child(cycle, step), False
@@ -430,9 +447,9 @@ class LearningCycleService:
                 child_id, reused = await self._new_child(cycle, step)
             except InvalidGoal as exc:  # the curriculum moved under the action
                 return await self._commit(cycle, engine.fail(
-                    cycle, self._failure(FailureKind.VALIDATION, str(exc), step), self._clock()))
+                    cycle, self._failure(FailureKind.VALIDATION, str(exc), step), self._clock()), token)
         return await self._commit(cycle, engine.attach_child(cycle, step.step_id, child_id, self._clock(),
-                                                             reused=reused))
+                                                             reused=reused), token)
 
     def _find_child(self, cycle: LearningCycle, step: CycleStep) -> str | None:
         if step.kind == StepKind.TEACHING_SESSION:
@@ -496,8 +513,11 @@ class LearningCycleService:
             or (task.status == TaskStatus.WAITING and task.waiting is not None
                 and task.waiting.kind not in LEARNER_WAITS)
         if drive and owes_work:
-            task = await (self._tasks.run(task.task_id) if task.status == TaskStatus.CREATED
-                          else self._tasks.resume(task.task_id))
+            try:
+                task = await (self._tasks.run(task.task_id) if task.status == TaskStatus.CREATED
+                              else self._tasks.resume(task.task_id))
+            except (TaskBusy, LeaseLost):  # another worker runs the child (its lease): observe, never run it twice
+                task = self._tasks.get(task.task_id)
         return self._task_observation(task, step)
 
     def _task_observation(self, task: Task, step: CycleStep) -> Observation:
@@ -532,7 +552,7 @@ class LearningCycleService:
 
     # --- completion ----------------------------------------------------------------------------------------------
 
-    async def _finish(self, cycle: LearningCycle) -> LearningCycle:
+    async def _finish(self, cycle: LearningCycle, token: str | None) -> LearningCycle:
         """All steps are done: copy what the action produced from the children, record the outcome artifact and
         complete. COMPLETE verifies the curriculum's completion rule; WAIT executes nothing."""
         a = cycle.action
@@ -544,14 +564,14 @@ class LearningCycleService:
             curriculum = self._curriculum.curriculum(a.goal_id)
             if curriculum is None or not curriculum.progress.goal_complete:
                 return await self._commit(cycle, engine.fail(cycle, self._failure(
-                    FailureKind.VALIDATION, f"goal {a.goal_id}'s completion rule does not hold", None), now))
+                    FailureKind.VALIDATION, f"goal {a.goal_id}'s completion rule does not hold", None), now), token)
             outcome = CycleOutcome(result=CycleResult.GOAL_COMPLETED, goal_complete=True,
                                    next_action=await self._curriculum.next_action(cycle.learner_id, as_of=a.as_of))
         else:
             outcome = await self._step_outcome(cycle)
         stored = self._store_outcome_artifact(cycle, outcome)
         outcome.artifact_ids["outcome"] = stored.artifact_id
-        return await self._commit(cycle, engine.complete(cycle, outcome, now))
+        return await self._commit(cycle, engine.complete(cycle, outcome, now), token)
 
     async def _step_outcome(self, cycle: LearningCycle) -> CycleOutcome:
         a = cycle.action
@@ -641,12 +661,13 @@ class LearningCycleService:
             cycle = await self._publish(cycle)  # what a crash left unpublished
         return cycle
 
-    async def _commit(self, cycle: LearningCycle, change: LearningCycle | None) -> LearningCycle:
+    async def _commit(self, cycle: LearningCycle, change: LearningCycle | None,
+                      token: str | None = None) -> LearningCycle:
         """One version-checked write, then its events. A stale version is a conflict: another request is driving
-        the cycle."""
+        the cycle. A driver's write (`token`) is also fenced: CycleLeaseLost once its lease expired or was taken."""
         if change is None:
             return cycle
-        self._repo.apply(change, expected_version=cycle.version)
+        self._repo.apply(change, expected_version=cycle.version, lease_token=token, at=self._clock())
         return await self._publish(change)
 
     async def _publish(self, cycle: LearningCycle) -> LearningCycle:

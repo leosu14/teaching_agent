@@ -43,6 +43,7 @@ from app.schemas.events import EventType
 from app.schemas.learner import GoalStatus, LearningGoal, stable_id
 from app.schemas.lesson import LessonRequest
 from app.schemas.pedagogy import LessonFocus
+from app.runtime.tasks.state_machine import InvalidTransition
 from app.schemas.task import Task, TaskStatus
 from app.services.tasks import TaskService
 
@@ -175,15 +176,16 @@ class CurriculumService:
         spec = GoalSpec.of(goal).model_dump_json()
         key = stable_id("build", goal_id, spec, current.version_id if current else "", why.value,
                         self._engine.config.fingerprint())
+        given_up = 0
         for task in self._tasks.list_for_learner(goal.learner_id):
             if task.metadata.get(BUILD_KEY) != key:
                 continue
             if task.status == TaskStatus.COMPLETED:
                 return task
             if task.status in (TaskStatus.FAILED, TaskStatus.CANCELLED):
+                given_up += 1
                 continue
-            return await self._tasks.resume(task.task_id) if task.status != TaskStatus.CREATED \
-                else await self._tasks.run(task.task_id)
+            return await self._drive_build(task)
         framework = goal.metadata.get(FRAMEWORK_KEY) or DEFAULT_FRAMEWORK
         request = LessonRequest(raw_request=f"Plan the curriculum for {goal.title or goal.description}",
                                 subject=goal.domain, topic=goal.title or goal.domain, framework_id=framework,
@@ -191,11 +193,28 @@ class CurriculumService:
                                 language_of_instruction=self._memory.get_or_create(goal.learner_id)
                                 .preferences.language_of_instruction,
                                 capabilities=[CAPABILITY])
+        # The task id is derived from the build key (and how many earlier attempts were given up), so concurrent
+        # callers create one planning task, not one each; the task's lease then lets only one of them run it.
         task = self._tasks.create_planned(
             request=request, learner_id=goal.learner_id, user_id=user_id, workflow_id=CURRICULUM_WORKFLOW,
             inputs={GOAL_INPUT: goal_id, REASON_INPUT: why.value},
-            metadata={BUILD_KEY: key, AS_OF_KEY: self._clock().isoformat()})
-        return await self._tasks.run(task.task_id)
+            metadata={BUILD_KEY: key, AS_OF_KEY: self._clock().isoformat()},
+            task_id=stable_id("task", key, str(given_up)))
+        return await self._drive_build(task)
+
+    async def _drive_build(self, task: Task) -> Task:
+        """Run or resume the build task once. Raises TaskBusy while another request runs it; a task another request
+        finished meanwhile is returned as it is."""
+        try:
+            if task.status == TaskStatus.COMPLETED:
+                return task
+            return await (self._tasks.run(task.task_id) if task.status == TaskStatus.CREATED
+                          else self._tasks.resume(task.task_id))
+        except InvalidTransition:
+            current = self._tasks.get(task.task_id)
+            if current.status == TaskStatus.COMPLETED:
+                return current
+            raise
 
     def curriculum(self, goal_id: str, *, as_of: datetime | None = None) -> Curriculum | None:
         """The goal's current curriculum with its progress now (read-only: nothing is recorded)."""

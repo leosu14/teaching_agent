@@ -50,6 +50,42 @@ services, schemas and a few exception types.
 (`app/runtime/tasks/state_machine.py`). Planning runs the Request Interpreter agent and picks a workflow
 template by required capabilities. The orchestrator itself holds no educational logic.
 
+## Execution leases, fencing and versioned writes
+
+One worker at a time executes a task, and a worker that lost the right to do so commits nothing
+(`app/schemas/lease.py`, `SqlTaskRepository`, `Orchestrator._held`).
+
+- **Lease.** `run`, `resume`, `submit_input`, `invalidate` and the cancel-time `release` each claim the task's lease
+  first: one conditional `UPDATE` that succeeds only when no live lease exists and raises the task's fencing
+  generation `lease_fence` by one. While another worker's lease is live the request executes nothing and gets
+  `TaskBusy` (409). A RUNNING or REVIEWING task can therefore be resumed only after its worker died or hung (its
+  lease ran out), which is what resume of a running task was for. The lease lasts `TASK_LEASE` (5 minutes); a live
+  worker renews it every third of that (a heartbeat), and gives it back when the request ends, however it ends.
+- **Fencing.** Every write a worker makes carries its lease: the task record (`save(task, lease=...)`), its events
+  (the event store is a fenced subscriber of the bus) and its artifacts (`SqlArtifactRepository.add`). Each checks,
+  in the same transaction as the write, that the task's `lease_fence` and owner are still the worker's and the
+  lease has not expired. Expiry alone is enough to stop a worker; reclaiming makes every earlier holder stale. A
+  refused write raises `LeaseLost` (fixed text, 409 at the API): the stale worker stops, its result and its success
+  event are never published, and an internal `task.lease_lost` event and a log line keep the generation and owner.
+  Writes outside the task's own records (learner memory, assessments) are made by tools with a `:write` permission;
+  the tool manager checks the lease before each such call, so a stale worker stops before them (a pre-check, not
+  atomic with those writes).
+- **Artifact objects.** A versioned object (`{task}/{name}/v{n}`) is created only if absent (atomically); when the
+  key exists, the artifact gets its own key (`v{n}-{artifact_id}`). A stale worker's upload therefore never
+  overwrites the object of the version another worker recorded, and `(task_id, name, version)` is unique.
+- **Versioned writes.** `tasks.version` rises with every write of the body. An unleased write (`save(task)`, e.g.
+  a production run updating a budget) applies only to the version it read and only while no worker holds a live
+  lease, else `WriteConflict` (409); callers reload and retry where that is safe. Pause and cancel requests are
+  their own columns, set in one statement, so the executing worker's checkpoints never overwrite them.
+- **Shared planning tasks.** `build_curriculum` derives the planning task's id from its build key, so concurrent
+  callers share one task and its lease lets one of them run it; a caller that finds it finished uses the result.
+- **Learning cycles** keep their own drive lease in the cycle record (below), with the same rules: each claim raises
+  `lease_generation` and draws a random token, every driver write checks the token and expiry in the same
+  statement as its version check (`CycleLeaseLost`), the driver renews its lease between steps, and a child task
+  run by a stale driver is fenced by the task's own lease.
+- **Time.** Expiry is judged by the process clock of whoever checks (`build_container(clock=...)`); with one
+  database and roughly synchronised clocks that is enough. Database time is a PR20 (multi-machine) concern.
+
 ## Workflow engine
 
 Node types: `AgentNode`, `ToolNode`, `TransformNode`, `ConditionalNode`, `ParallelNode`, `ReviewNode`,
@@ -754,7 +790,10 @@ drives it; the state machine is pure (`app/curriculum/cycle.py`); the schemas ar
 - **Drive lease.** Only the holder of the cycle's lease (a request now, a worker later) creates, runs or resumes a
   child or hands it a response. The lease is taken and given back in version-checked writes on the cycle record; a
   concurrent request sees the cycle busy (`busy_until`; a response gets a 409 and can be retried) and only reads it.
-  A lease left by a crashed process expires after `DRIVE_LEASE` (10 minutes), then the cycle can be resumed.
+  A lease left by a crashed process expires after `DRIVE_LEASE` (10 minutes), then the cycle can be resumed. Each
+  claim raises the cycle's `lease_generation` with a fresh random token; the driver's writes are fenced by that token
+  and the lease's expiry (see [execution leases](#execution-leases-fencing-and-versioned-writes)), the holder renews
+  it between steps, and a request that is cancelled gives it back.
 - **Idempotency.** The cycle id is `stable_id(learner, idempotency_key)`: the same key returns, and continues, the
   same cycle; the same key with a different request is a 409. Before a child is created its step key is recorded; children carry the key (task metadata, the session's
   idempotency key), so a crash between creating a child and attaching it finds it again. A response is recorded with
