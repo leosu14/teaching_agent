@@ -11,7 +11,10 @@ import pytest
 from app.config.providers import ProviderSettings
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders, evaluate_learner
+from app.observability.scope import ExecutionScope, UsageLedger
+from app.runtime.orchestrator.orchestrator import TASK_LEASE
 from app.schemas.assessment import (
+    AssessRequest,
     AttemptConflict,
     AttemptExists,
     AttemptSubmission,
@@ -20,6 +23,7 @@ from app.schemas.assessment import (
 )
 from app.schemas.evaluation import AssessmentQuestion, EvaluationInput, LearnerEvaluationReport
 from app.schemas.learner import LearnerProfileInput
+from app.schemas.lease import LeaseLost
 from app.schemas.task import TaskStatus
 from app.schemas.teaching import (
     QUESTION_ACTIONS,
@@ -246,6 +250,48 @@ async def test_a_crash_after_grading_resumes_without_grading_again(teaching_env:
     assert again.attempt.evidence_ids == done.attempt.evidence_ids
     events = [e for e in env2.container.task_service.events(env.lesson_task) if e.type.startswith(EVENTS)]
     assert Counter(e.type for e in events)["assessment.completed"] == 1
+
+
+async def test_a_grader_whose_task_was_taken_over_while_grading_stores_nothing(teaching_env: Env, monkeypatch) -> None:
+    """The evaluation workflow grades under its task's lease (PR18). Grading calls a model and can outlive the lease;
+    if another worker took the task over meanwhile, the stale worker's grade is never stored, so the new holder grades
+    the answer itself and the attempt is recorded once, from the current worker."""
+    env = teaching_env
+    items, learner = setup(env)
+    service, tasks = env.container.assessment_service, env.container.task_service._tasks
+    entry = items["why_preterite"]
+    request = AssessRequest(item=entry["item"], learner_id=learner, answer=entry["answers"]["semantic"],
+                            attempt_id="att-fenced", task_id=env.lesson_task, source="evaluation")
+
+    def scope_for(lease) -> ExecutionScope:  # what the orchestrator gives a task worker
+        def check() -> None:
+            if not tasks.holds(lease):
+                raise LeaseLost(lease)
+        return ExecutionScope(events=env.container.events, usage=UsageLedger(), task_id=env.lesson_task,
+                              fence=lease, fence_check=check)
+
+    old = tasks.claim(env.lesson_task, "old", TASK_LEASE)
+    leases = {}
+    original = service.engine.grade
+
+    async def taken_over_while_grading(*args, **kwargs):
+        grade = await original(*args, **kwargs)
+        tasks.release(old)  # the old worker stalled: another one claims the task before its grade returns
+        leases["new"] = tasks.claim(env.lesson_task, "new", TASK_LEASE)
+        return grade
+
+    monkeypatch.setattr(service.engine, "grade", taken_over_while_grading)
+    with pytest.raises(LeaseLost):
+        await service.assess(request, scope=scope_for(old))
+    monkeypatch.undo()
+    assert leases["new"].fence == old.fence + 1
+    with pytest.raises(AttemptNotFound):  # nothing of the stale worker's grading was stored
+        service.attempt("att-fenced")
+
+    result = await service.assess(request, scope=scope_for(leases["new"]))
+    assert not result.replayed and result.attempt.completed_at is not None
+    assert env.llm.calls[GRADER] == 2  # each worker graded; only the current one's grade is kept
+    assert service.stored_grade("att-fenced") == result.grade
 
 
 async def test_invalid_requests(teaching_env: Env) -> None:

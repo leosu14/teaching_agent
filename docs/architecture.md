@@ -69,7 +69,8 @@ One worker at a time executes a task, and a worker that lost the right to do so 
   event are never published, and an internal `task.lease_lost` event and a log line keep the generation and owner.
   Writes outside the task's own records (learner memory, assessments) are made by tools with a `:write` permission;
   the tool manager checks the lease before each such call, so a stale worker stops before them (a pre-check, not
-  atomic with those writes).
+  atomic with those writes). Grading awaits a model, so the assessment service checks again after grading, just
+  before it stores the attempt and grade.
 - **Artifact objects.** A versioned object (`{task}/{name}/v{n}`) is created only if absent (atomically); when the
   key exists, the artifact gets its own key (`v{n}-{artifact_id}`). A stale worker's upload therefore never
   overwrites the object of the version another worker recorded, and `(task_id, name, version)` is unique.

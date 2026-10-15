@@ -179,6 +179,7 @@ class AssessmentService:
             attempt_id=request.attempt_id, assessment_item_id=item.assessment_item_id, learner_id=request.learner_id,
             attempt_number=1, learner_answer=request.answer, answer_hash=digest, submitted_at=now, grade_id=grade_id,
             source=request.source, source_ref=request.source_ref, task_id=request.task_id)
+        scope.require_fence()  # grading can outlive the worker's lease: a worker taken over meanwhile stores nothing
         try:
             stored = self._repo.add_attempt(attempt, grade)
         except AttemptExists:  # the same attempt, submitted twice at once: graded and stored once
