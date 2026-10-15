@@ -4,6 +4,7 @@ crash recovery, and the two integrations (interactive teaching sessions, the eva
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 
 import pytest
@@ -34,10 +35,13 @@ from app.schemas.teaching import (
     TeachingSessionStatus,
     TeachingTurnInput,
 )
-from app.services.assessment import AssessmentItemNotFound, AttemptNotFound, InvalidAssessmentRequest
+from app.config.settings import Settings
+from app.schemas.learner import stable_id
+from app.services.assessment import AssessmentItemNotFound, AttemptNotFound, InvalidAssessmentRequest, grade_id_for
 from app.services.container import build_container
 from scripts.run_assessment_demo import register
 from tests.conftest import evaluation_answers_for, start_evaluation
+from tests.integration.test_task_concurrency import AHEAD, Clock
 from tests.teaching_fixtures import Env, open_env
 
 CONCEPT = "es.past_contrast"
@@ -294,6 +298,54 @@ async def test_a_grader_whose_task_was_taken_over_while_grading_stores_nothing(t
     assert service.stored_grade("att-fenced") == result.grade
 
 
+async def test_a_grader_that_loses_its_lease_between_the_check_and_the_write_stores_nothing(teaching_env: Env) -> None:
+    """The check-to-write gap (independent review F1): the worker passes the lease check after grading, then stalls
+    before its write while another worker takes the task over. The fence is checked inside the transaction that
+    inserts the attempt and its grade, so the stale write is refused and leaves no row of either."""
+    env = teaching_env
+    items, learner = setup(env)
+    service, tasks = env.container.assessment_service, env.container.task_service._tasks
+    entry = items["why_preterite"]
+    request = AssessRequest(item=entry["item"], learner_id=learner, answer=entry["answers"]["semantic"],
+                            attempt_id="att-gap", task_id=env.lesson_task, source="evaluation")
+    old = tasks.claim(env.lesson_task, "old", TASK_LEASE)  # worker A holds fence n
+    new: dict = {}
+
+    def check() -> None:  # what the orchestrator gives a worker, plus the stall right after the check passed
+        held = tasks.holds(old)
+        if not held:
+            raise LeaseLost(old)
+        tasks.release(old)  # A is descheduled here; B takes the task over (fence n+1) before A writes
+        new["lease"] = tasks.claim(env.lesson_task, "new", TASK_LEASE)
+
+    stale = ExecutionScope(events=env.container.events, usage=UsageLedger(), task_id=env.lesson_task, fence=old,
+                           fence_check=check)
+    with pytest.raises(LeaseLost):
+        await service.assess(request, scope=stale)
+    assert new["lease"].fence == old.fence + 1
+    with pytest.raises(AttemptNotFound):
+        service.attempt("att-gap")
+    grade_id = grade_id_for("att-gap", entry["item"].assessment_item_id)
+    assert service.repository.grade(grade_id) is None  # neither row of the insert survived
+    assert all(a.attempt_id != "att-gap" for a in service.repository.attempts(entry["item"].assessment_item_id,
+                                                                               learner))
+    stale_events = {e.type for e in assessment_events(env) if e.data.get("attempt_id") == "att-gap"}
+    assert stale_events <= {"assessment.started"}  # emitted while A still held the lease; nothing after
+
+    def current_check() -> None:
+        if not tasks.holds(new["lease"]):
+            raise LeaseLost(new["lease"])
+
+    current = ExecutionScope(events=env.container.events, usage=UsageLedger(), task_id=env.lesson_task,
+                             fence=new["lease"], fence_check=current_check)
+    result = await service.assess(request, scope=current)
+    assert not result.replayed and result.attempt.completed_at is not None  # graded and stored by the holder
+    assert service.stored_grade("att-gap") == result.grade
+    completed = [e for e in assessment_events(env) if e.type == "assessment.completed"
+                 and e.data.get("attempt_id") == "att-gap"]
+    assert len(completed) == 1
+
+
 async def test_invalid_requests(teaching_env: Env) -> None:
     env = teaching_env
     items, learner = setup(env)
@@ -455,6 +507,130 @@ async def test_the_evaluator_cannot_overrule_the_grades(settings) -> None:
         assert all(e.correct == (grades[e.question_id].outcome == "CORRECT") for e in report.evaluations)
     finally:
         container.close()
+
+
+async def test_a_stale_evaluation_worker_stores_no_grade_after_a_takeover(tmp_path) -> None:
+    """The evaluation workflow end to end (tool manager -> `assessment.grade`), two processes on one database. A's
+    semantic grading call is parked; B, whose clock is past A's lease, resumes the task and parks in its own grading
+    call. A's call then returns: its grade is refused and nothing of it is stored. B finishes the task normally."""
+    data = tmp_path / "data"
+    responders = {**default_responders(), "learner_evaluation": with_free_text}
+    a_llm, b_llm = MockLLMProvider(responders), MockLLMProvider(responders)
+    a = build_container(Settings(data_dir=data, log_json=False), llm_providers={"mock": a_llm}, clock=Clock())
+    b = build_container(Settings(data_dir=data, log_json=False), llm_providers={"mock": b_llm}, clock=Clock(AHEAD))
+    try:
+        _, task = await start_evaluation(a)
+        body = free_text_answers(task)
+        attempt_id = stable_id("aatt", task.task_id, "ft_1")
+        a_parked, b_parked = park_grader(a_llm), park_grader(b_llm)
+
+        stale = asyncio.create_task(a.task_service.submit_answers(task.task_id, body))
+        await asyncio.wait_for(a_parked.entered.wait(), timeout=60)  # A holds the lease, grading ft_1
+        a_fence = a.task_service._tasks.lease(task.task_id).fence
+        newer = asyncio.create_task(b.task_service.resume(task.task_id))  # B: A's lease has expired by B's clock
+        await asyncio.wait_for(b_parked.entered.wait(), timeout=60)
+        assert b.task_service._tasks.lease(task.task_id).fence == a_fence + 1
+
+        a_parked.open()  # A's grade arrives after the takeover
+        with pytest.raises(LeaseLost):
+            await stale
+        assert a.assessment_service.repository.attempt(attempt_id) is None  # A stored no attempt and no grade
+        assert a.assessment_service.repository.grade(
+            grade_id_for(attempt_id, stable_id("aitem", task.task_id, "ft_1"))) is None
+
+        b_parked.open()
+        done = await newer
+        assert done.status == TaskStatus.COMPLETED, done.errors
+        stored = b.assessment_service.repository.attempt(attempt_id)
+        assert stored is not None and stored.completed_at is not None
+        assert (a_llm.calls[GRADER], b_llm.calls[GRADER]) == (1, 1)  # each graded once; only B's grade is kept
+        events = b.task_service.events(task.task_id)
+        completed = Counter(e.data["attempt_id"] for e in events if e.type == "assessment.completed")
+        assert completed and all(n == 1 for n in completed.values()), completed
+        assert completed[attempt_id] == 1
+        assert Counter(e.type for e in events)["task.completed"] == 1
+    finally:
+        a.close()
+        b.close()
+
+
+async def test_a_takeover_between_the_lease_check_and_the_grade_write_in_the_evaluation_workflow(tmp_path) -> None:
+    """The same two processes, with B taking the task over at the worst moment: after A's grading returned and A's
+    lease check passed, before A's attempt and grade are written. Only the fence inside that write can refuse it."""
+    data = tmp_path / "data"
+    responders = {**default_responders(), "learner_evaluation": with_free_text}
+    a_llm, b_llm = MockLLMProvider(responders), MockLLMProvider(responders)
+    a = build_container(Settings(data_dir=data, log_json=False), llm_providers={"mock": a_llm}, clock=Clock())
+    b = build_container(Settings(data_dir=data, log_json=False), llm_providers={"mock": b_llm}, clock=Clock(AHEAD))
+    try:
+        _, task = await start_evaluation(a)
+        body = free_text_answers(task)
+        attempt_id = stable_id("aatt", task.task_id, "ft_1")
+        a_tasks, b_tasks = a.task_service._tasks, b.task_service._tasks
+        graded, taken = asyncio.Event(), {}
+        original_generate, original_holds = a_llm.generate, a_tasks.holds
+
+        async def generate(request):
+            response = await original_generate(request)
+            if request.agent_id == GRADER:
+                graded.set()
+            return response
+
+        def holds(lease):
+            held = original_holds(lease)
+            if held and graded.is_set() and not taken:  # A's check passed; A stalls before writing
+                taken["lease"] = b_tasks.claim(task.task_id, "b", TASK_LEASE)  # B's clock: A's lease has expired
+            return held
+
+        a_llm.generate, a_tasks.holds = generate, holds
+        with pytest.raises(LeaseLost):
+            await a.task_service.submit_answers(task.task_id, body)
+        assert taken["lease"] is not None
+        assert a.assessment_service.repository.attempt(attempt_id) is None  # refused inside the write: no row
+        assert a.assessment_service.repository.grade(
+            grade_id_for(attempt_id, stable_id("aitem", task.task_id, "ft_1"))) is None
+        assert not [e for e in a.task_service.events(task.task_id)
+                    if e.type in ("assessment.graded", "assessment.completed") and e.data["attempt_id"] == attempt_id]
+
+        b_tasks.release(taken["lease"])  # B's takeover becomes its resume
+        done = await b.task_service.resume(task.task_id)
+        assert done.status == TaskStatus.COMPLETED, done.errors
+        stored = b.assessment_service.repository.attempt(attempt_id)
+        assert stored is not None and stored.completed_at is not None
+        assert (a_llm.calls[GRADER], b_llm.calls[GRADER]) == (1, 1)
+        completed = Counter(e.data["attempt_id"] for e in b.task_service.events(task.task_id)
+                            if e.type == "assessment.completed")
+        assert completed[attempt_id] == 1 and all(n == 1 for n in completed.values()), completed
+    finally:
+        a.close()
+        b.close()
+
+
+def free_text_answers(task) -> dict:
+    """The fixture answers to the deterministic questions, plus a correct free-text answer to `ft_1`."""
+    closed = [q for q in task.waiting.prompt["questions"] if q["kind"] != "free_text"]
+    waiting = task.waiting.model_copy(update={"prompt": {**task.waiting.prompt, "questions": closed}})
+    return {"answers": evaluation_answers_for(task.model_copy(update={"waiting": waiting}))["answers"]
+            + [{"question_id": "ft_1", "answer": "Because the match finished at a specific moment in the past."}]}
+
+
+class park_grader:
+    """Parks the next semantic-grader call of one process until `open()` (a slow grading call)."""
+
+    def __init__(self, llm: MockLLMProvider) -> None:
+        self.entered, self._open = asyncio.Event(), asyncio.Event()
+        original = llm.generate
+
+        async def generate(request):
+            if request.agent_id == GRADER and not self.entered.is_set():
+                self.entered.set()
+                await self._open.wait()
+            return await original(request)
+
+        llm.generate = generate
+
+    def open(self) -> None:
+        self._open.set()
 
 
 def test_the_sql_store_numbers_attempts_and_refuses_duplicates(teaching_env: Env) -> None:

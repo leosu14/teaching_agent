@@ -165,7 +165,7 @@ class AssessmentService:
             self._repo.save_rubric(rubric)
         scope = self._scope(request.task_id, scope)
         grade_id = grade_id_for(request.attempt_id, item.assessment_item_id)
-        scope.events.emit(EventType.ASSESSMENT_STARTED, task_id=scope.task_id, node_id=scope.node_id,
+        scope.events.emit(EventType.ASSESSMENT_STARTED, task_id=scope.task_id, node_id=scope.node_id, fence=scope.fence,
                           event_id=stable_id("aevt", request.attempt_id, "started"), attempt_id=request.attempt_id,
                           assessment_item_id=item.assessment_item_id, concept_id=item.concept_id,
                           response_type=item.response_type.value, source=request.source)
@@ -179,9 +179,9 @@ class AssessmentService:
             attempt_id=request.attempt_id, assessment_item_id=item.assessment_item_id, learner_id=request.learner_id,
             attempt_number=1, learner_answer=request.answer, answer_hash=digest, submitted_at=now, grade_id=grade_id,
             source=request.source, source_ref=request.source_ref, task_id=request.task_id)
-        scope.require_fence()  # grading can outlive the worker's lease: a worker taken over meanwhile stores nothing
+        scope.require_fence()  # early exit only: grading can outlive the lease; the write below is what is fenced
         try:
-            stored = self._repo.add_attempt(attempt, grade)
+            stored = self._repo.add_attempt(attempt, grade, fence=scope.fence)
         except AttemptExists:  # the same attempt, submitted twice at once: graded and stored once
             current = self._repo.attempt(request.attempt_id)
             assert current is not None
@@ -437,7 +437,7 @@ class AssessmentService:
 
     def _complete(self, attempt: AssessmentAttempt, grade: AssessmentGrade, outcome: AttemptOutcome,
                   scope: ExecutionScope, *, mastery_updated: bool) -> AssessmentAttempt:
-        done = self._repo.complete(attempt.attempt_id, outcome, self._clock())
+        done = self._repo.complete(attempt.attempt_id, outcome, self._clock(), fence=scope.fence)
         self._emit(scope, EventType.ASSESSMENT_COMPLETED, done, "completed", attempt_id=done.attempt_id,
                    assessment_item_id=done.assessment_item_id, grade_id=done.grade_id, outcome=grade.outcome.value,
                    source=done.source, mastery_updated=mastery_updated,
@@ -448,7 +448,7 @@ class AssessmentService:
     @staticmethod
     def _emit(scope: ExecutionScope, type: str, attempt: AssessmentAttempt, key: str, **data: object) -> None:
         """Ids, outcome, scores and grader type only: never the answer, prompts, provider payloads or secrets."""
-        scope.events.emit(type, task_id=attempt.task_id or scope.task_id, node_id=scope.node_id,
+        scope.events.emit(type, task_id=attempt.task_id or scope.task_id, node_id=scope.node_id, fence=scope.fence,
                           event_id=stable_id("aevt", attempt.attempt_id, key), **data)
 
 

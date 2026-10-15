@@ -52,8 +52,9 @@ template by required capabilities. The orchestrator itself holds no educational 
 
 ## Execution leases, fencing and versioned writes
 
-One worker at a time executes a task, and a worker that lost the right to do so commits nothing
-(`app/schemas/lease.py`, `SqlTaskRepository`, `Orchestrator._held`).
+One worker at a time executes a task, and a worker that lost the right to do so cannot commit task state, events,
+artifacts, results or grades (`app/schemas/lease.py`, `SqlTaskRepository`, `Orchestrator._held`). Learner-memory and
+curriculum writes are only pre-checked (below).
 
 - **Lease.** `run`, `resume`, `submit_input`, `invalidate` and the cancel-time `release` each claim the task's lease
   first: one conditional `UPDATE` that succeeds only when no live lease exists and raises the task's fencing
@@ -67,10 +68,13 @@ One worker at a time executes a task, and a worker that lost the right to do so 
   lease has not expired. Expiry alone is enough to stop a worker; reclaiming makes every earlier holder stale. A
   refused write raises `LeaseLost` (fixed text, 409 at the API): the stale worker stops, its result and its success
   event are never published, and an internal `task.lease_lost` event and a log line keep the generation and owner.
-  Writes outside the task's own records (learner memory, assessments) are made by tools with a `:write` permission;
-  the tool manager checks the lease before each such call, so a stale worker stops before them (a pre-check, not
-  atomic with those writes). Grading awaits a model, so the assessment service checks again after grading, just
-  before it stores the attempt and grade.
+  Assessment attempts and grades (`SqlAssessmentRepository.add_attempt` and `complete`) and assessment events are
+  fenced the same way when a task worker grades: the check is the first statement of the transaction that inserts
+  the attempt and its grade, so a refused write stores neither, and the next holder grades the answer itself.
+  Learner-memory and curriculum writes are made by tools with a `:write` permission; the tool manager checks the
+  lease before each such call (a separate read, not atomic with the write). Those tools do not await between the
+  check and the write, and the writes are idempotent per task, but they are not fenced at commit: doing that is a
+  follow-up required before workers run in more than one process.
 - **Artifact objects.** A versioned object (`{task}/{name}/v{n}`) is created only if absent (atomically); when the
   key exists, the artifact gets its own key (`v{n}-{artifact_id}`). A stale worker's upload therefore never
   overwrites the object of the version another worker recorded, and `(task_id, name, version)` is unique.

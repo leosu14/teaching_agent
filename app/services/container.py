@@ -554,7 +554,7 @@ def build_container(
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
     curriculum_service = CurriculumService(memory, RetrieverKnowledgeBase(retriever), curriculum, task_service, events)
     assessment_service = AssessmentService(
-        SqlAssessmentRepository(sessions), AgentSemanticGrader(agents, tools, router, events), artifacts=artifacts,
+        SqlAssessmentRepository(sessions, clock), AgentSemanticGrader(agents, tools, router, events), artifacts=artifacts,
         memory=memory, knowledge=RetrieverKnowledgeBase(retriever), curriculum=curriculum_service,
         tasks=task_service, events=events, config=assessment_config)
     assessment_port.bind(assessment_service)

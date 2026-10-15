@@ -563,8 +563,9 @@ class SqlAssessmentRepository:
 
     ATTEMPT_RETRIES = 5  # a concurrent attempt took the same attempt number: take the next one
 
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
+        self._clock = clock
 
     def _save(self, row_type, key: str, value, **columns) -> bool:
         digest = value.content_hash()
@@ -599,10 +600,15 @@ class SqlAssessmentRepository:
             row = s.get(AssessmentRubricRow, rubric_id)
             return AssessmentRubric.model_validate_json(row.body) if row else None
 
-    def add_attempt(self, attempt: AssessmentAttempt, grade: AssessmentGrade) -> AssessmentAttempt:
+    def add_attempt(self, attempt: AssessmentAttempt, grade: AssessmentGrade,
+                    fence: Lease | None = None) -> AssessmentAttempt:
+        """Both rows in one transaction. With `fence` (a task worker grading), only while that worker's lease is
+        current: the check is the transaction's first statement, so a refused write (LeaseLost) stores neither row."""
         for _ in range(self.ATTEMPT_RETRIES):
             try:
                 with self._sessions.begin() as s:
+                    if fence is not None:
+                        _require_fence(s, fence, self._clock())
                     if s.get(AssessmentAttemptRow, attempt.attempt_id) is not None:
                         raise AttemptExists(attempt.attempt_id)
                     count = s.scalar(select(func.count()).select_from(AssessmentAttemptRow).where(
@@ -638,8 +644,11 @@ class SqlAssessmentRepository:
             row = s.get(AssessmentGradeRow, grade_id)
             return AssessmentGrade.model_validate_json(row.body) if row else None
 
-    def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at) -> AssessmentAttempt:
+    def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at,
+                 fence: Lease | None = None) -> AssessmentAttempt:
         with self._sessions.begin() as s:
+            if fence is not None:
+                _require_fence(s, fence, self._clock())
             row = s.get(AssessmentAttemptRow, attempt_id)
             if row is None:
                 raise KeyError(attempt_id)
