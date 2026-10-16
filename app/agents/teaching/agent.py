@@ -82,6 +82,10 @@ class TeachingSessionAgent(Agent[TeachingTurnInput, TeacherTurnOutput]):
             invented = sorted(set(output.citations) - allowed)
             if invented:
                 raise OutputRejected(f"citations {invented} are not in the grounding material; cite only its refs")
+            answers = self._answers(source)  # the open question, if any: it stays open after this answer
+            if reveals(output.response, answers) or reveals(output.limitation or "", answers):
+                raise OutputRejected("a question is still open: do not reveal or confirm its answer; explain the "
+                                     "material without stating the answer")
             return
         if output.action != source.action:
             if output.action == TeachingAction.COMPLETE:
@@ -99,8 +103,14 @@ class TeachingSessionAgent(Agent[TeachingTurnInput, TeacherTurnOutput]):
             raise OutputRejected(f"hint_level must be {expected_level}")
         self._check_question(output, source)
         answers = self._answers(source)
-        if source.action == TeachingAction.HINT and not source.reveal_answer and reveals(output.response, answers):
-            raise OutputRejected("a hint must not reveal the expected answer")
+        if source.action == TeachingAction.HINT and not source.reveal_answer:
+            if reveals(output.response, answers):
+                raise OutputRejected("a hint must not reveal the expected answer")
+            # misconception labels are served next to the hint while the question is open: each is checked alone
+            leaking = [i for i, m in enumerate(output.misconceptions) if reveals(m.misconception, answers)]
+            if leaking:
+                raise OutputRejected(f"misconceptions {leaking} reveal the expected answer; describe the "
+                                     "misunderstanding without stating the answer")
         if source.answer_outcome == "UNCERTAIN" and reveals(output.response, answers):
             raise OutputRejected("the question stays open after an ungradable answer: do not reveal the answer")
         allowed = ({s.ref for s in source.sections} | {c for s in source.sections for c in s.citations}
@@ -132,5 +142,9 @@ class TeachingSessionAgent(Agent[TeachingTurnInput, TeacherTurnOutput]):
         q = output.question
         if output.expected_response_type != ("multiple_choice" if q.kind == "multiple_choice" else "free_text"):
             raise OutputRejected("expected_response_type must match the question kind")
-        if q.kind in ("short_answer", "free_text") and reveals(q.prompt, [q.expected_answer]):
-            raise OutputRejected("the question must not contain its own answer")
+        if q.kind in ("short_answer", "free_text"):  # a multiple-choice question lists its answer among the choices
+            answers = [q.expected_answer, *q.accepted_answers]
+            if reveals(q.prompt, answers):
+                raise OutputRejected("the question must not contain its own answer")
+            if reveals(output.response, answers):  # served as the turn's text while the question is open
+                raise OutputRejected("the turn asking the question must not state its answer")

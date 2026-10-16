@@ -6,10 +6,11 @@ from app.api.deps import container
 from app.schemas.catalog import AgentInfo, ProviderInfo, ToolInfo
 from app.services.container import Container
 
+public = APIRouter(tags=["system"])  # the only routes served without authentication
 router = APIRouter(tags=["system"])
 
 
-@router.get("/health")
+@public.get("/health")
 def health() -> dict:
     return {"status": "ok"}
 

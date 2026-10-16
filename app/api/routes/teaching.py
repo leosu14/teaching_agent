@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response
 
+from app.api.authorization import owned_lesson, owned_session
 from app.api.deps import container
 from app.schemas.teaching import (
     AnswerResult,
@@ -17,7 +18,8 @@ from app.services.container import Container
 router = APIRouter(tags=["teaching"])
 
 
-@router.post("/lessons/{lesson_id}/teaching-session", response_model=SessionStarted, status_code=201)
+@router.post("/lessons/{lesson_id}/teaching-session", response_model=SessionStarted, status_code=201,
+             dependencies=[Depends(owned_lesson)])
 async def start_session(lesson_id: str, response: Response, body: StartTeachingSession | None = None,
                         c: Container = Depends(container)) -> SessionStarted:
     """`lesson_id`: the LESSON artifact id or the id of the completed lesson task. Objective and action default to
@@ -28,28 +30,33 @@ async def start_session(lesson_id: str, response: Response, body: StartTeachingS
     return started
 
 
-@router.get("/teaching-sessions/{session_id}", response_model=TeachingSessionView)
+@router.get("/teaching-sessions/{session_id}", response_model=TeachingSessionView,
+            dependencies=[Depends(owned_session)])
 async def get_session(session_id: str, c: Container = Depends(container)) -> TeachingSessionView:
     return await c.teaching_service.view(session_id)
 
 
-@router.post("/teaching-sessions/{session_id}/answers", response_model=AnswerResult)
+@router.post("/teaching-sessions/{session_id}/answers", response_model=AnswerResult,
+             dependencies=[Depends(owned_session)])
 async def submit_answer(session_id: str, body: LearnerInput, c: Container = Depends(container)) -> AnswerResult:
     """An answer (`kind: answer`), a question to the teacher (`question`) or a request to stop (`stop`). Idempotent
     per `client_turn_id`."""
     return await c.teaching_service.submit(session_id, body)
 
 
-@router.post("/teaching-sessions/{session_id}/pause", response_model=TeachingSessionView)
+@router.post("/teaching-sessions/{session_id}/pause", response_model=TeachingSessionView,
+             dependencies=[Depends(owned_session)])
 async def pause_session(session_id: str, c: Container = Depends(container)) -> TeachingSessionView:
     return await c.teaching_service.pause(session_id)
 
 
-@router.post("/teaching-sessions/{session_id}/resume", response_model=TeachingSessionView)
+@router.post("/teaching-sessions/{session_id}/resume", response_model=TeachingSessionView,
+             dependencies=[Depends(owned_session)])
 async def resume_session(session_id: str, c: Container = Depends(container)) -> TeachingSessionView:
     return await c.teaching_service.resume(session_id)
 
 
-@router.post("/teaching-sessions/{session_id}/cancel", response_model=TeachingSessionView)
+@router.post("/teaching-sessions/{session_id}/cancel", response_model=TeachingSessionView,
+             dependencies=[Depends(owned_session)])
 async def cancel_session(session_id: str, c: Container = Depends(container)) -> TeachingSessionView:
     return await c.teaching_service.cancel(session_id)

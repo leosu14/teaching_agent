@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.config.production import ProductionSettings
@@ -132,6 +132,16 @@ class Settings(BaseSettings):
     assessment_mid_confidence: Literal["partial", "uncertain"] | None = None
     assessment_semantic_enabled: bool | None = None  # False: free text the rules cannot decide is UNCERTAIN
     assessment_accent_insensitive_languages: str | None = None  # comma-separated, e.g. "es,pt"
+
+    # API authentication (see docs/security.md). Every route but /health requires an authenticated principal and
+    # there is no anonymous mode. "gateway" (the default, for production): a trusted auth gateway in front of the API
+    # authenticates the user and forwards the identity in HMAC-signed headers (TA_AUTH_GATEWAY_SECRET is required;
+    # without it the API refuses to start). "static": bearer tokens from a local JSON file
+    # (TA_AUTH_STATIC_TOKENS_FILE), for development only; tests inject their own authenticator.
+    auth_mode: Literal["gateway", "static"] = "gateway"
+    auth_gateway_secret: SecretStr | None = None
+    auth_gateway_max_skew_seconds: int = Field(default=300, ge=1, le=3600)
+    auth_static_tokens_file: Path | None = None
 
     log_level: str = "INFO"
     log_json: bool = True

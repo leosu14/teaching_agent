@@ -258,12 +258,26 @@ def request_for(item=None, rubric=None, answer="Porque terminó ayer.") -> Seman
                                                                 {"criterion_id": "bounded", "score": 0.0}]),
      "contradictory_outcome"),
     (candidate(outcome="INCORRECT"), "contradictory_outcome"),
+    (candidate(feedback={"explanation": "The answer: the action is completed."}), "answer_revealed"),
+    (candidate(feedback={"strengths": ["The action is completed"]}), "answer_revealed"),
+    (candidate(criterion_results=[{"criterion_id": "completed", "score": 1.0, "rationale": "the action is completed"},
+                                  {"criterion_id": "bounded", "score": 1.0}]), "answer_revealed"),
 ])
 def test_adversarial_grader_output_is_rejected_by_a_named_rule(raw, rule: str) -> None:
     payload = raw if isinstance(raw, str) else json.dumps(raw)
     with pytest.raises(CandidateRejected) as err:
         validate_candidate(payload, request_for(), AssessmentConfig())
     assert err.value.rule == rule
+
+
+def test_feedback_may_quote_an_answer_the_learner_wrote() -> None:
+    raw = json.dumps(candidate(feedback={"explanation": "You said: the action is completed."}))
+    validate_candidate(raw, request_for(answer="Porque the action is completed ayer."), AssessmentConfig())
+    item = free_item(acceptable_answers=["it is finished"])
+    with pytest.raises(CandidateRejected) as err:  # the other acceptable answer stays protected
+        validate_candidate(json.dumps(candidate(feedback={"next_hint": "Say: it is finished."})),
+                           request_for(item=item, answer="Porque the action is completed ayer."), AssessmentConfig())
+    assert err.value.rule == "answer_revealed" and "finished" not in err.value.detail
 
 
 def test_every_learner_state_field_is_forbidden() -> None:

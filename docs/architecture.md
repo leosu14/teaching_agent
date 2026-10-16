@@ -620,8 +620,10 @@ it lives in `AgentContext`; its state is a serializable `SessionState` stored wi
   (`teaching.ground`). Citations must be refs of that material; with nothing relevant the answer is a structured
   limitation (`grounded: false`), never an invented source.
 - **Validation of the model's output** (`TeachingSessionAgent.check`): the turn is exactly the requested action and
-  concept at the requested difficulty; no COMPLETE; one question for question turns and none otherwise; a short-answer
-  question does not contain its answer; hints do not reveal it; citations exist; misconceptions only for an incorrect
+  concept at the requested difficulty; no COMPLETE; one question for question turns and none otherwise; neither a
+  short-answer question's prompt nor the text of the turn asking it states its expected or an accepted answer; hints
+  and each misconception label proposed with a hint do not reveal it; an answer to a learner question (its response
+  and limitation) does not reveal the open question's answer; citations exist; misconceptions only for an incorrect
   answer about the session's concept. The output schema has no field for mastery, objective or session status
   (unknown fields fail validation). Invalid output is retried, then the turn fails as above.
 - **Context window** (`TeachingTurnInput`): the objective, the lesson's sections, practice items, a compact state,
@@ -676,7 +678,9 @@ call it; nothing else grades. The pipeline is `AssessmentEngine` (`app/assessmen
   `app/assessment/validation.py` checks it in the agent (so invalid output is retried) and again in the engine (so no
   grader implementation can bypass it). Named rules: `malformed_json`, `state_mutation` (any mastery, objective, goal
   or curriculum field), `schema` (scores outside 0-1, unknown outcomes), `unknown_criterion`, `duplicate_criterion`,
-  `missing_criterion`, `fabricated_citation`, `unknown_concept`, `contradictory_scores`, `contradictory_outcome`.
+  `missing_criterion`, `fabricated_citation`, `unknown_concept`, `contradictory_scores`, `contradictory_outcome`,
+  `answer_revealed` (a learner-visible text, i.e. feedback, a criterion rationale or a misconception, states the
+  expected or an acceptable answer that the learner's own answer does not already say: the teacher's `reveals()`).
   Criterion scores are snapped to the scale; the overall score and the outcome are always recomputed.
 - **Aggregation and outcome.** score = Σ criterion score × weight. `≥ correct_threshold` (the rubric's passing
   threshold) CORRECT, `≥ partial_threshold` PARTIAL, otherwise INCORRECT; an unmet required criterion caps CORRECT at

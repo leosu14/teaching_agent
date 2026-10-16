@@ -97,6 +97,7 @@ from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
 from app.services.curriculum import CurriculumService
 from app.services.learners import LearnerService
+from app.services.ownership import OwnershipService
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
 from app.services.assessment import AssessmentService
@@ -383,6 +384,7 @@ class Container:
     teaching_service: TeachingSessionService
     learning_cycle_service: LearningCycleService
     assessment_service: AssessmentService
+    ownership: OwnershipService
     catalog: CatalogService
     production: ProductionService
     _sessions: object
@@ -566,6 +568,8 @@ def build_container(
         teaching_service=teaching_service,
         learning_cycle_service=learning_cycle_service,
         assessment_service=assessment_service,
+        ownership=OwnershipService(tasks=task_service, artifacts=artifacts, memory=memory, teaching=teaching_service,
+                                   assessment=assessment_service, cycles=learning_cycle_service),
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         production=ProductionService(settings=settings, events=events, registry=providers.registry,
                                      selector=providers.selector, router=router, agents=agents, tools=tools,

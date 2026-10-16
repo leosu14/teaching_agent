@@ -7,12 +7,12 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.app import create_app
 from app.config.settings import Settings
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
 from app.services.container import build_container
 from scripts.run_curriculum_demo import FIXTURES, placement_evidence
+from tests.auth import client_for
 
 FIXTURE = json.loads((FIXTURES / "learner.json").read_text(encoding="utf-8"))
 LEARNER = FIXTURE["learner_id"]
@@ -22,7 +22,7 @@ LEARNER = FIXTURE["learner_id"]
 def client(tmp_path):
     container = build_container(Settings(data_dir=tmp_path / "data", corpus_dir=FIXTURES, log_json=False),
                                 llm_providers={"mock": MockLLMProvider(default_responders())})
-    with TestClient(create_app(container)) as c:
+    with client_for(container, LEARNER) as c:
         c.container = container
         yield c
     container.close()

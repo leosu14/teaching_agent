@@ -478,7 +478,10 @@ class AttemptSubmission(Schema):
 
 
 class PublicGrade(Schema):
-    """A grade as the learner sees it: no provider internals."""
+    """A grade as the learner sees it: no provider internals, and no `uncertainty_reason`. That reason can carry the
+    semantic grader's raw error text, which quotes the model's invalid output (and the grader is given the item's
+    expected answer), so it stays on the internal `AssessmentGrade` and the `assessment.uncertain` event. An UNCERTAIN
+    grade's `feedback` (a fixed explanation and retry hint) tells the learner to answer again."""
 
     grade_id: str
     assessment_item_id: str
@@ -492,7 +495,6 @@ class PublicGrade(Schema):
     criterion_results: list[CriterionResult]
     misconceptions: list[Misconception]
     feedback: AssessmentFeedback
-    uncertainty_reason: str | None
     notes: list[str]
     created_at: datetime
 

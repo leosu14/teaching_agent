@@ -9,6 +9,10 @@ They are validated when the container is built; errors say what to fix.
 | `TA_DATABASE_URL` | `sqlite:///$TA_DATA_DIR/teaching_agent.db` | Metadata database |
 | `TA_OBJECT_STORE_DIR` | `$TA_DATA_DIR/objects` | Artifact blobs |
 | `TA_ROUTING_FILE` | `config/routing.toml` | Model tiers, fallback chains, pricing, output limits |
+| `TA_AUTH_MODE` | `gateway` | API authentication: `gateway` (production: identity in HMAC-signed headers from a trusted auth gateway) or `static` (development: bearer tokens from a file). No anonymous mode; see [security.md](security.md) |
+| `TA_AUTH_GATEWAY_SECRET` | unset | `gateway` mode: the secret shared with the gateway (32+ characters). Unset: the API refuses to start |
+| `TA_AUTH_GATEWAY_MAX_SKEW_SECONDS` | `300` | `gateway` mode: how old a signed identity may be |
+| `TA_AUTH_STATIC_TOKENS_FILE` | unset | `static` mode: JSON `{token: {user_id, learner_ids, roles}}`, kept outside the repository |
 | `TA_RETRIEVAL_PROVIDER` | `local` | Knowledge-base retrieval |
 | `TA_VIDEO_COMPOSER` | `ffmpeg` | `ffmpeg` composes a real MP4 (needs `ffmpeg` and `ffprobe`); `mock` writes a manifest-only file for tests |
 | `TA_CORPUS_DIR` | `fixtures/demo` | Corpus for the mock search, mock image search (`image_catalog.json`) and local knowledge base |

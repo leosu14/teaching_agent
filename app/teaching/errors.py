@@ -22,4 +22,15 @@ class InvalidTeachingRequest(ValueError):
 
 class TeacherUnavailable(RuntimeError):
     """The teacher's reply could not be generated (the model failed validation or every provider failed). What the
-    learner sent is stored; resuming the session generates the reply (503)."""
+    learner sent is stored; resuming the session generates the reply (503).
+
+    Its text is served to learners, so it is always the fixed `MESSAGE`: the cause (validation errors quote the model's
+    output, which can hold an answer key) stays on `__cause__` and in the teacher's internal agent events."""
+
+    MESSAGE = "The teacher could not produce a response. You can retry the session."
+
+    def __init__(self) -> None:
+        super().__init__(self.MESSAGE)
+
+    def __str__(self) -> str:
+        return self.MESSAGE

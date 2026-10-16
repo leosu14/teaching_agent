@@ -78,7 +78,7 @@ python scripts/run_generative_video_demo.py --out-dir video/  # generated clips:
 python scripts/run_provider_demo.py    # provider registry, selection, health, usage, retry, fallback (offline)
 python scripts/run_production_demo.py --dry-run  # a production lesson's plan: providers, budget, stages
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
-uvicorn app.api.main:app --reload   # the same services over HTTP
+uvicorn app.api.main:app --reload   # the same services over HTTP (authenticated: see docs/security.md)
 ```
 
 `run_demo.py` prints the task id, final status, every workflow step, the generated artifacts and their
@@ -161,14 +161,19 @@ graph, per-request traceability, usage and cost. `--mock` rehearses the same pat
 
 ## API
 
+Every route except `/health` requires authentication, and every learner-owned resource is checked against the
+caller's learner scope (another learner's resource is a 404, exactly like a missing one). Learner-facing responses
+never carry answer keys or internal workflow state. See [docs/security.md](docs/security.md) for the gateway contract,
+development tokens and the test mechanism.
+
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/tasks` | Create and run a task (`{"request", "learner_id"}`); returns WAITING if the diagnostic needs answers |
 | POST | `/tasks/{id}/answers` | Submit answers (`{"answers": [{"question_id", "answer"}]}`) for whatever a WAITING task is waiting on |
 | POST | `/tasks/{id}/evaluation` | Start the post-lesson evaluation of a COMPLETED lesson task; returns the new task, WAITING for answers |
-| GET | `/tasks/{id}` | Task state, plan, workflow checkpoint, cost, result |
+| GET | `/tasks/{id}` | Task state, what it is waiting for, cost totals, result (never the workflow state or answer keys) |
 | POST | `/tasks/{id}/pause` · `/resume` · `/cancel` | Task control; resume also recovers crashed or failed tasks |
-| GET | `/tasks/{id}/artifacts` · `/events` | Artifacts with parent links; the persisted event log |
+| GET | `/tasks/{id}/artifacts` · `/events` | Artifacts with parent links; the event log as learner events (type, status, fixed message) |
 | PUT/GET | `/learners/{id}` | Learner profile (subjects with a level framework, preferences) |
 | GET | `/learners/{id}/progress` | Mastery, weak concepts, due reviews |
 | POST | `/learners/{id}/assessment` | Submit diagnostic answers for a WAITING task |
@@ -180,7 +185,7 @@ graph, per-request traceability, usage and cost. `--mock` rehearses the same pat
 | GET | `/teaching-sessions/{id}` | Session state, turns, objective progress, next action; summary and outcome once completed |
 | POST | `/teaching-sessions/{id}/answers` | The learner's answer, question or stop (`{"answer", "client_turn_id", "kind"}`); idempotent per `client_turn_id` |
 | POST | `/teaching-sessions/{id}/pause` · `/resume` · `/cancel` | Session control (cancel is idempotent and keeps the history) |
-| POST | `/assessment-items` | Register an assessment item on a lesson, with its rubric (immutable; the same item again is a no-op) |
+| POST | `/assessment-items` | Register an assessment item on a lesson, with its rubric (`author` role; immutable; the same item again is a no-op) |
 | POST | `/assessment-items/{id}/attempts` | Grade an answer (`{"learner_id", "answer", "attempt_id"}`); idempotent per `attempt_id`; updates mastery unless UNCERTAIN |
 | GET | `/assessment-items/{id}/attempts?learner_id=` | Every attempt of a learner on the item, in order |
 | GET | `/assessment-attempts/{id}` · `/grade` | An attempt / its grade (outcome, score, criteria, misconceptions, feedback) |
@@ -188,7 +193,7 @@ graph, per-request traceability, usage and cost. `--mock` rehearses the same pat
 | GET | `/learning-cycles/{id}` | Cycle state, steps, the prompt when WAITING, the outcome once completed |
 | POST | `/learning-cycles/{id}/responses` | The learner's response (`{"client_response_id", "answers"}` for a sheet or `{"client_response_id", "answer", "kind"}` for a session question); idempotent per `client_response_id` |
 | POST | `/learning-cycles/{id}/resume` · `/cancel` | Retry a BLOCKED cycle's step / cancel the cycle and its running step |
-| GET | `/learning-cycles/{id}/events` · `/artifacts` | The cycle's event stream / its LEARNING_CYCLE artifacts |
+| GET | `/learning-cycles/{id}/events` · `/artifacts` | The cycle's event stream as learner events / its LEARNING_CYCLE artifacts |
 | GET | `/learners/{id}/next-action` | The next learning action across the learner's goals (`?as_of=` for a given time) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 

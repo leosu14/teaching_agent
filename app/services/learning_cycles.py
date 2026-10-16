@@ -80,6 +80,8 @@ MAX_TRANSITIONS = 64  # per request; a cycle has at most a handful of steps
 DRIVE_LEASE = timedelta(minutes=10)  # a crashed request's lease expires after this; then the cycle can be resumed
 CONFLICT_RETRIES = 5
 LEARNER_WAITS = {"diagnostic_answers", "assessment_answers"}  # task waits for the learner (others wait on work)
+# Fixed text for a teacher failure: never `str(exc)`, which could quote model output (and so an answer key).
+TEACHER_FAILURE_MESSAGE = "The teacher could not produce a response. You can retry the learning cycle."
 Session = TeachingSessionStatus
 
 
@@ -483,8 +485,8 @@ class LearningCycleService:
                           or (session.status == Session.COMPLETED and session.outcome is None)):
                 try:
                     await self._teaching.resume(step.child_id)
-                except TeacherUnavailable as exc:
-                    return self._failed(FailureKind.PROVIDER, True, str(exc), step)
+                except TeacherUnavailable:  # fixed text: the exception's own text is never copied to the learner
+                    return self._failed(FailureKind.PROVIDER, True, TEACHER_FAILURE_MESSAGE, step)
                 session = await self._teaching.get(step.child_id)
             return self._session_observation(session, step)
         task = self._tasks.get(step.child_id)
