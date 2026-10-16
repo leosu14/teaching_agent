@@ -62,19 +62,30 @@ curriculum writes are only pre-checked (below).
   `TaskBusy` (409). A RUNNING or REVIEWING task can therefore be resumed only after its worker died or hung (its
   lease ran out), which is what resume of a running task was for. The lease lasts `TASK_LEASE` (5 minutes); a live
   worker renews it every third of that (a heartbeat), and gives it back when the request ends, however it ends.
-- **Fencing.** Every write a worker makes carries its lease: the task record (`save(task, lease=...)`), its events
-  (the event store is a fenced subscriber of the bus) and its artifacts (`SqlArtifactRepository.add`). Each checks,
-  in the same transaction as the write, that the task's `lease_fence` and owner are still the worker's and the
-  lease has not expired. Expiry alone is enough to stop a worker; reclaiming makes every earlier holder stale. A
-  refused write raises `LeaseLost` (fixed text, 409 at the API): the stale worker stops, its result and its success
-  event are never published, and an internal `task.lease_lost` event and a log line keep the generation and owner.
-  Assessment attempts and grades (`SqlAssessmentRepository.add_attempt` and `complete`) and assessment events are
-  fenced the same way when a task worker grades: the check is the first statement of the transaction that inserts
-  the attempt and its grade, so a refused write stores neither, and the next holder grades the answer itself.
-  Learner-memory and curriculum writes are made by tools with a `:write` permission; the tool manager checks the
-  lease before each such call (a separate read, not atomic with the write). Those tools do not await between the
-  check and the write, and the writes are idempotent per task, but they are not fenced at commit: doing that is a
-  follow-up required before workers run in more than one process.
+- **Fencing.** These writes of a task worker carry its lease and check it in the same transaction as the write
+  (the task's `lease_fence` and owner are still the worker's and the lease has not expired): the task record
+  (`save(task, lease=...)`), its events (the event store is a fenced subscriber of the bus), its artifact rows
+  (`SqlArtifactRepository.add`), and its assessment attempts and grades (`SqlAssessmentRepository.add_attempt` and
+  `complete`, where the check is the first statement of the transaction that inserts the attempt and its grade, so
+  a refused write stores neither and the next holder grades the answer itself). Expiry alone is enough to stop a
+  worker; reclaiming makes every earlier holder stale. A refused write raises `LeaseLost` (fixed text, 409 at the
+  API): the stale worker stops, and its result and its success event are never published. Learning-cycle driver
+  commits are fenced by the cycle's own lease (below).
+
+  Not fenced at commit:
+  - **Learner-memory and curriculum writes** (`learner.record_*`, `curriculum.save`, `curriculum.track`). The tool
+    manager checks the lease before running a tool with a `:write` permission (a separate read). The tool bodies are
+    synchronous, but the manager runs them through `asyncio.wait_for(tool.run(...))`, which schedules a task, so the
+    event loop can run other coroutines between the check and the write (observed on Python 3.11). A worker whose
+    lease is lost in that window still writes; the writes are idempotent per task, so they repeat what the new
+    holder writes. Fencing them in the write's transaction is a required follow-up before workers run in more than
+    one process; until then they are not multi-process safe.
+  - **Assessment items and rubrics** (`save_item`, `save_rubric`): immutable and idempotent by content hash, so a
+    stale copy is the same row.
+  - **Object-store bytes** of an artifact are written (create-if-absent) before its fenced row; a refused worker
+    leaves an unreferenced object, never a recorded or overwritten one (below).
+  - **The `task.lease_lost` diagnostic event** is unfenced on purpose: it records the stale generation and owner
+    after the refusal, next to a log line.
 - **Artifact objects.** A versioned object (`{task}/{name}/v{n}`) is created only if absent (atomically); when the
   key exists, the artifact gets its own key (`v{n}-{artifact_id}`). A stale worker's upload therefore never
   overwrites the object of the version another worker recorded, and `(task_id, name, version)` is unique.
@@ -85,9 +96,12 @@ curriculum writes are only pre-checked (below).
 - **Shared planning tasks.** `build_curriculum` derives the planning task's id from its build key, so concurrent
   callers share one task and its lease lets one of them run it; a caller that finds it finished uses the result.
 - **Learning cycles** keep their own drive lease in the cycle record (below), with the same rules: each claim raises
-  `lease_generation` and draws a random token, every driver write checks the token and expiry in the same
-  statement as its version check (`CycleLeaseLost`), the driver renews its lease between steps, and a child task
-  run by a stale driver is fenced by the task's own lease.
+  `lease_generation` and draws a random token, every driver commit of the cycle record checks the token and expiry
+  in the same statement as its version check (`CycleLeaseLost`), the driver renews its lease between steps, and a
+  child task run by a stale driver is fenced by the task's own lease. The cycle's own artifacts
+  (`learning_cycle`, `learning_cycle_outcome`) are stored before and outside that commit, with no fence: a driver
+  that lost its lease can leave an unreferenced artifact row (its content is deterministic, so the next driver
+  reuses it by content hash).
 - **Time.** Expiry is judged by the process clock of whoever checks (`build_container(clock=...)`); with one
   database and roughly synchronised clocks that is enough. Database time is a PR20 (multi-machine) concern.
 
@@ -796,8 +810,8 @@ drives it; the state machine is pure (`app/curriculum/cycle.py`); the schemas ar
   child or hands it a response. The lease is taken and given back in version-checked writes on the cycle record; a
   concurrent request sees the cycle busy (`busy_until`; a response gets a 409 and can be retried) and only reads it.
   A lease left by a crashed process expires after `DRIVE_LEASE` (10 minutes), then the cycle can be resumed. Each
-  claim raises the cycle's `lease_generation` with a fresh random token; the driver's writes are fenced by that token
-  and the lease's expiry (see [execution leases](#execution-leases-fencing-and-versioned-writes)), the holder renews
+  claim raises the cycle's `lease_generation` with a fresh random token; the driver's commits of the cycle record are
+  fenced by that token and the lease's expiry (the cycle's own artifacts are not) (see [execution leases](#execution-leases-fencing-and-versioned-writes)), the holder renews
   it between steps, and a request that is cancelled gives it back.
 - **Idempotency.** The cycle id is `stable_id(learner, idempotency_key)`: the same key returns, and continues, the
   same cycle; the same key with a different request is a 409. Before a child is created its step key is recorded; children carry the key (task metadata, the session's

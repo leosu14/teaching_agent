@@ -393,7 +393,7 @@ class LearningCycleService:
 
     async def _step(self, cycle: LearningCycle, *, token: str | None) -> tuple[LearningCycle, bool]:
         """One transition of the driver; (cycle, False) when nothing more can happen in this request. With the lease
-        `token` every write is fenced by it."""
+        `token` every commit of the cycle record is fenced by it; the cycle's own artifacts (`_store`) are not."""
         drive = token is not None
         now = self._clock()
         if "cycle" not in cycle.artifact_ids:

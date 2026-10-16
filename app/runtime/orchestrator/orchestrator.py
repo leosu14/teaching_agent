@@ -267,8 +267,9 @@ class Orchestrator:
     @asynccontextmanager
     async def _held(self, task_id: str) -> AsyncIterator[Lease]:
         """Claim the task's lease for this request (TaskBusy while another worker's is live), renew it while the
-        work runs, and give it back however the work ends. Every write made under it is fenced by the storage
-        layer: once the lease is lost, nothing more of this worker's is committed."""
+        work runs, and give it back however the work ends. The task record, events, artifact rows and assessment
+        grades written under it are fenced by the storage layer; learner-memory and curriculum writes are only
+        pre-checked by the tool manager (see docs/architecture.md, execution leases)."""
         lease = self._claim(task_id)
         beat = asyncio.create_task(self._renew_until_lost(lease)) if self._heartbeat > 0 else None
         try:
