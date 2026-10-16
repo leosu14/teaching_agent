@@ -40,6 +40,8 @@ class ToolManager:
         async def attempt(n: int) -> BaseModel:
             started = time.perf_counter()
             scope.emit(EventType.TOOL_STARTED, tool=name, caller=caller.caller_id, attempt=n)
+            if any(p.endswith(":write") for p in tool.permissions):
+                scope.require_fence()  # a stale worker stops here (a pre-check, not atomic with the write)
             try:
                 with active_scope(scope):  # provider calls made by the tool report into this task's scope
                     result = await asyncio.wait_for(tool.run(data, scope), tool.timeout_seconds)

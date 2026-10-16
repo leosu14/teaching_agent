@@ -8,7 +8,7 @@ from collections.abc import Coroutine
 from pathlib import Path
 
 from app.artifacts.service import ArtifactService
-from app.runtime.orchestrator.orchestrator import Orchestrator
+from app.runtime.orchestrator.orchestrator import Orchestrator, TaskBusy
 from app.runtime.workflows.lesson_evaluation import LESSON_TASK
 from app.runtime.workflows.lesson_evaluation import WORKFLOW_ID as EVALUATION_WORKFLOW
 from app.runtime.workflows.lesson_generation import WORKFLOW_ID as LESSON_WORKFLOW
@@ -18,6 +18,8 @@ from app.schemas.lesson import DiagnosticAnswers, LessonRequest
 from app.schemas.task import Task, TaskStatus
 from app.runtime.tasks.state_machine import InvalidTransition
 from app.storage.repositories import NotFound, SqlEventRepository, SqlTaskRepository
+
+__all__ = ["TaskBusy", "TaskService"]
 
 
 class TaskService:
@@ -41,11 +43,12 @@ class TaskService:
             lesson_request=lesson_request, inputs={}, metadata=metadata)
 
     def create_planned(self, *, request: LessonRequest, learner_id: str, user_id: str, workflow_id: str,
-                       inputs: dict[str, str], metadata: dict | None = None) -> Task:
-        """A task for a known workflow (e.g. curriculum planning) with its inputs; not run yet."""
+                       inputs: dict[str, str], metadata: dict | None = None, task_id: str | None = None) -> Task:
+        """A task for a known workflow (e.g. curriculum planning) with its inputs; not run yet. With a deterministic
+        `task_id`, an existing task of that id is returned instead of a second one being created."""
         return self._orchestrator.create_planned_task(
             request=request.raw_request, learner_id=learner_id, user_id=user_id, workflow_id=workflow_id,
-            lesson_request=request, inputs=inputs, metadata=metadata)
+            lesson_request=request, inputs=inputs, metadata=metadata, task_id=task_id)
 
     async def run(self, task_id: str) -> Task:
         """Execute a created task until it completes, waits, pauses or fails."""

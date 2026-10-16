@@ -126,8 +126,9 @@ class CycleLease(Schema):
     version-checked write before a child is created, run, resumed or given a response, released when the request
     returns; a lease left by a crashed process expires at `until` and can then be taken over."""
 
-    token: str
+    token: str  # random per claim
     until: datetime
+    generation: int = 0  # the cycle's fencing generation when this lease was claimed
 
 
 class LearningCycle(Schema):
@@ -144,6 +145,7 @@ class LearningCycle(Schema):
     artifact_ids: dict[str, str] = Field(default_factory=dict)  # "cycle" (at start), "outcome" (at completion)
     pending_events: list[CycleEvent] = Field(default_factory=list)
     lease: CycleLease | None = None
+    lease_generation: int = 0  # raised by every claim: a lease from an earlier generation is stale
     version: int = 1  # optimistic lock
     created_at: datetime
     updated_at: datetime
@@ -173,6 +175,11 @@ class CycleRequestRecord(Schema):
 class CycleConflict(ValueError):
     """Another cycle is active for the learner, the cycle changed concurrently, or a client_response_id was reused for
     a different response (409)."""
+
+
+class CycleLeaseLost(CycleConflict):
+    """A driver's write was refused: its drive lease expired or another request claimed the cycle. Nothing was
+    written; the driver stops driving."""
 
 
 # --- API ---------------------------------------------------------------------------------------------------------
