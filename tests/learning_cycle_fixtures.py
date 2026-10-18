@@ -51,11 +51,13 @@ class CycleEnv:
 
 
 def open_cycle_env(data_dir: Path, *, copy_from: Path | None, opened: list[Container] | None = None,
-                   **overrides) -> CycleEnv:
+                   clock=None, **overrides) -> CycleEnv:
+    """`clock`: this process's clock for lease expiry (a second process whose clock is ahead sees leases expire)."""
     if copy_from is not None:
         _copy(copy_from, data_dir)
     llm = MockLLMProvider(default_responders())
-    container = build_container(settings(data_dir, log_json=False, **overrides), llm_providers={"mock": llm})
+    container = build_container(settings(data_dir, log_json=False, **overrides), llm_providers={"mock": llm},
+                                **({"clock": clock} if clock is not None else {}))
     env = CycleEnv(container=container, llm=llm, data_dir=data_dir, opened=opened if opened is not None else [])
     env.opened.append(container)
     container.events.subscribe(env.events.append)

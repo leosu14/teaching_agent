@@ -111,6 +111,7 @@ class Task(Schema):
     metadata: dict = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    version: int = 1  # optimistic lock: the stored row's version (raised by every write)
 
     def steps(self) -> list[StepSummary]:
         if self.workflow is None:

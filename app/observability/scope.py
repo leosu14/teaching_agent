@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -11,6 +11,7 @@ from app.observability import budget as budgets
 from app.observability.events import EventBus
 from app.schemas.common import CostSummary, ProviderRequestRecord, TokenUsage
 from app.schemas.events import Event
+from app.schemas.lease import Lease
 from app.schemas.providers import Capability
 from app.schemas.usage import TaskBudget, TaskUsage
 
@@ -61,6 +62,14 @@ class ExecutionScope:
     task_id: str | None = None
     node_id: str | None = None
     agent_id: str | None = None
+    fence: Lease | None = None  # the task worker's lease: its events and artifacts are stored only while it holds
+    # Raises LeaseLost when `fence` is no longer current. Called before writes outside the task's own records
+    # (learner memory, assessments): a stale worker stops there instead of writing them.
+    fence_check: Callable[[], None] | None = None
+
+    def require_fence(self) -> None:
+        if self.fence_check is not None:
+            self.fence_check()
 
     def for_node(self, node_id: str) -> ExecutionScope:
         return replace(self, node_id=node_id, agent_id=None)
@@ -70,7 +79,8 @@ class ExecutionScope:
 
     def emit(self, type: str, *, tool: str | None = None, **data: object) -> Event:
         return self.events.emit(
-            type, task_id=self.task_id, node_id=self.node_id, agent_id=self.agent_id, tool=tool, **data
+            type, task_id=self.task_id, node_id=self.node_id, agent_id=self.agent_id, tool=tool, fence=self.fence,
+            **data
         )
 
 

@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Protocol
 
 from app.assessment.errors import AttemptExists, ItemConflict
+from app.schemas.lease import Lease
 from app.schemas.assessment import (
     AssessmentAttempt,
     AssessmentGrade,
@@ -32,8 +33,10 @@ class AssessmentRepository(Protocol):
 
     def rubric(self, rubric_id: str) -> AssessmentRubric | None: ...
 
-    def add_attempt(self, attempt: AssessmentAttempt, grade: AssessmentGrade) -> AssessmentAttempt:
-        """Store both (the attempt number is assigned here); AttemptExists when the attempt id is taken."""
+    def add_attempt(self, attempt: AssessmentAttempt, grade: AssessmentGrade,
+                    fence: Lease | None = None) -> AssessmentAttempt:
+        """Store both (the attempt number is assigned here); AttemptExists when the attempt id is taken. With `fence`,
+        only while that task lease is current, checked in the same transaction (LeaseLost stores neither)."""
         ...
 
     def attempt(self, attempt_id: str) -> AssessmentAttempt | None: ...
@@ -44,8 +47,10 @@ class AssessmentRepository(Protocol):
 
     def grade(self, grade_id: str) -> AssessmentGrade | None: ...
 
-    def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at: datetime) -> AssessmentAttempt:
-        """Mark the attempt's publication done (once; a second call keeps the first outcome)."""
+    def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at: datetime,
+                 fence: Lease | None = None) -> AssessmentAttempt:
+        """Mark the attempt's publication done (once; a second call keeps the first outcome). Fenced like
+        `add_attempt`."""
         ...
 
 
@@ -81,8 +86,9 @@ class InMemoryAssessmentRepository:
     def rubric(self, rubric_id: str) -> AssessmentRubric | None:
         return self._rubrics.get(rubric_id)
 
-    def add_attempt(self, attempt: AssessmentAttempt, grade: AssessmentGrade) -> AssessmentAttempt:
-        with self._lock:
+    def add_attempt(self, attempt: AssessmentAttempt, grade: AssessmentGrade,
+                    fence: Lease | None = None) -> AssessmentAttempt:
+        with self._lock:  # no task leases in memory: `fence` is accepted for the contract and not checked
             if attempt.attempt_id in self._attempts or grade.grade_id in self._grades:
                 raise AttemptExists(attempt.attempt_id)
             number = 1 + sum(1 for a in self._attempts.values() if a.assessment_item_id == attempt.assessment_item_id
@@ -104,7 +110,8 @@ class InMemoryAssessmentRepository:
     def grade(self, grade_id: str) -> AssessmentGrade | None:
         return self._grades.get(grade_id)
 
-    def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at: datetime) -> AssessmentAttempt:
+    def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at: datetime,
+                 fence: Lease | None = None) -> AssessmentAttempt:
         with self._lock:
             current = self._attempts[attempt_id]
             if current.completed_at is None:

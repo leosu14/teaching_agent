@@ -16,6 +16,7 @@ from app.observability.scope import ExecutionScope
 from app.providers.llm.router import AllProvidersFailed, ModelRouter
 from app.schemas.common import utcnow
 from app.schemas.events import EventType
+from app.schemas.lease import LeaseLost
 from app.schemas.task import Task, TaskControl, TaskResult, WaitRequest
 from app.schemas.workflow import NodeState, NodeStatus, WorkflowState
 from app.tools.base import ToolTransientError
@@ -149,6 +150,8 @@ class WorkflowEngine:
 
             try:
                 result = await self._run_node(node, state, view, scope, hooks)
+            except LeaseLost:  # this worker is stale: it records nothing, not even the failure
+                raise
             except Exception as exc:  # BaseException (process kill, cancellation) propagates untouched
                 ns.status = NodeStatus.FAILED
                 ns.error = redact_text(f"{type(exc).__name__}: {exc}")
@@ -217,6 +220,8 @@ class WorkflowEngine:
                     result = await asyncio.wait_for(node.execute(rt), node.timeout_seconds)
                 else:
                     result = await node.execute(rt)
+            except LeaseLost:
+                raise
             except Exception as exc:
                 ns.error = redact_text(f"{type(exc).__name__}: {exc}")
                 scope.emit(EventType.NODE_FAILED, kind=node.kind, attempt=ns.attempts, error=ns.error[:1000])

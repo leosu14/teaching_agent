@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -13,6 +13,11 @@ class Base(DeclarativeBase):
 
 
 class TaskRow(Base):
+    """A task. `version` is its optimistic lock (raised by every write of the body). The lease columns say which
+    worker may execute it: `lease_fence` only ever grows (each claim raises it), and a holder's writes apply only while
+    it is unchanged and `lease_expires_ms` is in the future. Pause and cancel requests are their own columns, so a
+    request from another caller is never lost to the holder's next write."""
+
     __tablename__ = "tasks"
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(128), index=True)
@@ -21,6 +26,12 @@ class TaskRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     body: Mapped[str] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    lease_owner: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    lease_fence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    lease_expires_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    pause_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
 
 class EventRow(Base):
@@ -35,6 +46,7 @@ class EventRow(Base):
 
 class ArtifactRow(Base):
     __tablename__ = "artifacts"
+    __table_args__ = (UniqueConstraint("task_id", "name", "version", name="uq_artifact_version"),)
     artifact_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     task_id: Mapped[str] = mapped_column(String(64), index=True)
     name: Mapped[str] = mapped_column(String(256), index=True)
@@ -214,6 +226,9 @@ class LearningCycleRow(Base):
     version: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     body: Mapped[str] = mapped_column(Text)
+    # Copies of the body's drive lease, so a driver's write can check its token and expiry in the same statement.
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    lease_expires_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
 
 
 class LearningCycleSlotRow(Base):

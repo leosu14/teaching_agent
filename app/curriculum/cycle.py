@@ -24,6 +24,7 @@ from datetime import datetime
 
 from app.schemas.curriculum import LESSON_ACTIONS, LearningActionType, NextLearningAction, ObjectiveProgress
 from app.schemas.curriculum import ObjectiveStatus
+from app.schemas.common import new_id
 from app.schemas.events import EventType
 from app.schemas.learner import stable_id
 from app.schemas.learning_cycle import (
@@ -46,7 +47,7 @@ from app.schemas.learning_cycle import (
 __all__ = ["CycleConflict", "CycleNotFound", "InvalidCycleRequest", "InvalidCycleTransition", "Observation",
            "STEP_POLICY", "action_problem", "attach_child", "begin_step", "cancel", "classify_task_failure",
            "complete", "cycle_id_for", "fail", "observe", "plan_steps", "published", "receive", "record_artifact",
-           "release", "resume", "claim", "start"]
+           "release", "renew", "resume", "claim", "start"]
 
 
 class CycleNotFound(KeyError):
@@ -140,11 +141,24 @@ def start(*, learner_id: str, user_id: str, idempotency_key: str, action: NextLe
 def claim(cycle: LearningCycle, at: datetime, until: datetime) -> LearningCycle | None:
     """The drive lease, or None while another holder's lease runs. Written (version-checked) before any child is
     created, run, resumed or given a response, so two requests never drive the same cycle's children at once; a
-    lease left by a crash expires at `until`. The token is the claiming version: unique, not random."""
+    lease left by a crash expires at `until`. Each claim raises the cycle's fencing generation and gets a fresh random
+    token: every earlier holder is stale, and its writes (checked against the token and expiry) are refused."""
     if cycle.lease is not None and cycle.lease.until > at:
         return None
     new = _next(cycle, at)
-    new.lease = CycleLease(token=stable_id("lclease", cycle.cycle_id, str(new.version)), until=until)
+    new.lease_generation = cycle.lease_generation + 1
+    new.lease = CycleLease(token=new_id("lclease"), until=until, generation=new.lease_generation)
+    return new
+
+
+def renew(cycle: LearningCycle, token: str, at: datetime, until: datetime) -> LearningCycle | None:
+    """Extend the holder's lease while it is still current and unexpired (None otherwise: an expired lease is never
+    renewed, only claimed again, which fences its old holder out)."""
+    if cycle.lease is None or cycle.lease.token != token or cycle.lease.until <= at:
+        return None
+    new = _next(cycle, at)
+    assert new.lease is not None
+    new.lease.until = until
     return new
 
 

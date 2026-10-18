@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, func, select, update
+from collections.abc import Callable, Iterable
+from datetime import datetime, timedelta
+
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -17,10 +20,18 @@ from app.schemas.assessment import (
     ItemConflict,
 )
 from app.schemas.curriculum import CurriculumProgress, CurriculumRecord, CurriculumVersion, VersionConflict
+from app.schemas.common import utcnow
 from app.schemas.events import Event
-from app.schemas.learning_cycle import TERMINAL_CYCLE_STATUSES, CycleConflict, CycleRequestRecord, LearningCycle
+from app.schemas.lease import Lease, LeaseLost, WriteConflict
+from app.schemas.learning_cycle import (
+    TERMINAL_CYCLE_STATUSES,
+    CycleConflict,
+    CycleLeaseLost,
+    CycleRequestRecord,
+    LearningCycle,
+)
 from app.schemas.learner import EvidenceConflict, LearnerProfile, LearningEvent, LearningEvidence, LearningGoal
-from app.schemas.task import Task
+from app.schemas.task import Task, TaskControl
 from app.schemas.teaching import (
     InteractionEvidence,
     OutboxItem,
@@ -60,37 +71,195 @@ class NotFound(KeyError):
     pass
 
 
-class SqlTaskRepository:
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
-        self._sessions = sessions
+Clock = Callable[[], datetime]
 
-    def save(self, task: Task) -> None:
+
+def _ms(at: datetime) -> int:
+    return int(at.timestamp() * 1000)
+
+
+def _require_fence(s: Session, lease: Lease, now: datetime) -> None:
+    """Inside the caller's transaction: refuse the write unless `lease` is still the task's current, unexpired lease.
+    The check is itself a (no-op) UPDATE of the task row, so it takes the row's write lock and nobody can claim the
+    task between this check and the caller's commit."""
+    if lease.resource != "task":
+        raise ValueError(f"no fence check for resource {lease.resource}")
+    checked = s.execute(update(TaskRow).where(
+        TaskRow.task_id == lease.resource_id, TaskRow.lease_fence == lease.fence, TaskRow.lease_owner == lease.owner,
+        TaskRow.lease_expires_ms > _ms(now)).values(lease_fence=TaskRow.lease_fence))
+    if checked.rowcount != 1:
+        raise LeaseLost(lease)
+
+
+class SqlTaskRepository:
+    """Tasks, their execution lease and their pause/cancel requests.
+
+    Two kinds of write: a leased write (`save(task, lease=...)`) by the worker executing the task, applied only while
+    its lease is current and unexpired; and an unleased write (`save(task)`), version-checked against `task.version`
+    and refused while any worker holds a live lease. Both raise the version, so neither silently overwrites the other.
+    """
+
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+        self._sessions = sessions
+        self._clock = clock
+
+    def create(self, task: Task) -> bool:
+        """Insert a new task; False (nothing written) when the id exists."""
+        try:
+            with self._sessions.begin() as s:
+                if s.get(TaskRow, task.task_id) is not None:
+                    return False
+                task.version = 1
+                s.add(self._row(task))
+                s.flush()
+        except IntegrityError:
+            return False
+        return True
+
+    def save(self, task: Task, *, lease: Lease | None = None, clear_control: Iterable[str] = ()) -> None:
+        """Write the task's body and status and raise its version. `clear_control` names requests ("pause",
+        "cancel") the holder has acted on. Raises LeaseLost (leased) or WriteConflict (unleased); nothing is written
+        then."""
+        now = self._clock()
+        body = task.model_copy(update={"version": task.version + 1})
+        values: dict = {"status": task.status.value, "updated_at": task.updated_at, "body": body.model_dump_json(),
+                        "version": TaskRow.version + 1}
+        for name in clear_control:
+            values[{"pause": "pause_requested", "cancel": "cancel_requested"}[name]] = False
         with self._sessions.begin() as s:
-            s.merge(TaskRow(
-                task_id=task.task_id, user_id=task.user_id, learner_id=task.learner_id,
-                status=task.status.value, created_at=task.created_at, updated_at=task.updated_at,
-                body=task.model_dump_json(),
-            ))
+            if lease is not None:
+                if lease.resource_id != task.task_id:
+                    raise ValueError("the lease is for another task")
+                done = s.execute(update(TaskRow).where(
+                    TaskRow.task_id == task.task_id, TaskRow.lease_fence == lease.fence,
+                    TaskRow.lease_owner == lease.owner, TaskRow.lease_expires_ms > _ms(now)).values(**values))
+                if done.rowcount != 1:
+                    raise LeaseLost(lease)
+            elif s.get(TaskRow, task.task_id) is None:
+                task.version = 1
+                s.add(self._row(task))
+                return
+            else:
+                done = s.execute(update(TaskRow).where(
+                    TaskRow.task_id == task.task_id, TaskRow.version == task.version,
+                    or_(TaskRow.lease_owner.is_(None), TaskRow.lease_expires_ms <= _ms(now))).values(**values))
+                if done.rowcount != 1:
+                    raise WriteConflict(f"task {task.task_id} changed concurrently or is being executed "
+                                        f"(expected version {task.version})")
+        task.version += 1
 
     def get(self, task_id: str) -> Task:
         with self._sessions() as s:
             row = s.get(TaskRow, task_id)
             if row is None:
                 raise NotFound(task_id)
-            return Task.model_validate_json(row.body)
+            return self._task(row)
 
     def list_for_learner(self, learner_id: str) -> list[Task]:
         with self._sessions() as s:
             rows = s.scalars(select(TaskRow).where(TaskRow.learner_id == learner_id).order_by(TaskRow.created_at))
-            return [Task.model_validate_json(r.body) for r in rows]
+            return [self._task(r) for r in rows]
+
+    # --- the execution lease --------------------------------------------------------------------------------------
+
+    def claim(self, task_id: str, owner: str, ttl: timedelta) -> Lease | None:
+        """Take the task's lease when nobody holds a live one, raising its fencing generation: every earlier holder
+        is stale from this commit on. None while another worker's lease runs."""
+        now = self._clock()
+        until = now + ttl
+        with self._sessions.begin() as s:
+            done = s.execute(update(TaskRow).where(
+                TaskRow.task_id == task_id,
+                or_(TaskRow.lease_owner.is_(None), TaskRow.lease_expires_ms <= _ms(now)))
+                .values(lease_owner=owner, lease_fence=TaskRow.lease_fence + 1, lease_expires_ms=_ms(until)))
+            if done.rowcount != 1:
+                if s.get(TaskRow, task_id) is None:
+                    raise NotFound(task_id)
+                return None
+            fence = s.scalar(select(TaskRow.lease_fence).where(TaskRow.task_id == task_id))
+        return Lease(resource_id=task_id, owner=owner, fence=fence, until=until)
+
+    def renew(self, lease: Lease, ttl: timedelta) -> Lease | None:
+        """Extend a lease that is still current and unexpired; None when it was lost (an expired lease is never
+        renewed: it must be claimed again, which makes its old holder stale)."""
+        now = self._clock()
+        until = now + ttl
+        with self._sessions.begin() as s:
+            done = s.execute(update(TaskRow).where(
+                TaskRow.task_id == lease.resource_id, TaskRow.lease_fence == lease.fence,
+                TaskRow.lease_owner == lease.owner, TaskRow.lease_expires_ms > _ms(now))
+                .values(lease_expires_ms=_ms(until)))
+        return lease.model_copy(update={"until": until}) if done.rowcount == 1 else None
+
+    def release(self, lease: Lease) -> bool:
+        """Give the lease back (the generation stays). False when it had already been taken over."""
+        with self._sessions.begin() as s:
+            done = s.execute(update(TaskRow).where(
+                TaskRow.task_id == lease.resource_id, TaskRow.lease_fence == lease.fence,
+                TaskRow.lease_owner == lease.owner).values(lease_owner=None, lease_expires_ms=None))
+        return done.rowcount == 1
+
+    def holds(self, lease: Lease) -> bool:
+        """Whether `lease` is still the task's current, unexpired lease (a pre-check; writes check atomically)."""
+        with self._sessions() as s:
+            row = s.get(TaskRow, lease.resource_id)
+            return (row is not None and row.lease_fence == lease.fence and row.lease_owner == lease.owner
+                    and row.lease_expires_ms is not None and row.lease_expires_ms > _ms(self._clock()))
+
+    def lease(self, task_id: str) -> Lease | None:
+        """The live lease on the task, if any (diagnostics)."""
+        with self._sessions() as s:
+            row = s.get(TaskRow, task_id)
+            if row is None:
+                raise NotFound(task_id)
+            if row.lease_owner is None or row.lease_expires_ms is None or row.lease_expires_ms <= _ms(self._clock()):
+                return None
+            until = datetime.fromtimestamp(row.lease_expires_ms / 1000, tz=self._clock().tzinfo)
+            return Lease(resource_id=task_id, owner=row.lease_owner, fence=row.lease_fence, until=until)
+
+    # --- pause and cancel requests from other callers -------------------------------------------------------------
+
+    def control(self, task_id: str) -> TaskControl:
+        with self._sessions() as s:
+            row = s.get(TaskRow, task_id)
+            if row is None:
+                raise NotFound(task_id)
+            return TaskControl(pause_requested=bool(row.pause_requested), cancel_requested=bool(row.cancel_requested))
+
+    def request_control(self, task_id: str, *, pause: bool = False, cancel: bool = False) -> None:
+        """Set a request flag in one statement: never lost to, nor overwritten by, the executing worker's writes."""
+        values = {k: True for k, on in (("pause_requested", pause), ("cancel_requested", cancel)) if on}
+        if values:
+            with self._sessions.begin() as s:
+                s.execute(update(TaskRow).where(TaskRow.task_id == task_id).values(**values))
+
+    @staticmethod
+    def _row(task: Task) -> TaskRow:
+        return TaskRow(task_id=task.task_id, user_id=task.user_id, learner_id=task.learner_id,
+                       status=task.status.value, created_at=task.created_at, updated_at=task.updated_at,
+                       body=task.model_dump_json(), version=task.version, lease_fence=0,
+                       pause_requested=task.control.pause_requested, cancel_requested=task.control.cancel_requested)
+
+    @staticmethod
+    def _task(row: TaskRow) -> Task:
+        task = Task.model_validate_json(row.body)
+        task.version = row.version
+        task.control = TaskControl(pause_requested=bool(row.pause_requested),
+                                   cancel_requested=bool(row.cancel_requested))
+        return task
 
 
 class SqlEventRepository:
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
+        self._clock = clock
 
-    def append(self, event: Event) -> None:
+    def append(self, event: Event, fence: Lease | None = None) -> None:
+        """Store an event once. With `fence` (written by a task's worker) only while that worker's lease is current;
+        otherwise LeaseLost and nothing is stored."""
         with self._sessions.begin() as s:
+            if fence is not None:
+                _require_fence(s, fence, self._clock())
             if s.scalar(select(EventRow.seq).where(EventRow.event_id == event.event_id)) is not None:
                 return  # an event with a stable id published again (e.g. after a restart) is stored once
             s.add(EventRow(event_id=event.event_id, task_id=event.task_id, type=event.type, at=event.at,
@@ -103,16 +272,30 @@ class SqlEventRepository:
 
 
 class SqlArtifactRepository:
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
+        self._clock = clock
 
-    def add(self, artifact: Artifact) -> None:
-        with self._sessions.begin() as s:
-            s.add(ArtifactRow(
-                artifact_id=artifact.artifact_id, task_id=artifact.task_id, name=artifact.name,
-                type=artifact.type.value, version=artifact.version, content_hash=artifact.content_hash,
-                body=artifact.model_dump_json(),
-            ))
+    def add(self, artifact: Artifact, fence: Lease | None = None) -> None:
+        """Record an artifact version. With `fence` (stored by a task's worker) only while that worker's lease is
+        current: LeaseLost otherwise. A version another writer already recorded is a WriteConflict."""
+        try:
+            with self._sessions.begin() as s:
+                if fence is not None:
+                    _require_fence(s, fence, self._clock())
+                self._insert(s, artifact)
+        except IntegrityError as exc:
+            raise WriteConflict(f"artifact {artifact.task_id}/{artifact.name} v{artifact.version} already exists") \
+                from exc
+
+    @staticmethod
+    def _insert(s: Session, artifact: Artifact) -> None:
+        s.add(ArtifactRow(
+            artifact_id=artifact.artifact_id, task_id=artifact.task_id, name=artifact.name,
+            type=artifact.type.value, version=artifact.version, content_hash=artifact.content_hash,
+            body=artifact.model_dump_json(),
+        ))
+        s.flush()
 
     def get(self, artifact_id: str) -> Artifact:
         with self._sessions() as s:
@@ -380,8 +563,9 @@ class SqlAssessmentRepository:
 
     ATTEMPT_RETRIES = 5  # a concurrent attempt took the same attempt number: take the next one
 
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
+        self._clock = clock
 
     def _save(self, row_type, key: str, value, **columns) -> bool:
         digest = value.content_hash()
@@ -416,10 +600,15 @@ class SqlAssessmentRepository:
             row = s.get(AssessmentRubricRow, rubric_id)
             return AssessmentRubric.model_validate_json(row.body) if row else None
 
-    def add_attempt(self, attempt: AssessmentAttempt, grade: AssessmentGrade) -> AssessmentAttempt:
+    def add_attempt(self, attempt: AssessmentAttempt, grade: AssessmentGrade,
+                    fence: Lease | None = None) -> AssessmentAttempt:
+        """Both rows in one transaction. With `fence` (a task worker grading), only while that worker's lease is
+        current: the check is the transaction's first statement, so a refused write (LeaseLost) stores neither row."""
         for _ in range(self.ATTEMPT_RETRIES):
             try:
                 with self._sessions.begin() as s:
+                    if fence is not None:
+                        _require_fence(s, fence, self._clock())
                     if s.get(AssessmentAttemptRow, attempt.attempt_id) is not None:
                         raise AttemptExists(attempt.attempt_id)
                     count = s.scalar(select(func.count()).select_from(AssessmentAttemptRow).where(
@@ -455,8 +644,11 @@ class SqlAssessmentRepository:
             row = s.get(AssessmentGradeRow, grade_id)
             return AssessmentGrade.model_validate_json(row.body) if row else None
 
-    def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at) -> AssessmentAttempt:
+    def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at,
+                 fence: Lease | None = None) -> AssessmentAttempt:
         with self._sessions.begin() as s:
+            if fence is not None:
+                _require_fence(s, fence, self._clock())
             row = s.get(AssessmentAttemptRow, attempt_id)
             if row is None:
                 raise KeyError(attempt_id)
@@ -465,6 +657,11 @@ class SqlAssessmentRepository:
                 current = current.model_copy(update={"completed_at": at, "outcome": outcome})
                 row.body = current.model_dump_json()
             return current
+
+
+def _cycle_lease_columns(cycle: LearningCycle) -> dict:
+    lease = cycle.lease
+    return {"lease_token": lease.token if lease else None, "lease_expires_ms": _ms(lease.until) if lease else None}
 
 
 class SqlLearningCycleRepository:
@@ -481,7 +678,7 @@ class SqlLearningCycleRepository:
                     return False
                 s.add(LearningCycleRow(cycle_id=cycle.cycle_id, learner_id=cycle.learner_id, status=cycle.status.value,
                                        version=cycle.version, created_at=cycle.created_at,
-                                       body=cycle.model_dump_json()))
+                                       body=cycle.model_dump_json(), **_cycle_lease_columns(cycle)))
                 s.add(LearningCycleSlotRow(learner_id=cycle.learner_id, cycle_id=cycle.cycle_id))
                 s.flush()
         except IntegrityError:
@@ -492,14 +689,25 @@ class SqlLearningCycleRepository:
                 from None
         return True
 
-    def apply(self, cycle: LearningCycle, expected_version: int, request: CycleRequestRecord | None = None) -> None:
+    def apply(self, cycle: LearningCycle, expected_version: int, request: CycleRequestRecord | None = None, *,
+              lease_token: str | None = None, at: datetime | None = None) -> None:
+        """Write the change if the stored cycle is still `expected_version`. With `lease_token` (a driver's write) the
+        same statement also requires that lease to be the stored one and unexpired at `at`: CycleLeaseLost otherwise,
+        so a driver whose lease ran out or was taken over commits nothing."""
+        where = [LearningCycleRow.cycle_id == cycle.cycle_id, LearningCycleRow.version == expected_version]
+        if lease_token is not None:
+            where += [LearningCycleRow.lease_token == lease_token,
+                      LearningCycleRow.lease_expires_ms > _ms(at or utcnow())]
         try:
             with self._sessions.begin() as s:
                 updated = s.execute(
-                    update(LearningCycleRow)
-                    .where(LearningCycleRow.cycle_id == cycle.cycle_id, LearningCycleRow.version == expected_version)
-                    .values(version=cycle.version, status=cycle.status.value, body=cycle.model_dump_json()))
+                    update(LearningCycleRow).where(*where)
+                    .values(version=cycle.version, status=cycle.status.value, body=cycle.model_dump_json(),
+                            **_cycle_lease_columns(cycle)))
                 if updated.rowcount != 1:
+                    if lease_token is not None and s.scalar(select(LearningCycleRow.version).where(
+                            LearningCycleRow.cycle_id == cycle.cycle_id)) == expected_version:
+                        raise CycleLeaseLost(f"cycle {cycle.cycle_id}: the drive lease expired or was taken over")
                     raise CycleConflict(f"cycle {cycle.cycle_id} changed concurrently "
                                         f"(expected version {expected_version})")
                 if cycle.status in TERMINAL_CYCLE_STATUSES:

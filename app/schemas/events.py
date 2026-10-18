@@ -20,6 +20,7 @@ class EventType:
     TASK_CANCELLED = "task.cancelled"
     TASK_COMPLETED = "task.completed"
     TASK_FAILED = "task.failed"
+    TASK_LEASE_LOST = "task.lease_lost"  # a worker's write was refused: its lease expired or was taken over
     NODE_STARTED = "node.started"
     NODE_FINISHED = "node.finished"
     NODE_FAILED = "node.failed"
