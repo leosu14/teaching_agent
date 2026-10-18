@@ -15,9 +15,9 @@ BUDGET_KEY = "budget"  # where a task's budget lives in Task.metadata
 
 
 class TaskBudget(Schema):
-    """Hard limits for one task. None means "no limit". Request and unit limits are checked before each provider
-    request; limits that are only known after a request (tokens, audio seconds, cost) stop the task at the first
-    request that reaches them."""
+    """Hard limits for one task (or one session, attempt or day: see BudgetDefaults). None means "no limit". Each
+    provider attempt reserves its estimate against them before it is sent and is refused when it does not fit;
+    reported usage replaces the estimate afterwards (see app/observability/spend.py)."""
 
     max_llm_requests: int | None = Field(default=None, ge=0)
     max_llm_tokens: int | None = Field(default=None, ge=0)  # input + output
@@ -35,6 +35,21 @@ class TaskBudget(Schema):
     def of(cls, metadata: dict) -> TaskBudget | None:
         raw = metadata.get(BUDGET_KEY)
         return cls.model_validate(raw) if raw else None
+
+
+class BudgetDefaults(Schema):
+    """Budgets for work that carries none of its own. `task` applies to every task whose metadata has no budget
+    (production runs keep theirs); `session` to a teaching session's teacher turns; `attempt` to grading one
+    assessment attempt submitted through the API. The daily caps (per learner, and across everything) apply on top
+    of those when set; None turns them off. A reservation abandoned by a crashed process is presumed lost (and its
+    estimate charged) `reservation_grace_seconds` after its attempt's timeout."""
+
+    task: TaskBudget = Field(default_factory=TaskBudget)
+    session: TaskBudget = Field(default_factory=TaskBudget)
+    attempt: TaskBudget = Field(default_factory=TaskBudget)
+    learner_daily: TaskBudget | None = None
+    global_daily: TaskBudget | None = None
+    reservation_grace_seconds: float = Field(default=60.0, ge=0)
 
 
 class TaskUsage(Schema):
