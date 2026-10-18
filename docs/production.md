@@ -91,30 +91,88 @@ for other subjects and topics; nothing in the pipeline is specific to Spanish.
 
 ## Budgets
 
-Every production task carries a budget in its metadata (`task.metadata["budget"]`, visible with the task). The
-provider layer checks it before every billable request and stops the task with `BudgetExceededError` instead of
-exceeding it. A budget stop is never retried and never falls back to another provider.
+Every task carries a budget: the one in its metadata (`task.metadata["budget"]`, set by a production run and visible
+with the task), otherwise these production limits. Each billable provider attempt reserves its estimate against the
+budget before it is sent, and the task stops with `BudgetExceededError` when the attempt does not fit, so a request
+that would exceed a limit is never sent. A budget stop is never retried and never falls back to another provider.
 
 | Variable | Default | Checked |
 |---|---|---|
 | `MAX_LLM_REQUESTS` | `80` | before each LLM request (failed attempts count) |
-| `MAX_LLM_TOKENS` | `600000` | before each request (stops once used up) and after each response |
+| `MAX_LLM_TOKENS` | `600000` | before each request, with its estimate (input characters / 3 + the request's output limit); the reported tokens replace the estimate after the response |
 | `MAX_SEARCH_REQUESTS` | `20` | before each search request (failed attempts count) |
 | `MAX_GENERATED_IMAGES` | `4` | in the visual plan (a plan over budget is sent back for revision) and before each generation |
 | `MAX_SEARCHED_IMAGES` | `0` | in the visual plan (there is no real image search adapter yet; see limitations) |
 | `MAX_TTS_CHARACTERS` | `30000` | before each synthesis, with that segment's characters |
-| `MAX_TTS_SECONDS` | `1800` | before each synthesis (stops once used up) and after each response |
-| `MAX_COST_USD` | none | before each request and after each response, against the *known* cost |
+| `MAX_TTS_SECONDS` | `1800` | before each synthesis, with an estimate (12 characters per second), then the reported seconds |
+| `MAX_COST_USD` | none | before each request with its priced estimate, then the known cost after the response |
 | `MAX_GENERATED_VIDEO_SEGMENTS` | `2` | in the video segment plan and before each video generation job |
 | `MAX_GENERATED_VIDEO_SECONDS` | `20` | in the video segment plan and before each job, with that clip's seconds |
-| `MAX_VIDEO_GENERATION_COST_USD` | none | in the video segment plan, when `VIDEO_GENERATION_PRICE_PER_SECOND` is set |
+| `MAX_VIDEO_GENERATION_COST_USD` | none | in the video segment plan, when `VIDEO_GENERATION_PRICE_PER_SECOND` is set, and before each job |
 | `PRODUCTION_HEALTH_TIMEOUT_SECONDS` | `20` | per provider health check |
 
-Limits that are only known from a response (tokens, audio seconds, cost) can be overrun by at most the one request
-that crossed them. `MAX_COST_USD` only counts costs that are known: vendor-reported costs, or configured LLM pricing.
-When a provider's price is unknown the report says so (`cost_complete: false`, `unpriced: [...]`) and the unit limits
-are what bounds the spending. A budget-stopped task can be resumed after raising the limit; the new limits are applied
-on resume.
+Estimated limits (tokens, audio seconds, cost) need at least one unit of room: a limit that is used up stops the next
+request even when its estimate is zero. A response that reports more than its estimate (more input tokens than the
+character estimate allowed for) can take a limit past its value by that difference; the task then stops at that
+response. `MAX_COST_USD` only counts costs that are known: vendor-reported costs, configured LLM pricing, or, for an
+attempt whose outcome is unknown, configured pricing applied to its estimate. When a provider's price is unknown the
+report says so (`cost_complete: false`, `unpriced: [...]`) and the unit limits are what bounds the spending. A
+budget-stopped task can be resumed after raising the limit; the new limits are applied on resume.
+
+Interactive work has its own budgets (see [configuration](configuration.md#budgets)): the teacher turns of a teaching
+session, and the grading of one assessment attempt submitted through the API. When one is used up the route answers
+**429** with fixed text (`BudgetExhausted`: "The spending limit for this work has been reached. Try again later.");
+nothing is sent to the provider, the learner's answer stays stored where it already was, and 503 keeps meaning that the
+teacher or a provider is unavailable. Daily caps per learner and across all work are off by default.
+
+### The spend ledger
+
+Every billable attempt has one entry in `spend_entries`, keyed by our own request id (`preq_...`, generated before the
+reservation; a provider's request id is stored alongside when it returns one, and never relied on). Retries are
+separate attempts of the same operation (`pop_...`). Each entry ends in one state:
+
+| State | Meaning | Charged to the budget |
+|---|---|---|
+| `reserved` | sent or about to be; outcome not yet recorded | the estimate (as reserved, not settled) |
+| `settled` | the provider answered | what it reported (`usage_source: reported`), or the estimate for what it did not report (`partial` / `estimate`) |
+| `failed` | the provider refused it (authentication, invalid request, rate limit, unavailable) | the request count only |
+| `unknown` | it may have been billed: a timeout, a cancellation after sending, an unusable answer, or an abandoned reservation | the estimate |
+| `released` | never sent (cancelled while waiting for a rate-limit slot, or refused before sending) | nothing |
+
+Usage and cost carry their source (`usage_source`, `cost_source`: `reported`, `priced`, `estimate`, `unpriced`), so
+an estimate is never presented as provider-reported spend. Entries hold ids and numbers only: no prompt, answer,
+learner text or provider payload.
+
+**Atomicity.** A reservation is one transaction: the task lease check (task workers only), then one conditional
+increment per counter in sorted order (`settled + reserved + estimate <= limit` in the UPDATE's WHERE), then the
+entry. Two concurrent reservations cannot both pass on the same old value. Settlement is one transaction too: a
+conditional state change of the entry (from `reserved`, or from `unknown` to `settled` once) and the counter
+adjustments; a repeated settlement matches no row and changes nothing (`duplicate`), a different one is refused
+(`conflict`; the first stands). Reserving the same entry id again is a no-op. A video generation job's generation key
+allows at most one reserved attempt at a time (a partial unique index).
+
+**Lease loss.** A task worker that lost its lease cannot reserve (the reservation is fenced like its other writes),
+but an attempt it already sent is settled and kept: settlement is never fenced and does not depend on the task's state
+being saved. Such a late settlement emits `spend.after_lease_loss`; the new lease holder's next reservation sees it in
+the counters.
+
+**Crash recovery, without a background worker.** A reservation is valid until `reserved_until` (the attempt's timeout
+plus `TA_SPEND_RESERVATION_GRACE_SECONDS`, 60 by default). The next reservation anyone makes after that, and every
+production report, first sweeps the expired ones: each becomes `unknown` with its estimate charged (`error_type:
+Abandoned`, `usage_source: estimate`) and emits `spend.abandoned`. This is deliberately conservative: a call that may
+have been billed is charged its upper-bound estimate rather than nothing. If the original process does record the real
+outcome later, the reported usage replaces the estimate once (`unknown` to `settled`); a late failure or release
+cannot undo the charge. A storage error while settling is retried a bounded number of times; if it persists the entry
+stays reserved and the sweep charges it.
+
+**Tested with.** The atomicity, idempotency and fencing guarantees are tested on SQLite (threads and separate
+processes on one database file; SQLite's single writer serializes the transactions). `tests/postgres` runs the same
+races, the lease fence, the in-flight key and the sweep on PostgreSQL, where row locks serialize the conditional
+increments; it is skipped unless `TA_TEST_POSTGRES_URL` is set (it needs a driver such as `psycopg`) and does not run
+in CI.
+
+**Earlier spend.** A task that ran before the ledger existed is seeded once from its checkpointed usage when it runs
+again, so its earlier spend still counts against its budget. The tables are created on startup; nothing else migrates.
 
 ## Running
 
@@ -158,7 +216,10 @@ is unhealthy (nothing was generated).
   providers and models, LLM routes, budget, health, the artifact graph (every artifact with its parents, the node
   that created it and that node's provider request ids), the graph check, a per-node trace, usage, estimated cost
   (and whether it is complete), warnings, errors (with their category and stage), the final video reference and
-  per-stage counts. It never contains a credential.
+  per-stage counts, and `spend`: the task's budget counters from the spend ledger (`settled` and still `reserved`,
+  per metric, in counter units: tokens, milliseconds, micro-USD), its attempts, how many are `unknown` and how many
+  were settled with (part of) an estimate, and how many task workers spent (more than one after a takeover or a
+  resume). It never contains a credential.
 - A human-readable summary on stdout (research, lesson, visuals, presentation, audio, video, usage, artifacts).
 - With `--export`, copies of the video, presentation and subtitles. The canonical artifacts stay in the object store
   (`TA_DATA_DIR/objects`); nothing else is written to `--output`.

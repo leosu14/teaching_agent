@@ -145,6 +145,21 @@ bound generated video segments in every lesson that asks for them: the video str
 production tasks also enforce them before each submission. See
 [production](production.md) for the variables, defaults, the dry run, confirmation, resume and the run report.
 
+## Budgets
+
+Every billable provider attempt is reserved against its work's budgets before it is sent (see
+[production](production.md#budgets) for the ledger and its crash-recovery policy). Tasks without a budget of their
+own use the production limits (`MAX_LLM_REQUESTS`, `MAX_LLM_TOKENS`, ...). Interactive work has its own limits; an
+exhausted one answers HTTP 429.
+
+| Variable | Default | Budget |
+|---|---|---|
+| `TA_BUDGET_SESSION_MAX_LLM_REQUESTS` / `_MAX_LLM_TOKENS` / `_MAX_COST_USD` | `200` / `400000` / none | All teacher turns of one teaching session (and the grading of the answers it submits) |
+| `TA_BUDGET_ATTEMPT_MAX_LLM_REQUESTS` / `_MAX_LLM_TOKENS` / `_MAX_COST_USD` | `6` / `100000` / none | Grading one assessment attempt outside a task |
+| `TA_BUDGET_LEARNER_DAILY_MAX_LLM_REQUESTS` / `_MAX_LLM_TOKENS` / `_MAX_COST_USD` | none | All of one learner's work per UTC day (off unless set) |
+| `TA_BUDGET_GLOBAL_DAILY_MAX_LLM_REQUESTS` / `_MAX_LLM_TOKENS` / `_MAX_COST_USD` | none | All work per UTC day (off unless set) |
+| `TA_SPEND_RESERVATION_GRACE_SECONDS` | `60` | How long after its timeout an unsettled reservation is presumed abandoned and charged its estimate |
+
 ## Model routing (`config/routing.toml`)
 
 ```toml
