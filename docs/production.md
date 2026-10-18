@@ -169,8 +169,9 @@ stays reserved and the sweep charges it.
 **Tested with.** The atomicity, idempotency and fencing guarantees are tested on SQLite (threads and separate
 processes on one database file; SQLite's single writer serializes the transactions). `tests/postgres` runs the same
 races, the lease fence, the in-flight key and the sweep on PostgreSQL, where row locks serialize the conditional
-increments; it is skipped unless `TA_TEST_POSTGRES_URL` is set (it needs a driver such as `psycopg`) and does not run
-in CI.
+increments. CI runs it in its own job against a `postgres:16` service; locally it is skipped unless
+`TA_TEST_POSTGRES_URL` is set (`pip install -e ".[postgres]"` installs the driver). Only the PostgreSQL job can catch a
+regression to check-then-write: SQLite serializes it anyway.
 
 **Earlier spend.** A task that ran before the ledger existed is seeded once from its checkpointed usage when it runs
 again, so its earlier spend still counts against its budget. The tables are created on startup; nothing else migrates.
