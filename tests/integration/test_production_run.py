@@ -329,19 +329,31 @@ async def test_image_budget_shapes_the_visual_plan(vendors, tmp_path) -> None:
         c.close()
 
 
-async def test_cost_limit_aborts_once_reported_usage_exceeds_it(vendors, tmp_path) -> None:
+async def test_cost_limit_refuses_the_request_whose_estimate_would_cross_it(vendors, tmp_path) -> None:
+    """Each request reserves its priced estimate (input estimate + its output limit) before it is sent, so the run
+    stops at the first request that would not fit, and what it spent stays within the limit."""
     settings = production_settings(tmp_path, llm_input_price_per_mtok=1000.0, llm_output_price_per_mtok=1000.0,
-                                   budget={"max_cost_usd": 5.0})
+                                   budget={"max_cost_usd": 30.0})
     c = vendors.container(settings)
     try:
         task = (await c.production.run(await c.production.plan(TASK), answer=answer)).task
         assert task.status == TaskStatus.FAILED and task.errors[-1].category == "BudgetExceededError"
         assert "MAX_COST_USD" in task.errors[-1].message
-        usage = c.production.report(RunOutcome(task=task), await c.production.plan(TASK),
-                                    start_time=task.created_at).usage
-        # It stopped at the request that crossed the limit: at most one request's worth over it.
-        last = max(r.estimated_cost_usd or 0 for r in task.cost.provider_requests)
-        assert 5.0 < usage.estimated_cost_usd <= 5.0 + last
+        report = c.production.report(RunOutcome(task=task), await c.production.plan(TASK), start_time=task.created_at)
+        assert task.cost.provider_requests and 0 < report.usage.estimated_cost_usd <= 30.0
+        assert report.spend.reserved == {} and report.spend.unknown_attempts == 0
+    finally:
+        c.close()
+
+
+async def test_a_cost_limit_smaller_than_one_request_sends_nothing(vendors, tmp_path) -> None:
+    settings = production_settings(tmp_path, llm_input_price_per_mtok=1000.0, llm_output_price_per_mtok=1000.0,
+                                   budget={"max_cost_usd": 1.0})
+    c = vendors.container(settings)
+    try:
+        task = (await c.production.run(await c.production.plan(TASK), answer=answer)).task
+        assert task.status == TaskStatus.FAILED and "MAX_COST_USD" in task.errors[-1].message
+        assert task.cost.provider_requests == [] and vendors.count("/v1/chat/completions") == 0
     finally:
         c.close()
 

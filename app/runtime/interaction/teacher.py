@@ -30,9 +30,11 @@ class TeachingRuntime:
         self._router = router
         self._events = events
 
-    async def teacher_turn(self, data: TeachingTurnInput, *, task_id: str) -> tuple[TeacherTurnOutput, UsageLedger]:
+    async def teacher_turn(self, data: TeachingTurnInput, *, task_id: str,
+                           usage: UsageLedger | None = None) -> tuple[TeacherTurnOutput, UsageLedger]:
+        """`usage`: the session's ledger (its account holds the session's budget and records the spend durably)."""
         agent = self._agents.get(AGENT_ID)
-        usage = UsageLedger()
+        usage = usage or UsageLedger()
         scope = ExecutionScope(events=self._events, usage=usage, task_id=task_id, node_id=NODE_ID)
         try:
             output = await agent.execute(data, AgentContext(router=self._router, tools=self._tools, scope=scope))

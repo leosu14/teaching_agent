@@ -143,6 +143,15 @@ class GraphCheck(Schema):
     video_ancestor_types: list[str] = Field(default_factory=list)
 
 
+class SpendSummary(Schema):
+    settled: dict[str, int] = Field(default_factory=dict)  # metric -> counter units (tokens, ms, micro-USD, ...)
+    reserved: dict[str, int] = Field(default_factory=dict)
+    attempts: int = 0
+    unknown_attempts: int = 0
+    estimated_attempts: int = 0  # settled with (part of) their usage or cost estimated, not reported
+    workers: int = 0  # task workers (leases) that spent: more than one after a takeover or a resume
+
+
 class ProductionReport(Schema):
     report_version: int = 1
     task_id: str
@@ -173,3 +182,7 @@ class ProductionReport(Schema):
     final_video: FinalVideo | None = None
     summary: dict = Field(default_factory=dict)  # research, lesson, visual, presentation, audio and video counts
     evaluation_task_id: str | None = None
+    # The spend ledger's view of the task (every attempt of every worker, including ones a crashed or superseded worker
+    # never checkpointed): settled and reserved totals per metric of its task budget, and how many attempts are
+    # `unknown` (may have been billed; charged at their estimate, never shown as provider-reported).
+    spend: SpendSummary | None = None

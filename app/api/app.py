@@ -27,6 +27,7 @@ from app.services.assessment import (
     InvalidAssessmentRequest,
     ItemConflict,
 )
+from app.services.budgets import BudgetExhausted
 from app.services.container import Container, build_container
 from app.services.curriculum import InvalidGoal
 from app.services.learning_cycles import CycleConflict, CycleNotFound, InvalidCycleRequest, InvalidCycleTransition
@@ -62,7 +63,7 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
     for exc_type, status in ((NotFound, 404), (UnknownLearner, 404), (UnknownGoal, 404), (InvalidTransition, 409),
                              (InvalidInput, 422), (UnknownFramework, 422), (InvalidGoal, 422), (ConfigError, 500),
                              (TeachingSessionNotFound, 404), (InvalidSessionTransition, 409), (SessionConflict, 409),
-                             (InvalidTeachingRequest, 422), (TeacherUnavailable, 503),
+                             (InvalidTeachingRequest, 422), (TeacherUnavailable, 503), (BudgetExhausted, 429),
                              (AssessmentItemNotFound, 404), (AttemptNotFound, 404), (AttemptConflict, 409),
                              (ItemConflict, 409), (InvalidAssessmentRequest, 422),
                              (CycleNotFound, 404), (CycleConflict, 409), (InvalidCycleTransition, 409),

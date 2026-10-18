@@ -21,6 +21,7 @@ from app.runtime.orchestrator.orchestrator import TASK_LEASE, TaskBusy
 from app.runtime.tasks.state_machine import InvalidTransition
 from app.schemas.common import utcnow
 from app.schemas.lease import LeaseLost
+from app.schemas.spend import SpendState
 from app.schemas.task import TaskStatus
 from app.services.container import Container, build_container
 from tests.conftest import LEARNER, add_demo_learner, answers_for
@@ -221,8 +222,13 @@ async def test_a_worker_whose_lease_was_taken_over_commits_nothing(tmp_path) -> 
         assert after[0] == before[0]  # B's state (and version) untouched
         assert after[2] == before[2]  # no artifact recorded by A
         new_events = [e for e in a.task_service.events(task.task_id) if e.event_id not in set(before[1])]
-        assert [e.type for e in new_events] == ["task.lease_lost"]  # only the internal diagnostic
-        assert new_events[0].data["stale_fence"] == a_fence
+        # Only internal diagnostics: A's model call settled after the takeover (its spend is kept), then A's
+        # writes were refused.
+        assert [e.type for e in new_events] == ["spend.after_lease_loss", "task.lease_lost"]
+        assert new_events[1].data["stale_fence"] == a_fence
+        late = a.spend.entries(task_id=task.task_id)
+        late = [x for x in late if x.entry_id == new_events[0].data["entry_id"]]
+        assert late and late[0].state == SpendState.SETTLED and late[0].lease_fence == a_fence
         assert all(a.artifacts.verify(x) is None for x in a.task_service.artifacts(task.task_id))
 
         final = await finish(b, task.task_id)

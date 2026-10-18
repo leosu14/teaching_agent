@@ -10,13 +10,14 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
 from app.observability.events import EventBus
 from app.observability.redaction import redact_text
-from app.observability.scope import ExecutionScope, UsageLedger
+from app.observability.scope import ExecutionScope, UsageLedger, task_usage
+from app.observability.spend import SpendStore, task_account, task_scope, usage_counters
 from app.providers.llm.router import ModelRouter
 from app.runtime.failures import classify
 from app.runtime.orchestrator.planner import WorkflowPlanner
@@ -29,7 +30,7 @@ from app.schemas.events import EventType
 from app.schemas.lease import Lease, LeaseLost
 from app.schemas.lesson import InterpretRequest, LessonRequest
 from app.schemas.task import Task, TaskControl, TaskError, TaskPlan, TaskStatus
-from app.schemas.usage import TaskBudget
+from app.schemas.usage import BudgetDefaults, TaskBudget
 from app.schemas.workflow import NodeState, NodeStatus, WorkflowState
 
 NodeObserver = Callable[[Task, str], None]
@@ -70,6 +71,9 @@ class Orchestrator:
         observers: Sequence[NodeObserver] = (),
         lease_ttl: timedelta = TASK_LEASE,
         heartbeat_seconds: float | None = None,
+        spend: SpendStore | None = None,
+        budgets: BudgetDefaults | None = None,
+        clock: Callable[[], datetime] = utcnow,
     ) -> None:
         self._tasks = tasks
         self._engine = engine
@@ -82,6 +86,9 @@ class Orchestrator:
         self._observers = list(observers)
         self._lease_ttl = lease_ttl
         self._heartbeat = heartbeat_seconds if heartbeat_seconds is not None else lease_ttl.total_seconds() / 3
+        self._spend = spend
+        self._budgets = budgets or BudgetDefaults()
+        self._clock = clock
 
     # --- commands ----------------------------------------------------------------------------
 
@@ -120,7 +127,7 @@ class Orchestrator:
             return await self._run(self._tasks.get(task_id), lease)
 
     async def _run(self, task: Task, lease: Lease) -> Task:
-        ledger = UsageLedger(task.cost, budget=TaskBudget.of(task.metadata))
+        ledger = self._ledger(task, lease)
         scope = self._scope(task, ledger, lease)
         if task.plan is None:
             if not await self._plan(task, scope, ledger, lease):
@@ -255,7 +262,7 @@ class Orchestrator:
             task = self._tasks.get(task_id)
             if task.status != TaskStatus.CANCELLED or task.plan is None or task.workflow is None:
                 return []
-            ledger = UsageLedger(task.cost, budget=TaskBudget.of(task.metadata))
+            ledger = self._ledger(task, lease)
             scope = self._scope(task, ledger, lease)
             released = await self._engine.release(self._definition(task), task, scope,
                                                   _Hooks(self, task, ledger, lease))
@@ -302,6 +309,20 @@ class Orchestrator:
         finally:
             if lease is not None:
                 self._tasks.release(lease)
+
+    def _ledger(self, task: Task, lease: Lease) -> UsageLedger:
+        """The worker's usage ledger. Its budget is the task's own (production runs keep it in the metadata), else
+        the default task budget. With a spend store, every billable attempt is reserved against the task's counters
+        (and the configured daily caps) in the durable ledger, fenced by this worker's lease, and settled there even
+        if the lease is lost: what earlier workers spent stays counted, whatever their task saves did."""
+        budget = TaskBudget.of(task.metadata) or self._budgets.task
+        if self._spend is None:
+            return UsageLedger(task.cost, budget=budget)
+        # A task last run before the ledger existed: its counters start from the spend its record already shows.
+        self._spend.seed(task_scope(task.task_id), usage_counters(task_usage(task.cost)), now=self._clock())
+        account = task_account(self._spend, self._budgets, task_id=task.task_id, learner_id=task.learner_id,
+                               budget=budget, fence=lease, clock=self._clock)
+        return UsageLedger(task.cost, budget=budget, account=account)
 
     def _scope(self, task: Task, ledger: UsageLedger, lease: Lease) -> ExecutionScope:
         def check() -> None:
