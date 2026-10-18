@@ -21,6 +21,8 @@ dependencies = [
 # Real (network) providers talk plain HTTP through httpx; no vendor SDK is needed. Mock-only use needs none of it.
 providers = ["httpx>=0.27"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27", "ruff>=0.5"]
+# A PostgreSQL driver, for TA_DATABASE_URL=postgresql+psycopg://... and the opt-in tests/postgres suite.
+postgres = ["psycopg[binary]>=3.1"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

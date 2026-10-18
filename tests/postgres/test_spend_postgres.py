@@ -99,6 +99,10 @@ def test_fence_idempotency_and_sweep_on_postgres(store) -> None:
 
     c = new_id("preq")
     spend.reserve(_reservation(task_id, c, ttl=1), fence=None, now=utcnow())
-    assert c in spend.expire_abandoned(utcnow() + timedelta(seconds=5))
+    later = utcnow() + timedelta(seconds=5)
+    while spend.expire_abandoned(later):  # a reused database may hold older expired entries: a sweep takes 100
+        pass
+    [swept] = [e for e in spend.entries(task_id=task_id) if e.entry_id == c]
+    assert swept.state == SpendState.UNKNOWN and swept.error_type == "Abandoned"
     totals = spend.totals([f"task:{task_id}"])[f"task:{task_id}"]["llm_tokens"]
     assert (totals.reserved, totals.settled) == (0, 140)
