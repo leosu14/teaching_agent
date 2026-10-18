@@ -243,6 +243,9 @@ class ProviderInvoker:
 def failure_state(exc: BaseException) -> SpendState:
     """The ledger state of a sent attempt that failed: `failed` when the provider refused or never processed it
     (only request counts are charged), `unknown` when it may have been billed (its estimate is charged)."""
+    billed = getattr(exc, "possibly_billed", None)  # what the transport knows about the vendor's side, if anything
+    if billed is not None:
+        return SpendState.UNKNOWN if billed else SpendState.FAILED
     if isinstance(exc, (ProviderTimeout, TimeoutError, ProviderResponseError)):
         return SpendState.UNKNOWN
     if isinstance(exc, ProviderError):
@@ -255,4 +258,6 @@ def _unknown_reason(exc: BaseException) -> str:
         return "timeout"
     if isinstance(exc, ProviderResponseError):
         return "response_error"
+    if getattr(exc, "possibly_billed", None):
+        return "server_error" if getattr(exc, "status", None) else "connection_lost"
     return "unexpected_error"

@@ -135,8 +135,8 @@ separate attempts of the same operation (`pop_...`). Each entry ends in one stat
 |---|---|---|
 | `reserved` | sent or about to be; outcome not yet recorded | the estimate (as reserved, not settled) |
 | `settled` | the provider answered | what it reported (`usage_source: reported`), or the estimate for what it did not report (`partial` / `estimate`) |
-| `failed` | the provider refused it (authentication, invalid request, rate limit, unavailable) | the request count only |
-| `unknown` | it may have been billed: a timeout, a cancellation after sending, an unusable answer, or an abandoned reservation | the estimate |
+| `failed` | the provider refused it or never received it (authentication, invalid request, rate limit, a 503/529 overload answer, a connection that could not be established) | the request count only |
+| `unknown` | it may have been billed: a timeout, a cancellation after sending, an unusable answer, a response cut off after its headers arrived, a server or gateway error (500, 502, 504, ...), or an abandoned reservation | the estimate |
 | `released` | never sent (cancelled while waiting for a rate-limit slot, or refused before sending) | nothing |
 
 Usage and cost carry their source (`usage_source`, `cost_source`: `reported`, `priced`, `estimate`, `unpriced`), so
