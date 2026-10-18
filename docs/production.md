@@ -92,8 +92,9 @@ for other subjects and topics; nothing in the pipeline is specific to Spanish.
 ## Budgets
 
 Every task carries a budget: the one in its metadata (`task.metadata["budget"]`, set by a production run and visible
-with the task), otherwise these production limits. Each billable provider attempt reserves its estimate against the
-budget before it is sent, and the task stops with `BudgetExceededError` when the attempt does not fit, so a request
+with the task), otherwise these production limits (except `MAX_SEARCHED_IMAGES`, which only production runs apply:
+it is not a spending limit). The visual and video planners plan within that same effective budget. Each billable
+provider attempt reserves its estimate against the budget before it is sent, and the task stops with `BudgetExceededError` when the attempt does not fit, so a request
 that would exceed a limit is never sent. A budget stop is never retried and never falls back to another provider.
 
 | Variable | Default | Checked |

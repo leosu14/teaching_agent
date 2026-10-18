@@ -173,7 +173,11 @@ class Settings(BaseSettings):
                                                                        "max_cost_usd")}
             return TaskBudget(**limits) if any(v is not None for v in limits.values()) else None
 
-        return BudgetDefaults(task=self.production.budget(), session=budget("session") or TaskBudget(),
+        # Tasks without a budget of their own get the production limits, except MAX_SEARCHED_IMAGES: it is 0 for
+        # production runs only because no real image search adapter exists yet, it is not a spending limit (searched
+        # images are charged by cost, there is no counter for them), and off-production the mock search works.
+        task = self.production.budget().model_copy(update={"max_searched_images": None})
+        return BudgetDefaults(task=task, session=budget("session") or TaskBudget(),
                               attempt=budget("attempt") or TaskBudget(), learner_daily=budget("learner_daily"),
                               global_daily=budget("global_daily"),
                               reservation_grace_seconds=self.spend_reservation_grace_seconds)

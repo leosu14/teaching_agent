@@ -51,6 +51,11 @@ class BudgetDefaults(Schema):
     global_daily: TaskBudget | None = None
     reservation_grace_seconds: float = Field(default=60.0, ge=0)
 
+    def for_task(self, metadata: dict) -> TaskBudget:
+        """A task's effective budget: its own (production runs keep it in the metadata), else the default task budget.
+        The one budget both the spend ledger enforces and the workflow's planners plan within."""
+        return TaskBudget.of(metadata) or self.task
+
 
 class TaskUsage(Schema):
     """What a task used, summed from its provider request records (plus local video rendering).

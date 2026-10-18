@@ -19,6 +19,7 @@ from app.schemas.common import RetryPolicy
 from app.schemas.events import EventType
 from app.schemas.lesson import ReviewResult, Verdict
 from app.schemas.task import Task, WaitRequest
+from app.schemas.usage import TaskBudget
 from app.schemas.workflow import (
     BranchDecision,
     NodeState,
@@ -51,9 +52,11 @@ class ReviewRejected(NodeFatal):
 class StateView:
     """Read-only access to completed node outputs, validated back into their schemas."""
 
-    def __init__(self, state: WorkflowState, task: Task) -> None:
+    def __init__(self, state: WorkflowState, task: Task, budget: TaskBudget | None = None) -> None:
         self._state = state
         self.task = task
+        # The task's effective budget (the one its spend ledger enforces), for nodes that plan within it.
+        self.budget = budget
 
     def status(self, node_id: str) -> NodeStatus:
         ns = self._state.node_states.get(node_id)

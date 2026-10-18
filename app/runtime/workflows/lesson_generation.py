@@ -93,7 +93,6 @@ from app.schemas.pedagogy import (
 from app.schemas.research import ResearchBundle
 from app.schemas.providers import Capability
 from app.schemas.task import ArtifactSummary, TaskResult
-from app.schemas.usage import TaskBudget
 from app.schemas.video import (
     AudioAssetInput,
     ImageAssetInput,
@@ -235,8 +234,8 @@ def _lesson(v: StateView) -> LessonContent:
 
 
 def _image_budget(v: StateView) -> dict:
-    """The task's image budget (a production task carries one in its metadata); no limit otherwise."""
-    budget = TaskBudget.of(v.task.metadata)
+    """The task's image limits, from its effective budget (the one the spend ledger enforces)."""
+    budget = v.budget
     if budget is None:
         return {}
     return {"max_generated_images": budget.max_generated_images, "max_searched_images": budget.max_searched_images}
@@ -317,9 +316,9 @@ def wants_generated_video(request: LessonRequest, options: LessonWorkflowOptions
 
 
 def _generated_video_config(v: StateView, options: LessonWorkflowOptions) -> GeneratedVideoConfig:
-    """The configured limits, tightened by the task's budget (a production task carries one)."""
+    """The configured limits, tightened by the task's effective budget (the one the spend ledger enforces)."""
     config = options.generated_video
-    budget = TaskBudget.of(v.task.metadata)
+    budget = v.budget
     if budget is None:
         return config
     update: dict = {}

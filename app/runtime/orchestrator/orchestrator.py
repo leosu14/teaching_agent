@@ -30,7 +30,7 @@ from app.schemas.events import EventType
 from app.schemas.lease import Lease, LeaseLost
 from app.schemas.lesson import InterpretRequest, LessonRequest
 from app.schemas.task import Task, TaskControl, TaskError, TaskPlan, TaskStatus
-from app.schemas.usage import BudgetDefaults, TaskBudget
+from app.schemas.usage import BudgetDefaults
 from app.schemas.workflow import NodeState, NodeStatus, WorkflowState
 
 NodeObserver = Callable[[Task, str], None]
@@ -151,7 +151,7 @@ class Orchestrator:
         try:
             data = node.response_model.model_validate(payload)
             if node.validate_input is not None:
-                node.validate_input(StateView(task.workflow, task), data)
+                node.validate_input(StateView(task.workflow, task, self._budgets.for_task(task.metadata)), data)
         except ValueError as exc:  # includes pydantic ValidationError
             raise InvalidInput(str(exc)) from exc
         task.workflow.node_states[node_id].human_input = data.model_dump(mode="json")
@@ -315,7 +315,7 @@ class Orchestrator:
         the default task budget. With a spend store, every billable attempt is reserved against the task's counters
         (and the configured daily caps) in the durable ledger, fenced by this worker's lease, and settled there even
         if the lease is lost: what earlier workers spent stays counted, whatever their task saves did."""
-        budget = TaskBudget.of(task.metadata) or self._budgets.task
+        budget = self._budgets.for_task(task.metadata)
         if self._spend is None:
             return UsageLedger(task.cost, budget=budget)
         # A task last run before the ledger existed: its counters start from the spend its record already shows.
@@ -404,7 +404,8 @@ class Orchestrator:
         if outcome.status == "completed":
             assert task.workflow is not None
             try:
-                task.result = definition.summarize(StateView(task.workflow, task))
+                task.result = definition.summarize(StateView(task.workflow, task,
+                                                             self._budgets.for_task(task.metadata)))
             except Exception as exc:
                 self._fail(task, ledger, lease, "summarize", exc)
                 return
