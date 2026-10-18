@@ -6,37 +6,50 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from typing import Any
 
-from app.observability import budget as budgets
 from app.observability.events import EventBus
+from app.observability.spend import Reservation, SpendAccount
 from app.schemas.common import CostSummary, ProviderRequestRecord, TokenUsage
 from app.schemas.events import Event
 from app.schemas.lease import Lease
-from app.schemas.providers import Capability
+from app.schemas.spend import SettleResult, SpendState
 from app.schemas.usage import TaskBudget, TaskUsage
 
 
 class UsageLedger:
-    """Accumulates token usage, cost and every provider request for one task, and enforces the task's budget (if it
-    has one). The engine persists it with every checkpoint."""
+    """Accumulates token usage, cost and every provider request of one piece of work (the engine checkpoints it
+    with the task), and spends against its account: each billable attempt is reserved before it is sent and settled
+    after. With a durable account (task workers, teaching sessions, API grading) the spend ledger in the database is
+    the source of truth for budgets; without one an in-memory account enforces `budget` the same way."""
 
-    def __init__(self, summary: CostSummary | None = None, *, budget: TaskBudget | None = None) -> None:
+    def __init__(self, summary: CostSummary | None = None, *, budget: TaskBudget | None = None,
+                 account: SpendAccount | None = None) -> None:
         self.summary = summary.model_copy(deep=True) if summary else CostSummary()
         self.budget = budget
+        self.account = account if account is not None else SpendAccount.local(
+            budget, task_usage(self.summary) if summary else None)
 
     def usage(self) -> TaskUsage:
         return task_usage(self.summary)
 
-    def admit(self, capability: Capability, operation: str, units: dict[str, float] | None = None) -> None:
-        """Called by the provider layer before each request; raises BudgetExceededError instead of overspending."""
-        if self.budget is not None:
-            budgets.admit(self.budget, self.usage(), capability, operation, units)
+    def reserve(self, **attempt: Any) -> Reservation | None:
+        """Called by the provider layer before each attempt; raises BudgetExceededError (nothing is sent), or
+        LeaseLost when the task worker's lease is gone. None for an operation that is not billed."""
+        return self.account.reserve(**attempt)
 
-    def record_request(self, record: ProviderRequestRecord) -> None:
-        """Called by the provider layer after each request (successful or not)."""
-        self.summary.provider_requests.append(record)
-        if self.budget is not None and record.status == "ok":
-            budgets.check_after(self.budget, self.usage())
+    def settle(self, reservation: Reservation | None, record: ProviderRequestRecord | None,
+               state: SpendState) -> SettleResult | None:
+        """Called by the provider layer once an attempt's outcome is known (successful or not). Raises
+        BudgetExceededError after recording a successful attempt whose reported usage crossed a limit."""
+        if record is not None:
+            self.summary.provider_requests.append(record)
+        if reservation is None:
+            return None
+        result = self.account.settle(reservation, record, state)
+        if result is not None and state == SpendState.SETTLED:
+            self.account.check_after(reservation, result)
+        return result
 
     def record(self, *, agent_id: str, model: str, usage: TokenUsage, cost_usd: float) -> None:
         self.summary.record(agent_id=agent_id, model=model, usage=usage, cost_usd=cost_usd)

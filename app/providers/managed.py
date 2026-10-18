@@ -36,10 +36,24 @@ from app.schemas.generative_video import (
     VideoGenerationRequest,
 )
 from app.schemas.providers import Capability, HealthStatus, ProviderUsage
+from app.schemas.spend import Estimate
 
 P = TypeVar("P", bound=Provider)
 T = TypeVar("T")
 CostFn = Callable[[str, TokenUsage], float | None]  # (model, usage) -> estimated cost in USD, None when unpriced
+# Conservative pre-call estimates, replaced by what the provider reports once it answers.
+CHARS_PER_TOKEN = 3  # most tokenizers average 3-4 characters per token in European languages: over-estimate
+SPEECH_CHARS_PER_SECOND = 12  # about 12-15 characters of speech per second: over-estimate the audio length
+
+
+def llm_estimate(request: LLMRequest, cost: CostFn | None) -> Estimate:
+    """An upper bound of an LLM request's tokens (estimated input, plus the request's own output limit) and its
+    configured price."""
+    chars = len(request.system) + sum(len(m.content) for m in request.messages)
+    input_tokens = -(-chars // CHARS_PER_TOKEN)
+    tokens = TokenUsage(input_tokens=input_tokens, output_tokens=request.max_output_tokens)
+    return Estimate(llm_tokens=input_tokens + request.max_output_tokens,
+                    cost_usd=cost(request.model, tokens) if cost else None)
 
 
 def _currency(*costs: float | None) -> str | None:
@@ -58,7 +72,7 @@ class _Chain(Generic[P]):
 
     async def run(self, operation: str, fn: Callable[[P], Awaitable[T]],
                   usage: Callable[[P, T, str], ProviderUsage], model: str | None = None,
-                  units: dict[str, float] | None = None) -> tuple[P, T]:
+                  estimate: Estimate | None = None, idempotency_key: str | None = None) -> tuple[P, T]:
         failure: ProviderError | None = None
         for index, provider in enumerate(self.providers):
             if failure is not None:
@@ -67,7 +81,8 @@ class _Chain(Generic[P]):
             try:
                 result = await self.invoker.call(
                     provider, self.capability, operation, lambda p=provider: fn(p),
-                    usage=lambda r, rid, p=provider: usage(p, r, rid), model=model, units=units)
+                    usage=lambda r, rid, p=provider: usage(p, r, rid), model=model, estimate=estimate,
+                    idempotency_key=idempotency_key)
             except ProviderError as exc:
                 if not exc.transient or index == len(self.providers) - 1:
                     raise
@@ -124,7 +139,7 @@ class ManagedLLMProvider(_Delegating, LLMProvider):
             )
 
         return await self._invoker.call(self.inner, Capability.LLM, "generate", lambda: self.inner.generate(request),
-                                        usage=usage, model=request.model)
+                                        usage=usage, model=request.model, estimate=llm_estimate(request, self._cost))
 
 
 class ManagedTTSProvider(_Delegating, TTSProvider):
@@ -161,8 +176,10 @@ class ManagedTTSProvider(_Delegating, TTSProvider):
                 currency=_currency(u.estimated_cost_usd, u.cost_usd),
             )
 
+        chars = len(request.text)
         provider, speech = await self._chain.run("synthesize", lambda p: p.synthesize(request), usage,
-                                                 units={"characters": len(request.text)})
+                                                 estimate=Estimate(characters=chars,
+                                                                   audio_seconds=chars / SPEECH_CHARS_PER_SECOND))
         return speech.model_copy(update={"provider": provider.name})
 
 
@@ -291,7 +308,9 @@ class ManagedVideoGenerationProvider(_Delegating, VideoGenerationProvider):
                                  estimated_cost=cost if p.name == self.name else None, currency=_currency(cost))
 
         _, job = await self._chain.run("submit", lambda p: p.submit(request, generation_key=generation_key), usage,
-                                       model=self.model, units={"seconds": request.duration, "cost_usd": cost})
+                                       model=self.model,
+                                       estimate=Estimate(video_seconds=request.duration, cost_usd=cost),
+                                       idempotency_key=generation_key)
         return job
 
     async def _on_owner(self, operation: str, job: VideoGenerationJob, fn) -> object:
