@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -246,3 +246,62 @@ class LearningCycleRequestRow(Base):
     cycle_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     client_response_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     body: Mapped[str] = mapped_column(Text)
+
+
+class SpendEntryRow(Base):
+    """The spend ledger: one row per billable provider attempt, reserved before it is sent and settled once. Ids and
+    numbers only (amounts in counter units: tokens, characters, ms, micro-USD)."""
+
+    __tablename__ = "spend_entries"
+    __table_args__ = (
+        UniqueConstraint("operation_id", "attempt", name="uq_spend_operation_attempt"),
+        Index("ix_spend_state_until", "state", "reserved_until_ms"),
+        # At most one in-flight (reserved) attempt per idempotency key.
+        Index("uq_spend_inflight_key", "idempotency_key", unique=True,
+              sqlite_where=text("state = 'reserved' AND idempotency_key IS NOT NULL"),
+              postgresql_where=text("state = 'reserved' AND idempotency_key IS NOT NULL")),
+    )
+    entry_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # our request id (preq_...)
+    operation_id: Mapped[str] = mapped_column(String(64))
+    attempt: Mapped[int] = mapped_column(Integer)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    capability: Mapped[str] = mapped_column(String(32))
+    operation: Mapped[str] = mapped_column(String(32))
+    provider: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    attempt_ref: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    learner_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    worker: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_fence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    scope_keys: Mapped[str] = mapped_column(Text)  # JSON list
+    state: Mapped[str] = mapped_column(String(16))
+    estimate: Mapped[str] = mapped_column(Text)  # JSON {metric: amount}
+    charged: Mapped[str] = mapped_column(Text, default="{}")  # JSON {metric: amount}
+    reported: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON provider-reported units
+    usage_source: Mapped[str] = mapped_column(String(16), default="none")
+    estimated_cost_microusd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    final_cost_microusd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cost_source: Mapped[str] = mapped_column(String(16), default="none")
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    vendor_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reserved_until_ms: Mapped[int] = mapped_column(BigInteger)
+
+
+class SpendCounterRow(Base):
+    """A budget scope's running totals for one metric: `reserved` (estimates of attempts in flight) and `settled`
+    (what settled attempts charged). Kept in step with spend_entries in the same transactions."""
+
+    __tablename__ = "spend_counters"
+    scope_key: Mapped[str] = mapped_column(String(192), primary_key=True)
+    metric: Mapped[str] = mapped_column(String(32), primary_key=True)
+    reserved: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    settled: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

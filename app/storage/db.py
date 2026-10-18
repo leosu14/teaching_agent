@@ -55,6 +55,7 @@ def _upgrade_sqlite(engine: Engine) -> None:
 def _sqlite_pragmas(dbapi_conn, _record) -> None:  # pragma: no cover - trivial
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")  # a writer waits for another (the spend counters serialize on it)
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 

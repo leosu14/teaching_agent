@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
+
+from app.observability.spend import abandoned
 
 from app.schemas.artifact import Artifact
 from app.schemas.assessment import (
@@ -31,6 +36,16 @@ from app.schemas.learning_cycle import (
     LearningCycle,
 )
 from app.schemas.learner import EvidenceConflict, LearnerProfile, LearningEvent, LearningEvidence, LearningGoal
+from app.schemas.spend import (
+    CounterTotals,
+    ReservationRefused,
+    SettleResult,
+    SpendEntry,
+    SpendInFlight,
+    SpendReservation,
+    SpendSettlement,
+    SpendState,
+)
 from app.schemas.task import Task, TaskControl
 from app.schemas.teaching import (
     InteractionEvidence,
@@ -58,6 +73,8 @@ from app.storage.orm import (
     LearningCycleRow,
     LearningCycleSlotRow,
     LearningGoalRow,
+    SpendCounterRow,
+    SpendEntryRow,
     TaskRow,
     InteractionEvidenceRow,
     TeachingOutboxRow,
@@ -755,3 +772,215 @@ class SqlLearningCycleRepository:
             s.execute(delete(LearningCycleRequestRow).where(LearningCycleRequestRow.cycle_id == cycle_id,
                                                             LearningCycleRequestRow.client_response_id ==
                                                             client_response_id))
+
+
+# --- the spend ledger ----------------------------------------------------------------------------------------------
+
+_RETRYABLE_SQLSTATES = {"40001", "40P01"}  # PostgreSQL serialization failure, deadlock
+
+
+def _retryable(exc: DBAPIError) -> bool:
+    code = getattr(exc.orig, "pgcode", None) or getattr(exc.orig, "sqlstate", None)
+    return code in _RETRYABLE_SQLSTATES or "database is locked" in str(exc.orig)
+
+
+def _ensure_counter(s: Session, scope_key: str, metric: str, now: datetime, settled: int = 0) -> None:
+    """Create the counter row if it does not exist (never overwrites one: concurrent creators both succeed)."""
+    values = {"scope_key": scope_key, "metric": metric, "reserved": 0, "settled": settled, "updated_at": now}
+    dialect = s.get_bind().dialect.name
+    if dialect in ("sqlite", "postgresql"):
+        insert = sqlite_insert if dialect == "sqlite" else postgresql_insert
+        s.execute(insert(SpendCounterRow).values(**values).on_conflict_do_nothing(
+            index_elements=["scope_key", "metric"]))
+        return
+    try:  # other databases: a savepoint around a plain insert
+        with s.begin_nested():
+            s.add(SpendCounterRow(**values))
+    except IntegrityError:
+        pass
+
+
+class SqlSpendRepository:
+    """The spend ledger and its budget counters (`SpendStore`).
+
+    Reservation is one transaction: the task lease check (when fenced), then one conditional increment per counter
+    (`settled + reserved + check <= limit` in the UPDATE's own WHERE, so concurrent reservations can never both pass
+    on the same old value), in sorted (scope, metric) order, then the entry insert. Settlement is one transaction too:
+    a conditional state change of the entry (`WHERE state = 'reserved'`, or 'unknown' for a late real result) and the
+    counter adjustments; a repeated settlement matches no row and changes nothing. Settlement is never fenced.
+
+    Every transaction starts with a write (SQLite: no read-to-write lock upgrade). PostgreSQL deadlocks and
+    serialization failures, and SQLite's "database is locked", are retried a bounded number of times.
+    """
+
+    TRIES = 3
+
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+        self._sessions = sessions
+        self._clock = clock
+
+    def reserve(self, reservation: SpendReservation, *, fence: Lease | None, now: datetime) -> None:
+        r = reservation
+        for attempt in range(1, self.TRIES + 1):
+            try:
+                with self._sessions.begin() as s:
+                    if fence is not None:
+                        _require_fence(s, fence, now)  # a worker that lost its task lease cannot start a paid call
+                    for c in sorted(r.charges, key=lambda c: (c.scope_key, c.metric)):
+                        _ensure_counter(s, c.scope_key, c.metric, now)
+                        where = [SpendCounterRow.scope_key == c.scope_key, SpendCounterRow.metric == c.metric]
+                        if c.limit is not None:
+                            where.append(SpendCounterRow.settled + SpendCounterRow.reserved + c.check <= c.limit)
+                        done = s.execute(update(SpendCounterRow).where(*where).values(
+                            reserved=SpendCounterRow.reserved + c.amount, updated_at=now))
+                        if done.rowcount != 1:
+                            row = s.get(SpendCounterRow, (c.scope_key, c.metric))
+                            raise ReservationRefused(c, row.reserved if row else 0, row.settled if row else 0)
+                    s.add(SpendEntryRow(
+                        entry_id=r.entry_id, operation_id=r.operation_id, attempt=r.attempt,
+                        idempotency_key=r.idempotency_key, capability=r.capability, operation=r.operation,
+                        provider=r.provider, model=r.model, task_id=r.task_id, session_id=r.session_id,
+                        attempt_ref=r.attempt_ref, learner_id=r.learner_id, node_id=r.node_id, agent_id=r.agent_id,
+                        worker=r.worker, lease_fence=r.lease_fence,
+                        scope_keys=json.dumps(sorted({c.scope_key for c in r.charges})),
+                        state=SpendState.RESERVED.value, estimate=json.dumps(r.estimate, sort_keys=True),
+                        charged="{}", usage_source="none", estimated_cost_microusd=r.estimated_cost_microusd,
+                        cost_source="none", created_at=now, reserved_until_ms=_ms(r.reserved_until)))
+                    s.flush()
+                return
+            except IntegrityError:
+                with self._sessions() as s:
+                    if s.get(SpendEntryRow, r.entry_id) is not None:
+                        return  # this attempt was already reserved: reserving it again changes nothing
+                    if r.idempotency_key and s.scalar(select(SpendEntryRow.entry_id).where(
+                            SpendEntryRow.idempotency_key == r.idempotency_key,
+                            SpendEntryRow.state == SpendState.RESERVED.value)) is not None:
+                        raise SpendInFlight(r.idempotency_key) from None
+                raise
+            except DBAPIError as exc:
+                if attempt < self.TRIES and _retryable(exc):
+                    continue
+                raise
+
+    def settle(self, entry_id: str, settlement: SpendSettlement, *, now: datetime) -> SettleResult:
+        st = settlement
+        sources = [SpendState.RESERVED] + ([SpendState.UNKNOWN] if st.state == SpendState.SETTLED else [])
+        values = {"state": st.state.value, "charged": json.dumps(st.charged, sort_keys=True),
+                  "reported": json.dumps(st.reported, sort_keys=True) if st.reported is not None else None,
+                  "usage_source": st.usage_source, "final_cost_microusd": st.final_cost_microusd,
+                  "cost_source": st.cost_source, "currency": st.currency, "vendor_request_id": st.vendor_request_id,
+                  "error_type": st.error_type, "latency_ms": st.latency_ms, "settled_at": now}
+        for attempt in range(1, self.TRIES + 1):
+            try:
+                with self._sessions.begin() as s:
+                    previous = None
+                    for source in sources:
+                        done = s.execute(update(SpendEntryRow).where(
+                            SpendEntryRow.entry_id == entry_id, SpendEntryRow.state == source.value).values(**values))
+                        if done.rowcount == 1:
+                            previous = source
+                            break
+                    row = s.get(SpendEntryRow, entry_id)
+                    if row is None:
+                        raise NotFound(entry_id)
+                    keys = json.loads(row.scope_keys)
+                    if previous is None:
+                        same = row.state == st.state.value and json.loads(row.charged or "{}") == st.charged
+                        return SettleResult(outcome="duplicate" if same else "conflict", totals=self._totals(s, keys))
+                    estimate = json.loads(row.estimate)
+                    for key in sorted(keys):
+                        for metric in sorted(set(estimate) | set(st.charged)):
+                            if previous == SpendState.RESERVED:
+                                d_reserved, d_settled = -estimate.get(metric, 0), st.charged.get(metric, 0)
+                            else:  # unknown -> settled: the charged estimate is replaced by the real usage
+                                d_reserved, d_settled = 0, st.charged.get(metric, 0) - estimate.get(metric, 0)
+                            if d_reserved or d_settled:
+                                _ensure_counter(s, key, metric, now)
+                                s.execute(update(SpendCounterRow).where(
+                                    SpendCounterRow.scope_key == key, SpendCounterRow.metric == metric).values(
+                                    reserved=SpendCounterRow.reserved + d_reserved,
+                                    settled=SpendCounterRow.settled + d_settled, updated_at=now))
+                    return SettleResult(outcome="applied", totals=self._totals(s, keys),
+                                        stale_lease=self._stale(s, row, now))
+            except DBAPIError as exc:
+                if attempt < self.TRIES and _retryable(exc):
+                    continue
+                raise
+        raise AssertionError("unreachable")
+
+    def expire_abandoned(self, now: datetime) -> list[str]:
+        with self._sessions() as s:
+            rows = s.scalars(select(SpendEntryRow).where(
+                SpendEntryRow.state == SpendState.RESERVED.value, SpendEntryRow.reserved_until_ms < _ms(now))
+                .order_by(SpendEntryRow.reserved_until_ms).limit(100)).all()
+            entries = [self._entry(r) for r in rows]
+        swept = []
+        for entry in entries:
+            if self.settle(entry.entry_id, abandoned(entry), now=now).outcome == "applied":
+                swept.append(entry.entry_id)
+        return swept
+
+    def entries(self, *, task_id: str | None = None, session_id: str | None = None,
+                attempt_ref: str | None = None) -> list[SpendEntry]:
+        q = select(SpendEntryRow)
+        if task_id is not None:
+            q = q.where(SpendEntryRow.task_id == task_id)
+        if session_id is not None:
+            q = q.where(SpendEntryRow.session_id == session_id)
+        if attempt_ref is not None:
+            q = q.where(SpendEntryRow.attempt_ref == attempt_ref)
+        with self._sessions() as s:
+            return [self._entry(r) for r in s.scalars(q.order_by(SpendEntryRow.created_at, SpendEntryRow.operation_id,
+                                                                 SpendEntryRow.attempt))]
+
+    def totals(self, scope_keys: Iterable[str]) -> dict[str, dict[str, CounterTotals]]:
+        with self._sessions() as s:
+            return self._totals(s, scope_keys)
+
+    def seed(self, scope_key: str, settled: dict[str, int], *, now: datetime) -> bool:
+        with self._sessions.begin() as s:
+            # Start with a write (SQLite then holds the write lock: concurrent seeders serialize). On PostgreSQL two
+            # seeders may both find nothing; they insert the same values with ON CONFLICT DO NOTHING, never twice.
+            s.execute(update(SpendCounterRow).where(SpendCounterRow.scope_key == scope_key)
+                      .values(updated_at=SpendCounterRow.updated_at))
+            if s.scalar(select(func.count()).select_from(SpendCounterRow).where(
+                    SpendCounterRow.scope_key == scope_key)):
+                return False
+            for metric, amount in sorted(settled.items()):
+                _ensure_counter(s, scope_key, metric, now, settled=amount)
+            return True
+
+    @staticmethod
+    def _totals(s: Session, scope_keys: Iterable[str]) -> dict[str, dict[str, CounterTotals]]:
+        out: dict[str, dict[str, CounterTotals]] = {}
+        keys = list(scope_keys)
+        if not keys:
+            return out
+        for row in s.scalars(select(SpendCounterRow).where(SpendCounterRow.scope_key.in_(keys))):
+            out.setdefault(row.scope_key, {})[row.metric] = CounterTotals(reserved=row.reserved, settled=row.settled)
+        return out
+
+    @staticmethod
+    def _stale(s: Session, row: SpendEntryRow, now: datetime) -> bool:
+        """Whether the entry was reserved under a task lease that is no longer current (diagnostics only)."""
+        if row.lease_fence is None or row.task_id is None:
+            return False
+        task = s.get(TaskRow, row.task_id)
+        return task is None or not (task.lease_fence == row.lease_fence and task.lease_owner == row.worker
+                                    and task.lease_expires_ms is not None and task.lease_expires_ms > _ms(now))
+
+    @staticmethod
+    def _entry(row: SpendEntryRow) -> SpendEntry:
+        return SpendEntry(
+            entry_id=row.entry_id, operation_id=row.operation_id, attempt=row.attempt,
+            idempotency_key=row.idempotency_key, capability=row.capability, operation=row.operation,
+            provider=row.provider, model=row.model, task_id=row.task_id, session_id=row.session_id,
+            attempt_ref=row.attempt_ref, learner_id=row.learner_id, node_id=row.node_id, agent_id=row.agent_id,
+            worker=row.worker, lease_fence=row.lease_fence, scope_keys=json.loads(row.scope_keys),
+            state=SpendState(row.state), estimate=json.loads(row.estimate), charged=json.loads(row.charged or "{}"),
+            reported=json.loads(row.reported) if row.reported else None, usage_source=row.usage_source,
+            estimated_cost_microusd=row.estimated_cost_microusd, final_cost_microusd=row.final_cost_microusd,
+            cost_source=row.cost_source, currency=row.currency, vendor_request_id=row.vendor_request_id,
+            error_type=row.error_type, latency_ms=row.latency_ms, created_at=row.created_at,
+            settled_at=row.settled_at,
+            reserved_until=datetime.fromtimestamp(row.reserved_until_ms / 1000, tz=timezone.utc))
