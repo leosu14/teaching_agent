@@ -102,7 +102,7 @@ that would exceed a limit is never sent. A budget stop is never retried and neve
 | `MAX_LLM_REQUESTS` | `80` | before each LLM request (failed attempts count) |
 | `MAX_LLM_TOKENS` | `600000` | before each request, with its estimate (input characters / 3 + the request's output limit); the reported tokens replace the estimate after the response |
 | `MAX_SEARCH_REQUESTS` | `20` | before each search request (failed attempts count) |
-| `MAX_GENERATED_IMAGES` | `4` | in the visual plan (a plan over budget is sent back for revision) and before each generation |
+| `MAX_GENERATED_IMAGES` | `4` | in the visual plan (a plan over budget is sent back for revision) and before each generation (failed attempts count; a refused generation fails that visual, and `TA_VISUAL_FAILURE_POLICY` decides) |
 | `MAX_SEARCHED_IMAGES` | `0` | in the visual plan (there is no real image search adapter yet; see limitations) |
 | `MAX_TTS_CHARACTERS` | `30000` | before each synthesis, with that segment's characters |
 | `MAX_TTS_SECONDS` | `1800` | before each synthesis, with an estimate (12 characters per second), then the reported seconds |

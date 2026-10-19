@@ -465,7 +465,7 @@ class VisualAssetRef(Schema):
 
 class VisualAttempt(Schema):
     source: VisualSource
-    stage: Literal["search", "select", "fetch", "generate", "validate", "store"]
+    stage: Literal["search", "select", "fetch", "generate", "validate", "store", "budget"]
     message: str
     image_id: str | None = None
     errors: list[ImageValidationError] = Field(default_factory=list)

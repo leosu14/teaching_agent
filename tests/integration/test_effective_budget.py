@@ -8,14 +8,16 @@ from app.config.production import ProductionSettings
 from app.config.settings import Settings
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
+from app.providers.image.mock import MockImageGenerationProvider
 from app.providers.video_generation.mock import MockVideoGenerationProvider
 from app.schemas.artifact import ArtifactType
 from app.schemas.generative_video import VideoSegmentPlanSet
 from app.schemas.task import TaskStatus
 from app.schemas.usage import BUDGET_KEY
-from app.schemas.visual import VisualPlan
+from app.schemas.visual import VisualPlan, VisualResult
 from app.services.container import build_container
 from tests.conftest import run_lesson
+from tests.integration.test_visual_flow import GenerationFailing
 from tests.integration.test_generative_video_flow import FIXTURES, arts, finish, generation, start
 
 
@@ -70,5 +72,71 @@ async def test_a_default_video_segment_limit_shapes_the_segment_plan(tmp_path) -
         assert len(plan.segments) == 1  # two without the limit (see test_generative_video_flow)
         result = generation(task)
         assert result.status == "complete" and not result.failures and provider.submits == 1
+    finally:
+        c.close()
+
+
+def flaky_lesson_container(tmp_path, flaky, **settings):
+    return build_container(Settings(data_dir=tmp_path / "d", log_json=False,
+                                    production=ProductionSettings(max_generated_images=1), **settings),
+                           llm_providers={"mock": MockLLMProvider(default_responders())},
+                           image_generation_provider=flaky)
+
+
+def image_attempts(task) -> list:
+    return [r for r in task.cost.provider_requests if r.capability == "image" and r.operation == "generate"]
+
+
+async def test_a_retry_the_image_budget_refuses_fails_that_visual_not_the_lesson(tmp_path) -> None:
+    """PR19 review N1: the plan uses the whole image budget, the one generation fails transiently, and the ledger
+    refuses the retry (the failed attempt may have been billed and keeps its charge). The refusal is that visual's
+    failure, as for a generated video segment, so the visual failure policy decides; nothing more is sent."""
+    flaky = GenerationFailing(transient_once=True)
+    c = flaky_lesson_container(tmp_path, flaky, visual_failure_policy="continue")
+    try:
+        task = await run_lesson(c)
+        assert task.status == TaskStatus.COMPLETED, task.errors
+        assert not any(e.category == "BudgetExceededError" for e in task.errors)
+        assert flaky.calls == 1 and len(image_attempts(task)) == 1  # no paid call after the budget is used up
+        result = VisualResult.model_validate(task.workflow.node_states["visual_policy"].output)
+        [failure] = [f for f in result.failures if any(a.stage == "budget" for a in f.attempts)]
+        assert [(a.source, a.stage) for a in failure.attempts][-1] == ("generate", "budget")
+        assert "MAX_GENERATED_IMAGES" in failure.reason
+        assert any(failure.visual_id in w for w in task.result.warnings)
+        # The failed attempt keeps its charge (no refund to make room for the retry); the retry was never reserved.
+        [entry] = [e for e in c.spend.entries(task_id=task.task_id) if e.capability == "image"]
+        assert entry.charged.get("generated_images") == 1
+    finally:
+        c.close()
+
+
+async def test_a_required_visual_the_image_budget_cannot_retry_follows_the_failure_policy(tmp_path) -> None:
+    """With the default policy a required visual that could not be produced fails the lesson as a visual failure
+    (as when the provider fails for good), not as a budget stop; still no paid call past the budget."""
+    flaky = GenerationFailing(transient_once=True)
+    c = flaky_lesson_container(tmp_path, flaky)
+    try:
+        task = await run_lesson(c)
+        assert task.status == TaskStatus.FAILED
+        assert task.errors[-1].node_id == "visual_policy" and "required visuals failed" in task.errors[-1].message
+        assert task.errors[-1].category != "BudgetExceededError"
+        assert flaky.calls == 1 and len(image_attempts(task)) == 1
+    finally:
+        c.close()
+
+
+class GenerationBroken(MockImageGenerationProvider):
+    """A bug in the provider, not a provider failure or a budget refusal."""
+
+    async def generate(self, request):
+        raise RuntimeError("bug in the image adapter")
+
+
+async def test_an_unrelated_image_error_still_fails_the_visual_step(tmp_path) -> None:
+    c = flaky_lesson_container(tmp_path, GenerationBroken(), visual_failure_policy="continue")
+    try:
+        task = await run_lesson(c)
+        assert task.status == TaskStatus.FAILED
+        assert task.errors[-1].node_id == "visual" and "bug in the image adapter" in task.errors[-1].message
     finally:
         c.close()

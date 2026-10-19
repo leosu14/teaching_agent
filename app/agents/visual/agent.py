@@ -13,6 +13,7 @@ import hashlib
 import json
 
 from app.agents.base import Agent, AgentContext, AgentSpec, OutputRejected
+from app.observability.budget import BudgetExceededError
 from app.schemas.artifact import Artifact, ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
 from app.schemas.common import ModelTier
 from app.schemas.events import EventType
@@ -175,11 +176,16 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
 
     async def _tool(self, name: str, payload, ctx: AgentContext, attempts: list[VisualAttempt], *, source: str,
                     stage: str, image_id: str | None = None):
-        """Call a tool; a tool failure becomes a recorded attempt (None). Wiring errors still raise."""
+        """Call a tool; a tool failure becomes a recorded attempt (None). Wiring errors still raise. A budget refusal
+        is this visual's failure too, as for a generated video segment: the ledger has already refused the request,
+        and the visual failure policy decides whether the lesson can do without it."""
         try:
             return await self.use_tool(name, payload, ctx)
         except (ToolPermissionError, ToolNotFound):
             raise
+        except BudgetExceededError as exc:
+            attempts.append(VisualAttempt(source=source, stage="budget", message=str(exc)[:1000], image_id=image_id))
+            return None
         except ToolError as exc:
             report = getattr(exc, "report", None)
             attempts.append(VisualAttempt(source=source, stage=stage, message=str(exc)[:1000], image_id=image_id,
