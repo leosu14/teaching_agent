@@ -22,6 +22,7 @@ from app.schemas.task import Task
 from app.storage.db import create_db, dispose
 from app.storage.repositories import SqlSpendRepository, SqlTaskRepository
 from tests.integration.test_spend_concurrency import EACH, WORKERS, _process, check, race
+from tests.unit.test_spend_daily_scope import race_across_midnight
 
 URL = os.environ.get("TA_TEST_POSTGRES_URL")
 pytestmark = pytest.mark.skipif(not URL, reason="set TA_TEST_POSTGRES_URL to run the PostgreSQL spend tests")
@@ -106,3 +107,9 @@ def test_fence_idempotency_and_sweep_on_postgres(store) -> None:
     assert swept.state == SpendState.UNKNOWN and swept.error_type == "Abandoned"
     totals = spend.totals([f"task:{task_id}"])[f"task:{task_id}"]["llm_tokens"]
     assert (totals.reserved, totals.settled) == (0, 140)
+
+
+def test_workers_crossing_midnight_never_exceed_either_days_cap_on_postgres() -> None:
+    """F8 on PostgreSQL: each reservation resolves its learner day, so workers whose clocks straddle midnight UTC
+    race for two day counters; each day admits exactly its cap, and every counter equals the sum of its entries."""
+    race_across_midnight(URL)

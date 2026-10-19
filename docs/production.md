@@ -124,7 +124,8 @@ Interactive work has its own budgets (see [configuration](configuration.md#budge
 session, and the grading of one assessment attempt submitted through the API. When one is used up the route answers
 **429** with fixed text (`BudgetExhausted`: "The spending limit for this work has been reached. Try again later.");
 nothing is sent to the provider, the learner's answer stays stored where it already was, and 503 keeps meaning that the
-teacher or a provider is unavailable. Daily caps per learner and across all work are off by default.
+teacher or a provider is unavailable. Daily caps per learner and across all work are off by default; when set, each
+attempt counts against the UTC day it was reserved on, even when it is settled after midnight.
 
 ### The spend ledger
 

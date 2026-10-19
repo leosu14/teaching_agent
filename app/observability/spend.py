@@ -9,6 +9,12 @@ Scopes (`kind:id`): `task:{task_id}`, `session:{session_id}` (an interactive tea
 (the grading of one assessment attempt through the API), `learner:{learner_id}:{YYYY-MM-DD}` and `global:{YYYY-MM-DD}`
 (daily caps, UTC, only when configured), `local:{id}` (an in-memory ledger).
 
+A daily scope is resolved for each reservation, from the same clock reading that stamps the entry: an attempt
+reserved at 23:59:59 UTC belongs to that day, one reserved a second later to the next, whatever the age of the
+account (a task worker or a teaching session can outlive midnight). The entry keeps the scope keys it was reserved
+under, and its settlement, a late real result and the abandoned-reservation sweep all adjust those same counters, so
+an attempt that crosses midnight is charged once, entirely to the day it was reserved on.
+
 Reservations made for a task worker are fenced by its lease (a worker that lost it cannot start a paid call);
 settlements never are: money already committed to a provider is recorded whatever happened to the lease.
 """
@@ -19,7 +25,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Protocol
 
 from app.observability.budget import (
@@ -91,12 +97,17 @@ def attempt_scope(attempt_id: str) -> str:
     return f"attempt:{attempt_id}"
 
 
+def utc_day(now: datetime) -> date:
+    """The UTC calendar day of an instant (the day boundary of the daily caps); a naive datetime is taken as UTC."""
+    return (now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)).date()
+
+
 def learner_day_scope(learner_id: str, now: datetime) -> str:
-    return f"learner:{learner_id}:{now.date().isoformat()}"
+    return f"learner:{learner_id}:{utc_day(now).isoformat()}"
 
 
 def global_day_scope(now: datetime) -> str:
-    return f"global:{now.date().isoformat()}"
+    return f"global:{utc_day(now).isoformat()}"
 
 
 def usage_counters(usage: TaskUsage) -> dict[str, int]:
@@ -132,12 +143,15 @@ class Reservation:
     operation: str
     amounts: dict[str, int]
     estimate: Estimate
+    scopes: tuple[BudgetScope, ...]  # the scopes it was reserved against (daily ones resolved at that time)
 
 
 @dataclass
 class SpendAccount:
     """The budgets one piece of work spends against, the store that keeps its ledger, and how its entries are
-    attributed. `fence`: the task worker's lease; reservations are refused once it is lost."""
+    attributed. `fence`: the task worker's lease; reservations are refused once it is lost. `scopes` are the fixed
+    ones (task, session, attempt); the learner's and the global daily caps are added at each reservation, for the
+    UTC day of that reservation (`scopes_at`)."""
 
     store: SpendStore
     scopes: tuple[BudgetScope, ...]
@@ -149,6 +163,8 @@ class SpendAccount:
     clock: Callable[[], datetime] = utcnow
     grace_seconds: float = 60.0
     swept: list[str] = field(default_factory=list)  # abandoned reservations found by the last sweep (for events)
+    learner_daily: TaskBudget | None = None  # applies only with a learner_id
+    global_daily: TaskBudget | None = None
 
     @classmethod
     def local(cls, budget: TaskBudget | None = None, seed: TaskUsage | None = None) -> SpendAccount:
@@ -159,9 +175,19 @@ class SpendAccount:
             store.seed(key, usage_counters(seed), now=utcnow())
         return cls(store=store, scopes=(BudgetScope(key, budget),))
 
+    def scopes_at(self, now: datetime) -> tuple[BudgetScope, ...]:
+        """Every scope a reservation made at `now` charges: the fixed ones, then the daily caps of now's UTC day."""
+        daily = []
+        if self.learner_daily is not None and self.learner_id:
+            daily.append(BudgetScope(learner_day_scope(self.learner_id, now), self.learner_daily))
+        if self.global_daily is not None:
+            daily.append(BudgetScope(global_day_scope(now), self.global_daily))
+        return (*self.scopes, *daily)
+
     @property
     def scope_keys(self) -> list[str]:
-        return [s.key for s in self.scopes]
+        """The scope keys a reservation made now would charge."""
+        return [s.key for s in self.scopes_at(self.clock())]
 
     def reserve(self, *, entry_id: str, operation_id: str, attempt: int, capability: Capability, operation: str,
                 provider: str, model: str | None, estimate: Estimate, timeout_seconds: float,
@@ -172,9 +198,10 @@ class SpendAccount:
         amounts = reservation_amounts(capability, operation, estimate)
         if not amounts:
             return None
+        now = self.clock()  # one reading: the entry's day scopes, its creation time and its expiry all come from it
+        scopes = self.scopes_at(now)
         charges = [Charge(scope_key=s.key, metric=m, amount=a, check=check_amount(m, a), limit=limit_for(s.budget, m))
-                   for s in self.scopes for m, a in amounts.items()]
-        now = self.clock()
+                   for s in scopes for m, a in amounts.items()]
         self.swept = self.store.expire_abandoned(now)
         reservation = SpendReservation(
             entry_id=entry_id, operation_id=operation_id, attempt=attempt, idempotency_key=idempotency_key,
@@ -194,7 +221,7 @@ class SpendAccount:
                             f"{m.what.split(' (')[0]} of the {scope_kind(c.scope_key)} budget, with this "
                             "request", scope=scope_kind(c.scope_key)) from None
         return Reservation(entry_id=entry_id, capability=capability, operation=operation, amounts=amounts,
-                           estimate=estimate)
+                           estimate=estimate, scopes=scopes)
 
     def settle(self, reservation: Reservation, record: ProviderRequestRecord | None,
                state: SpendState) -> SettleResult | None:
@@ -218,8 +245,8 @@ class SpendAccount:
 
     def check_after(self, reservation: Reservation, result: SettleResult) -> None:
         """Raise BudgetExceededError when reported usage took an estimated metric over a limit (the attempt is
-        recorded; the work stops here)."""
-        for scope in self.scopes:
+        recorded; the work stops here). Checks the scopes it was reserved against, not today's."""
+        for scope in reservation.scopes:
             for metric in reservation.amounts:
                 limit = limit_for(scope.budget, metric)
                 totals = result.totals.get(scope.key, {}).get(metric)
@@ -230,13 +257,8 @@ class SpendAccount:
 # --- accounts for each kind of work --------------------------------------------------------------------------------
 
 
-def _shared(defaults: BudgetDefaults, learner_id: str | None, now: datetime) -> list[BudgetScope]:
-    scopes = []
-    if defaults.learner_daily is not None and learner_id:
-        scopes.append(BudgetScope(learner_day_scope(learner_id, now), defaults.learner_daily))
-    if defaults.global_daily is not None:
-        scopes.append(BudgetScope(global_day_scope(now), defaults.global_daily))
-    return scopes
+def _daily(defaults: BudgetDefaults) -> dict[str, TaskBudget | None]:
+    return {"learner_daily": defaults.learner_daily, "global_daily": defaults.global_daily}
 
 
 def task_account(store: SpendStore, defaults: BudgetDefaults, *, task_id: str, learner_id: str | None,
@@ -244,20 +266,17 @@ def task_account(store: SpendStore, defaults: BudgetDefaults, *, task_id: str, l
                  clock: Callable[[], datetime] = utcnow) -> SpendAccount:
     """A task worker's account: its task budget (the one in its metadata, else the default task budget), plus the
     learner's and the global daily caps when configured. Reservations are fenced by the worker's lease."""
-    now = clock()
-    scopes = (BudgetScope(task_scope(task_id), budget if budget is not None else defaults.task),
-              *_shared(defaults, learner_id, now))
+    scopes = (BudgetScope(task_scope(task_id), budget if budget is not None else defaults.task),)
     return SpendAccount(store=store, scopes=scopes, task_id=task_id, learner_id=learner_id, fence=fence, clock=clock,
-                        grace_seconds=defaults.reservation_grace_seconds)
+                        grace_seconds=defaults.reservation_grace_seconds, **_daily(defaults))
 
 
 def session_account(store: SpendStore, defaults: BudgetDefaults, *, session_id: str, task_id: str | None,
                     learner_id: str | None, clock: Callable[[], datetime] = utcnow) -> SpendAccount:
     """The account of a teaching session's teacher turns (the lesson task's own budget is not charged)."""
-    now = clock()
-    scopes = (BudgetScope(session_scope(session_id), defaults.session), *_shared(defaults, learner_id, now))
+    scopes = (BudgetScope(session_scope(session_id), defaults.session),)
     return SpendAccount(store=store, scopes=scopes, task_id=task_id, session_id=session_id, learner_id=learner_id,
-                        clock=clock, grace_seconds=defaults.reservation_grace_seconds)
+                        clock=clock, grace_seconds=defaults.reservation_grace_seconds, **_daily(defaults))
 
 
 def attempt_account(store: SpendStore, defaults: BudgetDefaults, *, attempt_id: str, task_id: str | None,
@@ -265,12 +284,11 @@ def attempt_account(store: SpendStore, defaults: BudgetDefaults, *, attempt_id: 
                     clock: Callable[[], datetime] = utcnow) -> SpendAccount:
     """The account of grading one assessment attempt outside a task: an answer submitted through the API, or a
     teaching session's answer (which also spends against the session's budget)."""
-    now = clock()
     scopes = (BudgetScope(attempt_scope(attempt_id), defaults.attempt),
-              *((BudgetScope(session_scope(session_id), defaults.session),) if session_id else ()),
-              *_shared(defaults, learner_id, now))
+              *((BudgetScope(session_scope(session_id), defaults.session),) if session_id else ()))
     return SpendAccount(store=store, scopes=scopes, task_id=task_id, session_id=session_id, attempt_ref=attempt_id,
-                        learner_id=learner_id, clock=clock, grace_seconds=defaults.reservation_grace_seconds)
+                        learner_id=learner_id, clock=clock, grace_seconds=defaults.reservation_grace_seconds,
+                        **_daily(defaults))
 
 
 # --- in-memory store ------------------------------------------------------------------------------------------------
