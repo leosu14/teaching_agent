@@ -502,7 +502,9 @@ Agents ──► Tools / ModelRouter ──► provider interfaces (*.base) ─�
   `SpendStore` protocol in `app/observability/spend.py`). The work's `SpendAccount` names the budgets it charges: a
   task's (`task:{id}`, the budget in its metadata, else the production `MAX_*` defaults), a teaching session's teacher
   turns (`session:{id}`), the grading of one API assessment attempt (`attempt:{id}`, plus the session's when a
-  teaching session submitted it), and the optional daily caps per learner and across all work. A reservation adds the
+  teaching session submitted it), and the optional daily caps per learner and across all work (UTC days, the day of
+  each reservation: an attempt reserved before midnight is settled, swept or corrected on that day's counters, never
+  split or moved to the next). A reservation adds the
   attempt's estimate to every counter of the account in one transaction, each a conditional increment
   (`settled + reserved + estimate <= limit` in the UPDATE itself), so concurrent calls cannot pass the same check; it
   is refused (`BudgetExceededError`, nothing sent) when any counter has no room, and refused with `LeaseLost` when the
