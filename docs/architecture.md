@@ -497,10 +497,22 @@ Agents ──► Tools / ModelRouter ──► provider interfaces (*.base) ─�
 - **Run mode.** `TEACHING_AGENT_MODE=offline` (the default, or `TEACHING_AGENT_OFFLINE=true`) makes a real provider a
   startup error and makes the HTTP client refuse any request; the test suite runs this way, so CI needs no keys.
   Real providers run only with `TEACHING_AGENT_MODE=production`, never because a key is present.
-- **Budgets.** The invoker asks the task's `UsageLedger` before every billable request (`admit`) and records every
-  attempt as a `ProviderRequestRecord` (request id, node, agent, attempt, status, units, cost). A production task's
-  budget lives in its metadata; a limit stops the task with `BudgetExceededError`, which is never retried or fallen
-  back from. `TaskUsage` is summed from the records.
+- **Budgets and the spend ledger.** Every billable provider attempt is *reserved* before it is sent and *settled*
+  once after, in the durable spend ledger (`spend_entries`, `spend_counters`; `SqlSpendRepository` behind the
+  `SpendStore` protocol in `app/observability/spend.py`). The work's `SpendAccount` names the budgets it charges: a
+  task's (`task:{id}`, the budget in its metadata, else the production `MAX_*` defaults), a teaching session's teacher
+  turns (`session:{id}`), the grading of one API assessment attempt (`attempt:{id}`, plus the session's when a
+  teaching session submitted it), and the optional daily caps per learner and across all work. A reservation adds the
+  attempt's estimate to every counter of the account in one transaction, each a conditional increment
+  (`settled + reserved + estimate <= limit` in the UPDATE itself), so concurrent calls cannot pass the same check; it
+  is refused (`BudgetExceededError`, nothing sent) when any counter has no room, and refused with `LeaseLost` when the
+  task worker no longer holds its lease. Settlement is never fenced: money a provider may have charged is recorded
+  whatever happened to the lease. Entry ids are our own request ids (`preq_...`), one per attempt, with one operation
+  id (`pop_...`) per logical call; a provider's request id is only stored alongside. The in-memory usage summary
+  (`UsageLedger.summary`, checkpointed with the task) is kept as before for reports; the ledger is the source of
+  truth for budgets. A budget stop is never retried or fallen back from; interactive routes answer 429 for it
+  (`BudgetExhausted`), distinct from 503. Details, the states and the crash-recovery policy:
+  [production](production.md#the-spend-ledger).
 
 ## Agents
 

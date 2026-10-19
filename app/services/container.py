@@ -37,6 +37,7 @@ from app.pedagogy.strategy import StrategyRegistry
 from app.observability.events import EventBus
 from app.observability.logging import log_event
 from app.observability.redaction import register_secret
+from app.observability.spend import SpendStore
 from app.providers.core.http import HttpClient
 from app.providers.core.invoker import ProviderInvoker
 from app.providers.core.registry import ProviderRegistry
@@ -115,6 +116,7 @@ from app.storage.repositories import (
     SqlGoalRepository,
     SqlLearnerRepository,
     SqlLearningEventRepository,
+    SqlSpendRepository,
     SqlTaskRepository,
     SqlAssessmentRepository,
     SqlLearningCycleRepository,
@@ -389,6 +391,7 @@ class Container:
     ownership: OwnershipService
     catalog: CatalogService
     production: ProductionService
+    spend: SpendStore  # the spend ledger: entries and budget counters, read-only for callers
     _sessions: object
 
     def close(self) -> None:
@@ -418,6 +421,8 @@ def build_container(
 
     sessions = create_db(settings.resolved_database_url)
     task_repo = SqlTaskRepository(sessions, clock)
+    spend = SqlSpendRepository(sessions, clock)  # the durable spend ledger and budget counters
+    budgets = settings.budget_defaults()
     event_repo = SqlEventRepository(sessions, clock)
     events = EventBus()
     events.subscribe_fenced(event_repo.append)  # a task worker's events are stored only while it holds its lease
@@ -549,19 +554,21 @@ def build_container(
     )
     planner = WorkflowPlanner([lesson_template(options), evaluation_template(), curriculum_template()], router, agents)
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,
-                                agents=agents, tools=tools, router=router, events=events, observers=observers)
+                                agents=agents, tools=tools, router=router, events=events, observers=observers,
+                                spend=spend, budgets=budgets, clock=clock)
     task_service = TaskService(orchestrator, task_repo, event_repo, artifacts)
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
     curriculum_service = CurriculumService(memory, RetrieverKnowledgeBase(retriever), curriculum, task_service, events)
     assessment_service = AssessmentService(
         SqlAssessmentRepository(sessions, clock), AgentSemanticGrader(agents, tools, router, events), artifacts=artifacts,
         memory=memory, knowledge=RetrieverKnowledgeBase(retriever), curriculum=curriculum_service,
-        tasks=task_service, events=events, config=assessment_config)
+        tasks=task_service, events=events, config=assessment_config, spend=spend, budgets=budgets)
     assessment_port.bind(assessment_service)
     teaching_service = TeachingSessionService(
         SqlTeachingRepository(sessions), TeachingRuntime(agents, tools, router, events), artifacts=artifacts,
         memory=memory, knowledge=RetrieverKnowledgeBase(retriever), curriculum=curriculum_service,
-        tasks=task_service, events=events, assessment=assessment_service, config=settings.teaching_config())
+        tasks=task_service, events=events, assessment=assessment_service, config=settings.teaching_config(),
+        spend=spend, budgets=budgets)
     learning_cycle_service = LearningCycleService(
         SqlLearningCycleRepository(sessions), curriculum=curriculum_service, tasks=task_service,
         teaching=teaching_service, memory=memory, artifacts=artifacts, events=events, event_log=event_repo,
@@ -580,6 +587,7 @@ def build_container(
         production=ProductionService(settings=settings, events=events, registry=providers.registry,
                                      selector=providers.selector, router=router, agents=agents, tools=tools,
                                      planner=planner, frameworks=frameworks, tasks=task_service,
-                                     learners=learner_service),
+                                     learners=learner_service, spend=spend),
+        spend=spend,
         _sessions=sessions,
     )

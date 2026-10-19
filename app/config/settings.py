@@ -21,6 +21,7 @@ from app.schemas.pedagogy import (
 )
 from app.schemas.assessment import AssessmentConfig
 from app.schemas.teaching import TeachingConfig
+from app.schemas.usage import BudgetDefaults, TaskBudget
 from app.schemas.video import VideoConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -143,8 +144,43 @@ class Settings(BaseSettings):
     auth_gateway_max_skew_seconds: int = Field(default=300, ge=1, le=3600)
     auth_static_tokens_file: Path | None = None
 
+    # Budgets of work that carries none of its own (see BudgetDefaults and docs/configuration.md). Every task without
+    # a budget in its metadata gets the production limits above (MAX_LLM_REQUESTS, ...). A teaching session's teacher
+    # turns and the grading of one API assessment attempt have their own limits (TA_BUDGET_SESSION_*,
+    # TA_BUDGET_ATTEMPT_*). The daily caps per learner and across all work (UTC days) are off unless set.
+    budget_session_max_llm_requests: int | None = Field(default=200, ge=0)
+    budget_session_max_llm_tokens: int | None = Field(default=400_000, ge=0)
+    budget_session_max_cost_usd: float | None = Field(default=None, ge=0)
+    budget_attempt_max_llm_requests: int | None = Field(default=6, ge=0)
+    budget_attempt_max_llm_tokens: int | None = Field(default=100_000, ge=0)
+    budget_attempt_max_cost_usd: float | None = Field(default=None, ge=0)
+    budget_learner_daily_max_llm_requests: int | None = Field(default=None, ge=0)
+    budget_learner_daily_max_llm_tokens: int | None = Field(default=None, ge=0)
+    budget_learner_daily_max_cost_usd: float | None = Field(default=None, ge=0)
+    budget_global_daily_max_llm_requests: int | None = Field(default=None, ge=0)
+    budget_global_daily_max_llm_tokens: int | None = Field(default=None, ge=0)
+    budget_global_daily_max_cost_usd: float | None = Field(default=None, ge=0)
+    # A reservation nobody settled this long after its attempt's timeout is presumed abandoned (crashed process): it
+    # is then recorded as `unknown` and its estimate charged.
+    spend_reservation_grace_seconds: float = Field(default=60.0, ge=0, le=3600)
+
     log_level: str = "INFO"
     log_json: bool = True
+
+    def budget_defaults(self) -> BudgetDefaults:
+        def budget(prefix: str) -> TaskBudget | None:
+            limits = {f: getattr(self, f"budget_{prefix}_{f}") for f in ("max_llm_requests", "max_llm_tokens",
+                                                                       "max_cost_usd")}
+            return TaskBudget(**limits) if any(v is not None for v in limits.values()) else None
+
+        # Tasks without a budget of their own get the production limits, except MAX_SEARCHED_IMAGES: it is 0 for
+        # production runs only because no real image search adapter exists yet, it is not a spending limit (searched
+        # images are charged by cost, there is no counter for them), and off-production the mock search works.
+        task = self.production.budget().model_copy(update={"max_searched_images": None})
+        return BudgetDefaults(task=task, session=budget("session") or TaskBudget(),
+                              attempt=budget("attempt") or TaskBudget(), learner_daily=budget("learner_daily"),
+                              global_daily=budget("global_daily"),
+                              reservation_grace_seconds=self.spend_reservation_grace_seconds)
 
     @property
     def resolved_database_url(self) -> str:

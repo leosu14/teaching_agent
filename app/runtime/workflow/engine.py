@@ -124,7 +124,7 @@ class WorkflowEngine:
         for ns in state.node_states.values():
             if ns.status == NodeStatus.RUNNING:  # interrupted mid-node: run it again from its own progress
                 ns.status = NodeStatus.PENDING
-        view = StateView(state, task)
+        view = StateView(state, task, scope.usage.budget)
 
         while True:
             control = hooks.control()
@@ -271,7 +271,7 @@ class WorkflowEngine:
                       hooks: EngineHooks) -> list[str]:
         """Let every node the task was waiting in release its outside work (a cancelled task). Returns their ids."""
         state = task.workflow or definition.initial_state()
-        view = StateView(state, task)
+        view = StateView(state, task, scope.usage.budget)
         released = []
         for node in definition.nodes:
             if state.node_states[node.id].status == NodeStatus.WAITING and not isinstance(node, HumanApprovalNode):

@@ -11,6 +11,7 @@ from app.agents.assessment.agent import AGENT_ID
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
 from app.observability.events import EventBus
+from app.observability.budget import BudgetExceededError
 from app.observability.scope import ExecutionScope, UsageLedger
 from app.providers.llm.router import ModelRouter
 from app.schemas.assessment import GraderUsage, SemanticGradeCandidate, SemanticGraderResult, SemanticGradingRequest
@@ -48,7 +49,9 @@ class AgentSemanticGrader:
             output = await agent.execute(request, AgentContext(router=self._router, tools=self._tools, scope=scope))
             assert isinstance(output, SemanticGradeCandidate)
             candidate = output
-        except Exception as exc:  # invalid output after retries, every provider down, a budget error
+        except BudgetExceededError:  # not a grading outcome: the caller stops (a task fails, the API answers 429)
+            raise
+        except Exception as exc:  # invalid output after retries, every provider down
             error = f"{type(exc).__name__}: {str(exc)[:300]}"
         after = scope.usage.summary.by_agent.get(AGENT_ID)
         used = [m for m, line in scope.usage.summary.by_model.items() if line.calls > models_before.get(m, 0)]

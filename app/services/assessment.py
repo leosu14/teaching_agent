@@ -36,7 +36,9 @@ from app.assessment.errors import (
 from app.assessment.repository import AssessmentRepository
 from app.learner.memory import LearnerMemoryService
 from app.observability.events import EventBus
+from app.observability.budget import BudgetExceededError
 from app.observability.scope import ExecutionScope, UsageLedger
+from app.observability.spend import SpendStore, attempt_account
 from app.pedagogy.knowledge import KnowledgeBase
 from app.runtime.interaction.grader import AgentSemanticGrader
 from app.schemas.artifact import Artifact, ArtifactType
@@ -63,6 +65,8 @@ from app.schemas.assessment import (
 from app.schemas.common import new_id, utcnow
 from app.schemas.events import EventType
 from app.schemas.learner import LearningEvidence, graded_correctness, stable_id
+from app.schemas.usage import BudgetDefaults
+from app.services.budgets import BudgetExhausted
 from app.services.curriculum import CurriculumService
 from app.services.lessons import LessonMaterial, LessonNotReady, load_lesson
 from app.services.tasks import TaskService
@@ -99,8 +103,11 @@ class AssessmentService:
     def __init__(self, repository: AssessmentRepository, grader: AgentSemanticGrader | None, *,
                  artifacts: ArtifactService, memory: LearnerMemoryService, knowledge: KnowledgeBase,
                  curriculum: CurriculumService, tasks: TaskService, events: EventBus,
-                 config: AssessmentConfig | None = None, clock: Callable[[], datetime] = utcnow) -> None:
+                 config: AssessmentConfig | None = None, clock: Callable[[], datetime] = utcnow,
+                 spend: SpendStore | None = None, budgets: BudgetDefaults | None = None) -> None:
         self._repo = repository
+        self._spend = spend
+        self._budgets = budgets or BudgetDefaults()
         self._grader = grader
         self._artifacts = artifacts
         self._memory = memory
@@ -163,7 +170,7 @@ class AssessmentService:
                 raise InvalidAssessmentRequest(f"rubric {item.rubric_id} is not registered")
         if rubric is not None:
             self._repo.save_rubric(rubric)
-        scope = self._scope(request.task_id, scope)
+        scope = self._scope(request.task_id, scope, request)
         grade_id = grade_id_for(request.attempt_id, item.assessment_item_id)
         scope.events.emit(EventType.ASSESSMENT_STARTED, task_id=scope.task_id, node_id=scope.node_id, fence=scope.fence,
                           event_id=stable_id("aevt", request.attempt_id, "started"), attempt_id=request.attempt_id,
@@ -232,9 +239,12 @@ class AssessmentService:
             raise InvalidAssessmentRequest(f"item {item_id} has no lesson")
         if m.task.learner_id != data.learner_id:
             raise InvalidAssessmentRequest("the item's lesson belongs to another learner")
-        result = await self.assess(AssessRequest(
-            item=item, learner_id=data.learner_id, answer=data.answer, attempt_id=data.attempt_id or new_id("att"),
-            task_id=m.task.task_id, source="api"))
+        try:
+            result = await self.assess(AssessRequest(
+                item=item, learner_id=data.learner_id, answer=data.answer, attempt_id=data.attempt_id or new_id("att"),
+                task_id=m.task.task_id, source="api"))
+        except BudgetExceededError as exc:  # nothing was stored: the same attempt can be submitted again later
+            raise BudgetExhausted() from exc
         attempt = result.attempt
         if attempt.completed_at is None:  # new, or a crash left it unfinished: record its evidence (idempotent)
             outcome = await self._record(attempt, result.grade, item, m, result.artifact_ids)
@@ -352,10 +362,20 @@ class AssessmentService:
 
     # --- publishing ----------------------------------------------------------------------------------------------
 
-    def _scope(self, task_id: str | None, scope: ExecutionScope | None) -> ExecutionScope:
+    def _scope(self, task_id: str | None, scope: ExecutionScope | None,
+               request: AssessRequest | None = None) -> ExecutionScope:
+        """The caller's scope (a workflow node: the task's own budget pays), else a scope of its own. Grading an
+        answer outside a task (through the API, or in a teaching session) spends against the attempt's budget, and
+        the session's as well for a session's answer, in the durable spend ledger."""
         if scope is not None:
             return scope
-        return ExecutionScope(events=self._events, usage=UsageLedger(), task_id=task_id, node_id=NODE_ID)
+        usage = UsageLedger()
+        if request is not None and self._spend is not None:
+            session_id = request.item.metadata.get("session_id") if request.source == "teaching_session" else None
+            usage = UsageLedger(account=attempt_account(
+                self._spend, self._budgets, attempt_id=request.attempt_id, task_id=task_id,
+                learner_id=request.learner_id, session_id=session_id, clock=self._clock))
+        return ExecutionScope(events=self._events, usage=usage, task_id=task_id, node_id=NODE_ID)
 
     def _store(self, task_id: str, name: str, type: ArtifactType, content: dict, parents: list[str], metadata: dict,
                scope: ExecutionScope) -> Artifact:

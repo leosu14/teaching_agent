@@ -64,6 +64,7 @@ from app.schemas.teaching import (
     TeachingSession,
     TeachingSessionStatus,
 )
+from app.services.budgets import BudgetExhausted
 from app.services.curriculum import CurriculumService, InvalidGoal
 from app.services.tasks import TaskBusy, TaskService
 from app.services.teaching import (
@@ -207,7 +208,7 @@ class LearningCycleService:
                 try:
                     await self._teaching.submit(child, LearnerInput(answer=data.answer or "", kind=data.kind,
                                                                     client_turn_id=turn_id))
-                except TeacherUnavailable:
+                except (TeacherUnavailable, BudgetExhausted):
                     pass  # the answer is stored; the cycle sees the session owe a reply and blocks (provider)
                 except (InvalidSessionTransition, InvalidTeachingRequest) as exc:
                     await self._refused(cycle.cycle_id, record, exc)
@@ -259,7 +260,7 @@ class LearningCycleService:
                 task = self._tasks.get(step.child_id)
                 if task.status in (TaskStatus.FAILED, TaskStatus.PAUSED):
                     await self._tasks.resume(step.child_id)
-        except (TeacherUnavailable, InvalidTransition, InvalidSessionTransition, LeaseLost):
+        except (TeacherUnavailable, BudgetExhausted, InvalidTransition, InvalidSessionTransition, LeaseLost):
             pass  # still failing, or another worker runs it (TaskBusy): the next observation says which
 
     async def cancel(self, cycle_id: str) -> LearningCycleView:
@@ -478,7 +479,7 @@ class LearningCycleService:
             started = await self._teaching.start(lesson, StartTeachingSession(idempotency_key=step.child_key,
                                                                                action=step.session_action))
             return started.session_id, False
-        except TeacherUnavailable:  # created, but its opening failed: found by key, then observed (and blocked)
+        except (TeacherUnavailable, BudgetExhausted):  # created, its opening failed: found by key, then observed
             found = self._find_child(cycle, step)
             if found is None:
                 raise
@@ -502,7 +503,7 @@ class LearningCycleService:
                           or (session.status == Session.COMPLETED and session.outcome is None)):
                 try:
                     await self._teaching.resume(step.child_id)
-                except TeacherUnavailable:  # fixed text: the exception's own text is never copied to the learner
+                except (TeacherUnavailable, BudgetExhausted):  # fixed text, never the exception's own
                     return self._failed(FailureKind.PROVIDER, True, TEACHER_FAILURE_MESSAGE, step)
                 session = await self._teaching.get(step.child_id)
             return self._session_observation(session, step)

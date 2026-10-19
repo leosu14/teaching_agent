@@ -24,7 +24,9 @@ from datetime import datetime
 from app.artifacts.service import ArtifactService
 from app.learner.memory import LearnerMemoryService
 from app.observability.events import EventBus
+from app.observability.budget import BudgetExceededError
 from app.observability.scope import ExecutionScope, UsageLedger
+from app.observability.spend import SpendStore, session_account
 from app.pedagogy.knowledge import KnowledgeBase
 from app.runtime.interaction.teacher import TeacherTurnFailed, TeachingRuntime
 from app.schemas.artifact import Artifact, ArtifactType
@@ -66,7 +68,9 @@ from app.schemas.teaching import (
     TeachingTurnInput,
     TurnBrief,
 )
+from app.schemas.usage import BudgetDefaults
 from app.services.assessment import AssessmentService
+from app.services.budgets import BudgetExhausted, budget_cause
 from app.services.curriculum import CurriculumService
 from app.services.lessons import LessonMaterial, LessonNotReady, load_lesson
 from app.services.tasks import TaskService
@@ -92,8 +96,11 @@ class TeachingSessionService:
     def __init__(self, repository: TeachingRepository, runtime: TeachingRuntime, *, artifacts: ArtifactService,
                  memory: LearnerMemoryService, knowledge: KnowledgeBase, curriculum: CurriculumService,
                  tasks: TaskService, events: EventBus, assessment: AssessmentService,
-                 config: TeachingConfig | None = None, clock: Callable[[], datetime] = utcnow) -> None:
+                 config: TeachingConfig | None = None, clock: Callable[[], datetime] = utcnow,
+                 spend: SpendStore | None = None, budgets: BudgetDefaults | None = None) -> None:
         self._repo = repository
+        self._spend = spend
+        self._budgets = budgets or BudgetDefaults()
         self._runtime = runtime
         self._artifacts = artifacts
         self._memory = memory
@@ -245,6 +252,8 @@ class TeachingSessionService:
                 source="teaching_session", source_ref=turn_id))
         except AttemptConflict as exc:  # a different answer to the same turn, sent concurrently
             raise SessionConflict(str(exc)) from exc
+        except BudgetExceededError as exc:  # nothing was graded or stored: the answer can be sent again later
+            raise BudgetExhausted() from exc
         g = result.grade
         return AnswerAssessment(
             outcome=g.outcome.value, score=g.fraction, grader_type=g.grader_type.value, grade_id=g.grade_id,
@@ -422,9 +431,12 @@ class TeachingSessionService:
             item = work.state.planned[0]
             data = self._context(work, item, m, [*history, *change.turns], [*evidence_so_far, *change.evidence])
             try:
-                output, _usage = await self._runtime.teacher_turn(data, task_id=session.task_id)
+                output, _ = await self._runtime.teacher_turn(data, task_id=session.task_id,
+                                                             usage=self._turn_ledger(session))
                 part = engine.apply_teacher(work, item, output, now)
             except (TeacherTurnFailed, ValueError) as exc:
+                if budget_cause(exc) is not None:
+                    raise BudgetExhausted() from exc  # 429: the session's (or a daily) budget is used up
                 raise TeacherUnavailable() from exc  # fixed text; the cause stays internal
             change.turns += part.turns
             change.evidence += part.evidence
@@ -513,6 +525,14 @@ class TeachingSessionService:
         return items
 
     # --- publishing (outbox) -------------------------------------------------------------------------------------
+
+    def _turn_ledger(self, session: TeachingSession) -> UsageLedger:
+        """Teacher turns spend against the session's budget (and the configured daily caps), durably recorded."""
+        if self._spend is None:
+            return UsageLedger(budget=self._budgets.session)
+        return UsageLedger(account=session_account(self._spend, self._budgets, session_id=session.session_id,
+                                                   task_id=session.task_id, learner_id=session.learner_id,
+                                                   clock=self._clock))
 
     def _scope(self, session: TeachingSession) -> ExecutionScope:
         return ExecutionScope(events=self._events, usage=UsageLedger(), task_id=session.task_id,

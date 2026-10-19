@@ -4,6 +4,11 @@ ever sees a vendor exception.
 `transient` says whether the same request may succeed later. It drives fallback (only transient failures move to a
 configured fallback provider) and the callers' own retry policies. Provider-level retry is narrower: only the typed
 transient failures below (timeout, rate limit, unavailable) are retried by the provider layer.
+
+`possibly_billed` says what the failure tells about the vendor's side, for the spend ledger: True when the vendor
+may have processed (and billed) the request (the connection broke after the response started, or a gateway or
+server error that can follow execution), False when it certainly did not (the connection was never established), None
+when the error type decides (see `failure_state` in invoker.py).
 """
 
 from __future__ import annotations
@@ -15,12 +20,14 @@ class ProviderError(Exception):
     default_transient = True
 
     def __init__(self, message: str, *, transient: bool | None = None, provider: str | None = None,
-                 status: int | None = None, request_id: str | None = None) -> None:
+                 status: int | None = None, request_id: str | None = None,
+                 possibly_billed: bool | None = None) -> None:
         super().__init__(message)
         self.transient = self.default_transient if transient is None else transient
         self.provider = provider
         self.status = status
         self.request_id = request_id
+        self.possibly_billed = possibly_billed
 
 
 class ProviderTimeout(ProviderError, TimeoutError):

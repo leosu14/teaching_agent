@@ -32,6 +32,8 @@ from app.config.settings import Settings
 from app.learner.frameworks import FrameworkRegistry, UnknownFramework
 from app.observability.events import EventBus
 from app.observability.scope import ExecutionScope, UsageLedger, task_usage
+from app.observability.spend import SpendStore, task_scope
+from app.schemas.spend import SpendState
 from app.providers.core.registry import ProviderRegistry
 from app.providers.core.selector import ProviderSelector
 from app.providers.llm.router import ModelRouter
@@ -56,6 +58,7 @@ from app.schemas.production import (
     NodeTrace,
     InteractiveTeachingPlan,
     ProductionPlan,
+    SpendSummary,
     ProductionReport,
     ProductionTask,
     ProviderChoice,
@@ -118,8 +121,9 @@ class ProductionService:
     def __init__(self, *, settings: Settings, events: EventBus, registry: ProviderRegistry,
                  selector: ProviderSelector, router: ModelRouter, agents: AgentRegistry, tools: ToolManager,
                  planner: WorkflowPlanner, frameworks: FrameworkRegistry, tasks: TaskService,
-                 learners: LearnerService) -> None:
+                 learners: LearnerService, spend: SpendStore | None = None) -> None:
         self._settings = settings
+        self._spend = spend
         self._events = events
         self._registry = registry
         self._selector = selector
@@ -427,6 +431,7 @@ class ProductionService:
                            artifact_ids=[a.artifact_id for a in graph if a.node_id == s.node_id])
                  for s in task.steps()]
         usage = task_usage(task.cost)
+        spend = self._spend_summary(task)
         video = self._final_video(artifacts)
         result_warnings = task.result.warnings if task.result else []
         return ProductionReport(
@@ -439,7 +444,21 @@ class ProductionService:
             estimated_cost_usd=usage.estimated_cost_usd, cost_complete=usage.cost_complete,
             warnings=[*plan.warnings, *outcome.warnings, *result_warnings], errors=task.errors,
             final_video=video, summary=self._summary(task, artifacts), evaluation_task_id=evaluation_task_id,
+            spend=spend,
         )
+
+    def _spend_summary(self, task: Task) -> SpendSummary | None:
+        if self._spend is None:
+            return None
+        self._spend.expire_abandoned(utcnow())
+        entries = self._spend.entries(task_id=task.task_id)
+        totals = self._spend.totals([task_scope(task.task_id)]).get(task_scope(task.task_id), {})
+        return SpendSummary(
+            settled={m: t.settled for m, t in sorted(totals.items())},
+            reserved={m: t.reserved for m, t in sorted(totals.items()) if t.reserved},
+            attempts=len(entries), unknown_attempts=sum(e.state == SpendState.UNKNOWN for e in entries),
+            estimated_attempts=sum(e.state == SpendState.SETTLED and e.usage_source != "reported" for e in entries),
+            workers=len({e.worker for e in entries if e.worker}))
 
     @staticmethod
     def _final_video(artifacts: list[Artifact]) -> FinalVideo | None:

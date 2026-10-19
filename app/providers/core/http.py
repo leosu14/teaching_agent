@@ -34,6 +34,7 @@ from app.providers.core.errors import (
 
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 TRANSIENT_STATUS = {408, 409, 425, 500, 502, 503, 504, 529}
+NOT_PROCESSED_STATUS = {503, 529}  # overload refusals: the request was not executed
 VENDOR_REQUEST_ID_HEADERS = ("x-request-id", "request-id", "x-amzn-requestid")
 ERROR_EXCERPT = 300
 
@@ -138,10 +139,12 @@ class HttpClient:
         if request_id and self.request_id_header:
             headers[self.request_id_header] = request_id
         url = f"{self.base_url}/{path.lstrip('/')}"
+        started = False  # the response's status line and headers arrived: the vendor received the request
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds), follow_redirects=False,
                                          transport=self._transport) as client:
                 async with client.stream(method, url, content=body, headers=headers, params=params) as response:
+                    started = True
                     chunks, size = [], 0
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
@@ -157,7 +160,7 @@ class HttpClient:
             raise self._error(ProviderTimeout, f"timed out after {self.timeout_seconds}s "
                                                f"({type(exc).__name__})") from None
         except (httpx.TransportError, OSError) as exc:
-            raise self._error(ProviderUnavailable, f"connection failed ({type(exc).__name__})") from None
+            raise self._transport_error(exc, started, "connection") from None
         vendor_id = next((resp_headers[h] for h in VENDOR_REQUEST_ID_HEADERS if h in resp_headers), None)
         result = HttpResponse(status=status, content=content, content_type=resp_headers.get("content-type", ""),
                               vendor_request_id=vendor_id)
@@ -178,10 +181,12 @@ class HttpClient:
             raise self._error(ProviderResponseError, f"refusing to download from an unsafe URL ({exc})") from None
         limit = max_bytes or self.max_response_bytes
         httpx = _httpx()
+        started = False
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds), follow_redirects=False,
                                          transport=self._transport) as client:
                 async with client.stream("GET", url, headers={"Accept": "*/*"}) as response:
+                    started = True
                     chunks, size = [], 0
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
@@ -196,12 +201,24 @@ class HttpClient:
             raise self._error(ProviderTimeout, f"download timed out after {self.timeout_seconds}s "
                                                f"({type(exc).__name__})") from None
         except (httpx.TransportError, OSError) as exc:
-            raise self._error(ProviderUnavailable, f"download failed ({type(exc).__name__})") from None
+            raise self._transport_error(exc, started, "download") from None
         result = HttpResponse(status=status, content=content, content_type=resp_headers.get("content-type", ""),
                               vendor_request_id=None)
         if status >= 300:
             raise self._status_error(result, resp_headers.get("retry-after"))
         return result
+
+    def _transport_error(self, exc: BaseException, started: bool, what: str) -> ProviderError:
+        """A broken connection. Only a failure to establish it (DNS, refused, unsupported URL) proves the vendor never
+        received the request; anything later (the request written, the response cut off mid-body) may have been
+        processed and billed. Either way the failure is transient (retried as before)."""
+        httpx = _httpx()
+        if started:
+            return self._error(ProviderUnavailable, f"{what} lost while reading the response ({type(exc).__name__})",
+                               possibly_billed=True)
+        never_sent = isinstance(exc, (httpx.ConnectError, httpx.UnsupportedProtocol))
+        return self._error(ProviderUnavailable, f"{what} failed ({type(exc).__name__})",
+                           possibly_billed=not never_sent)
 
     def _status_error(self, response: HttpResponse, retry_after: str | None) -> ProviderError:
         status = response.status
@@ -213,7 +230,10 @@ class HttpClient:
         if status == 429:
             return self._error(ProviderRateLimit, message, status=status, retry_after=_retry_after(retry_after))
         if status in TRANSIENT_STATUS or status >= 500:
-            return self._error(ProviderUnavailable, message, status=status)
+            # 503 and 529 are the vendors' "overloaded, not processed" answers; any other 5xx (an internal error, a
+            # gateway that lost the upstream answer, a gateway timeout) can follow a billed execution.
+            billed = status >= 500 and status not in NOT_PROCESSED_STATUS
+            return self._error(ProviderUnavailable, message, status=status, possibly_billed=billed or None)
         if 300 <= status < 400:
             return self._error(ProviderResponseError, f"{message}: redirects are not followed", status=status)
         return self._error(ProviderInvalidRequest, message, status=status)

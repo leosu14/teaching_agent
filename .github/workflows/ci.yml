@@ -53,3 +53,55 @@ jobs:
         run: python scripts/run_assessment_demo.py
       - name: Learning cycle demo (next action -> lesson -> WAITING -> restart -> session -> mastery -> next action -> COMPLETE)
         run: python scripts/run_learning_cycle_demo.py
+
+  postgres:
+    # The spend ledger's concurrency guarantees on PostgreSQL 16 (tests/postgres): races between threads and
+    # processes, the lease fence, the in-flight key and the sweep. SQLite serializes writers and cannot detect a
+    # regression to check-then-write; this job can. The database is a throwaway service with trust auth: no
+    # credential exists to leak.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ta
+          POSTGRES_DB: ta_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ta -d ta_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      TA_TEST_POSTGRES_URL: postgresql+psycopg://ta@localhost:5432/ta_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[dev,providers,postgres]"
+      - name: Wait for PostgreSQL
+        run: |
+          python - <<'PY'
+          import os, time
+          import psycopg
+          url = os.environ["TA_TEST_POSTGRES_URL"].replace("postgresql+psycopg://", "postgresql://")
+          for attempt in range(60):
+              try:
+                  with psycopg.connect(url, connect_timeout=2) as conn:
+                      conn.execute("SELECT 1")
+                  print("PostgreSQL is ready")
+                  break
+              except psycopg.OperationalError:
+                  time.sleep(1)
+          else:
+              raise SystemExit("PostgreSQL did not become ready")
+          PY
+      - name: PostgreSQL spend ledger tests (must run, not skip)
+        run: |
+          set -o pipefail
+          python -m pytest -q -rs tests/postgres | tee pg-tests.log
+          if grep -qi "skipped" pg-tests.log; then echo "tests/postgres was skipped"; exit 1; fi
