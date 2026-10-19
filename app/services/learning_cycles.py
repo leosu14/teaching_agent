@@ -85,6 +85,8 @@ CONFLICT_RETRIES = 5
 LEARNER_WAITS = {"diagnostic_answers", "assessment_answers"}  # task waits for the learner (others wait on work)
 # Fixed text for a teacher failure: never `str(exc)`, which could quote model output (and so an answer key).
 TEACHER_FAILURE_MESSAGE = "The teacher could not produce a response. You can retry the learning cycle."
+# Fixed text for a used-up budget (the session's, or a daily cap): retrying would be refused again, so no retry advice.
+BUDGET_FAILURE_MESSAGE = "The spending limit for this work has been reached. The learning cycle cannot continue."
 Session = TeachingSessionStatus
 
 
@@ -503,8 +505,12 @@ class LearningCycleService:
                           or (session.status == Session.COMPLETED and session.outcome is None)):
                 try:
                     await self._teaching.resume(step.child_id)
-                except (TeacherUnavailable, BudgetExhausted):  # fixed text, never the exception's own
+                except TeacherUnavailable:  # fixed text, never the exception's own
                     return self._failed(FailureKind.PROVIDER, True, TEACHER_FAILURE_MESSAGE, step)
+                except BudgetExhausted:  # classified as a child task's exhausted budget: not retryable
+                    category = "BudgetExceededError"
+                    kind, retryable = engine.classify_task_failure(category)
+                    return self._failed(kind, retryable, BUDGET_FAILURE_MESSAGE, step, category=category)
                 session = await self._teaching.get(step.child_id)
             return self._session_observation(session, step)
         task = self._tasks.get(step.child_id)

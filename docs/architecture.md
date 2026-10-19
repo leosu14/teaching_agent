@@ -838,8 +838,9 @@ drives it; the state machine is pure (`app/curriculum/cycle.py`); the schemas ar
   (`TaskService.resume` from the workflow checkpoint, `TeachingSessionService.resume`); completed side effects are
   never repeated.
 - **Failures.** VALIDATION (a stale or invalid action, an unmet completion rule, a configuration error: FAILED),
-  PROVIDER (retryable: BLOCKED), WORKFLOW (a failed workflow stage: BLOCKED; an exhausted budget or a failed session:
-  FAILED). Invalid learner input is refused with a 422 and changes nothing; the cycle keeps waiting.
+  PROVIDER (retryable: BLOCKED), WORKFLOW (a failed workflow stage: BLOCKED; an exhausted budget, a task's or the
+  teaching session's, or a failed session: FAILED). Invalid learner input is refused with a 422 and changes nothing;
+  the cycle keeps waiting.
 - **Artifacts.** LEARNING_GOAL → CURRICULUM_VERSION → LEARNING_OBJECTIVE → LEARNING_CYCLE → LESSON (a cycle's lesson
   and its LEARNING_ACTION draft hang off the cycle artifact) → ASSESSMENT_GRADE / TEACHING_SESSION → LEARNING_EVIDENCE;
   the `learning_cycle_outcome` artifact links the cycle, the lesson and the resulting LEARNING_ACTION or evaluation.
