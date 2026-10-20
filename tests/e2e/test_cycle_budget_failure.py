@@ -127,6 +127,46 @@ def test_exhausted_daily_cap_blocks_the_cycle_until_the_day_resets(cycle_env_at,
         assert len(env.llm.requests) > requests  # the owed reply was produced
 
 
+@pytest.mark.parametrize(("setting", "scope_key"), [
+    ("budget_learner_daily_max_llm_requests", lambda: learner_day_scope(LEARNER, DAY)),
+    ("budget_global_daily_max_llm_requests", lambda: global_day_scope(DAY)),
+])
+def test_daily_cap_does_not_mask_an_exhausted_session_budget(cycle_env_at, setting, scope_key) -> None:
+    """Both the session's budget and today's cap are used up. The ledger checks a reservation's counters in scope-key
+    order (`global:` and `learner:` before `session:`), so the daily cap refuses first and the cycle is BLOCKED. Once
+    the UTC day resets, the session's own budget refuses the owed reply: the cycle FAILS for good, with no paid call."""
+    clock = Clock(DAY)
+    env = cycle_env_at("session", clock=clock, budget_session_max_llm_requests=0, **{setting: CAP})
+    env.container.teaching_service._clock = clock
+    assert env.container.spend.seed(scope_key(), {"llm_requests": CAP}, now=DAY)
+    with client_for(env.container, LEARNER) as client:
+        cid, sid = _session_cycle(client)
+        requests = len(env.llm.requests)
+        r = client.post(f"/learning-cycles/{cid}/responses", json={"client_response_id": "r1", "answer": "hola"})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "BLOCKED" and r.json()["failure"]["message"] == DAILY_MESSAGE, r.json()
+        _assert_no_internals(r.text, sid)
+
+        again = client.post(f"/learning-cycles/{cid}/resume")
+        assert again.status_code == 200, again.text
+        assert again.json()["status"] == "BLOCKED" and again.json()["failure"]["message"] == DAILY_MESSAGE
+
+        # The next UTC day: the cap has room, the session's budget still has none.
+        clock.t = DAY + timedelta(hours=2)
+        after = client.post(f"/learning-cycles/{cid}/resume")
+        assert after.status_code == 200, after.text
+        body = after.json()
+        assert body["status"] == "FAILED", body
+        kind, retryable = engine.classify_task_failure("BudgetExceededError")
+        assert (body["failure"]["kind"], body["failure"]["retryable"], body["failure"]["message"],
+                body["failure"]["category"]) == (kind.value, retryable, BUDGET_MESSAGE, "BudgetExceededError")
+        _assert_no_internals(after.text, sid)
+        _assert_no_internals(client.get(f"/learning-cycles/{cid}/events").text, sid)
+
+        assert client.post(f"/learning-cycles/{cid}/resume").status_code == 409
+        assert len(env.llm.requests) == requests  # no paid call at any point
+
+
 def test_teacher_outage_stays_retryable(cycle_env_at) -> None:
     """A genuine provider failure of the same owed reply: BLOCKED, retryable, and resuming continues the session."""
     env = cycle_env_at("session")
