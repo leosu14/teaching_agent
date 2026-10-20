@@ -64,7 +64,7 @@ from app.schemas.teaching import (
     TeachingSession,
     TeachingSessionStatus,
 )
-from app.services.budgets import BudgetExhausted
+from app.services.budgets import BudgetExhausted, budget_cause
 from app.services.curriculum import CurriculumService, InvalidGoal
 from app.services.tasks import TaskBusy, TaskService
 from app.services.teaching import (
@@ -85,6 +85,12 @@ CONFLICT_RETRIES = 5
 LEARNER_WAITS = {"diagnostic_answers", "assessment_answers"}  # task waits for the learner (others wait on work)
 # Fixed text for a teacher failure: never `str(exc)`, which could quote model output (and so an answer key).
 TEACHER_FAILURE_MESSAGE = "The teacher could not produce a response. You can retry the learning cycle."
+# Fixed text for a used-up session budget: retrying would be refused again, so no retry advice.
+BUDGET_FAILURE_MESSAGE = "The spending limit for this work has been reached. The learning cycle cannot continue."
+# Fixed text for a used-up daily cap (learner or global): it has room again once the UTC day turns over.
+DAILY_BUDGET_FAILURE_MESSAGE = ("Today's spending limit has been reached. You can resume the learning cycle once the "
+                                "daily limit resets.")
+DAILY_SCOPES = ("learner", "global")  # the BudgetExceededError scopes that reset each UTC day
 Session = TeachingSessionStatus
 
 
@@ -503,8 +509,15 @@ class LearningCycleService:
                           or (session.status == Session.COMPLETED and session.outcome is None)):
                 try:
                     await self._teaching.resume(step.child_id)
-                except (TeacherUnavailable, BudgetExhausted):  # fixed text, never the exception's own
+                except TeacherUnavailable:  # fixed text, never the exception's own
                     return self._failed(FailureKind.PROVIDER, True, TEACHER_FAILURE_MESSAGE, step)
+                except BudgetExhausted as exc:
+                    cause = budget_cause(exc)
+                    if cause is not None and cause.scope in DAILY_SCOPES:  # retryable: BLOCKED until the day resets
+                        return self._failed(FailureKind.WORKFLOW, True, DAILY_BUDGET_FAILURE_MESSAGE, step)
+                    category = "BudgetExceededError"  # the session's own: as a child task's exhausted budget
+                    kind, retryable = engine.classify_task_failure(category)
+                    return self._failed(kind, retryable, BUDGET_FAILURE_MESSAGE, step, category=category)
                 session = await self._teaching.get(step.child_id)
             return self._session_observation(session, step)
         task = self._tasks.get(step.child_id)
