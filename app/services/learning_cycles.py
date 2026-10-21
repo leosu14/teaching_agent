@@ -85,7 +85,7 @@ CONFLICT_RETRIES = 5
 LEARNER_WAITS = {"diagnostic_answers", "assessment_answers"}  # task waits for the learner (others wait on work)
 # Fixed text for a teacher failure: never `str(exc)`, which could quote model output (and so an answer key).
 TEACHER_FAILURE_MESSAGE = "The teacher could not produce a response. You can retry the learning cycle."
-# Fixed text for a used-up session budget: retrying would be refused again, so no retry advice.
+# Fixed text for a used-up session or attempt budget: retrying would be refused again, so no retry advice.
 BUDGET_FAILURE_MESSAGE = "The spending limit for this work has been reached. The learning cycle cannot continue."
 # Fixed text for a used-up daily cap (learner or global): it has room again once the UTC day turns over.
 DAILY_BUDGET_FAILURE_MESSAGE = ("Today's spending limit has been reached. You can resume the learning cycle once the "
@@ -164,7 +164,7 @@ class LearningCycleService:
 
             async def redeliver(held: LearningCycle, token: str | None) -> None:
                 if not stored.applied:  # received, but a crash came before the child got it
-                    await self._deliver(held, stored, data)
+                    await self._deliver(held, stored, data, token)
 
             return await self._drive(cycle_id, replayed=True, before=redeliver)
         self._require_waiting(cycle)
@@ -184,7 +184,7 @@ class LearningCycleService:
             change = engine.receive(held, now)
             self._repo.apply(change, expected_version=held.version, request=received,  # the id is stored once
                              lease_token=token, at=now)
-            await self._deliver(await self._publish(change), received, data)
+            await self._deliver(await self._publish(change), received, data, token)
 
         try:
             return await self._drive(cycle_id, before=receive, busy_error=True)
@@ -200,7 +200,8 @@ class LearningCycleService:
             raise InvalidCycleTransition(f"cycle {cycle.cycle_id} is {cycle.status.value}: it is not waiting for the "
                                          f"learner")
 
-    async def _deliver(self, cycle: LearningCycle, record: CycleRequestRecord, data: CycleResponse) -> None:
+    async def _deliver(self, cycle: LearningCycle, record: CycleRequestRecord, data: CycleResponse,
+                       token: str | None) -> None:
         """Hand the response to the child at the waiting point it was given for, at most once."""
         step = cycle.step(record.step_id)
         child = step.child_id
@@ -214,8 +215,13 @@ class LearningCycleService:
                 try:
                     await self._teaching.submit(child, LearnerInput(answer=data.answer or "", kind=data.kind,
                                                                     client_turn_id=turn_id))
-                except (TeacherUnavailable, BudgetExhausted):
+                except TeacherUnavailable:
                     pass  # the answer is stored; the cycle sees the session owe a reply and blocks (provider)
+                except BudgetExhausted as exc:
+                    if self._teaching.repository.request(child, turn_id) is None:  # refused at grading: not stored
+                        await self._refused_by_budget(cycle.cycle_id, record, step, exc, token)
+                        return
+                    # stored, its reply refused: the cycle sees the session owe it and classifies it (`_observe`)
                 except (InvalidSessionTransition, InvalidTeachingRequest) as exc:
                     await self._refused(cycle.cycle_id, record, exc)
         else:
@@ -236,6 +242,17 @@ class LearningCycleService:
         self._repo.forget_request(cycle_id, record.client_response_id)
         await self._advance(cycle_id, token=None)  # back to WAITING on the same point
         raise InvalidCycleRequest(str(exc)) from exc
+
+    async def _refused_by_budget(self, cycle_id: str, record: CycleRequestRecord, step: CycleStep,
+                                 exc: BudgetExhausted, token: str | None) -> None:
+        """A budget refused grading the answer, so the session never got it: the response id may be used again, and
+        the cycle fails (or blocks, for a daily cap) as when the teacher's reply is refused. Asking again with no
+        message would loop on the same question."""
+        self._repo.forget_request(cycle_id, record.client_response_id)
+        cycle = await self._load(cycle_id)
+        if token is not None and cycle.status in ACTIVE_CYCLE_STATUSES:
+            await self._commit(cycle, engine.observe(cycle, step.step_id, self._budget_failed(exc, step),
+                                                     self._clock()), token)
 
     # --- control -------------------------------------------------------------------------------------------------
 
@@ -512,12 +529,7 @@ class LearningCycleService:
                 except TeacherUnavailable:  # fixed text, never the exception's own
                     return self._failed(FailureKind.PROVIDER, True, TEACHER_FAILURE_MESSAGE, step)
                 except BudgetExhausted as exc:
-                    cause = budget_cause(exc)
-                    if cause is not None and cause.scope in DAILY_SCOPES:  # retryable: BLOCKED until the day resets
-                        return self._failed(FailureKind.WORKFLOW, True, DAILY_BUDGET_FAILURE_MESSAGE, step)
-                    category = "BudgetExceededError"  # the session's own: as a child task's exhausted budget
-                    kind, retryable = engine.classify_task_failure(category)
-                    return self._failed(kind, retryable, BUDGET_FAILURE_MESSAGE, step, category=category)
+                    return self._budget_failed(exc, step)
                 session = await self._teaching.get(step.child_id)
             return self._session_observation(session, step)
         task = self._tasks.get(step.child_id)
@@ -739,6 +751,15 @@ class LearningCycleService:
         given = [a.question_id for a in data.answers]
         if not given or len(set(given)) != len(given) or not set(given) <= asked:
             raise InvalidCycleRequest("the answers must name the shown questions, each at most once")
+
+    def _budget_failed(self, exc: BudgetExhausted, step: CycleStep) -> Observation:
+        """A session's work refused by a budget (its reply, or the grading of an answer), in fixed text."""
+        cause = budget_cause(exc)
+        if cause is not None and cause.scope in DAILY_SCOPES:  # retryable: BLOCKED until the day resets
+            return self._failed(FailureKind.WORKFLOW, True, DAILY_BUDGET_FAILURE_MESSAGE, step)
+        category = "BudgetExceededError"  # the session's or the attempt's own: as a child task's exhausted budget
+        kind, retryable = engine.classify_task_failure(category)
+        return self._failed(kind, retryable, BUDGET_FAILURE_MESSAGE, step, category=category)
 
     def _failure(self, kind: FailureKind, message: str | None, step: CycleStep | None, *,
                  retryable: bool = False, category: str | None = None) -> CycleFailure:
