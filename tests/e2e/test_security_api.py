@@ -64,7 +64,9 @@ def world(cycle_env_at):
         assert attempt.status_code == 201, attempt.text
     ids = {"learner": LEARNER, "goal": c.curriculum_service.goals(LEARNER)[0].goal_id, "cycle": cycle.cycle_id,
            "task": lesson_task, "evaluation": evaluation, "session": session, "item": "sec-item",
-           "attempt": "sec-attempt", "lesson": c.artifacts.find(lesson_task, "lesson").artifact_id}
+           "attempt": "sec-attempt", "lesson": c.artifacts.find(lesson_task, "lesson").artifact_id,
+           # a learning cycle's own artifact: owned through the cycle, not a task
+           "artifact": c.learning_cycle_service.artifacts(cycle.cycle_id)[0].artifact_id}
     yield env, ids, auth
 
 
@@ -117,6 +119,7 @@ def routes(ids: dict) -> list[tuple[str, str, dict | None]]:
         ("POST", f"/learning-cycles/{cid}/cancel", None),
         ("GET", f"/learning-cycles/{cid}/events", None),
         ("GET", f"/learning-cycles/{cid}/artifacts", None),
+        ("GET", f"/artifacts/{ids['artifact']}/content", None),
     ]
 
 
@@ -125,7 +128,8 @@ def template(path: str, ids: dict) -> str:
     path = path.split("?")[0]
     names = {ids["learner"]: "learner_id", ids["goal"]: "goal_id", ids["task"]: "task_id",
              ids["evaluation"]: "task_id", ids["session"]: "session_id", ids["cycle"]: "cycle_id",
-             ids["item"]: "item_id", ids["attempt"]: "attempt_id", ids["lesson"]: "lesson_id"}
+             ids["item"]: "item_id", ids["attempt"]: "attempt_id", ids["lesson"]: "lesson_id",
+             ids["artifact"]: "artifact_id"}
     return "/".join("{" + names[part] + "}" if part in names else part for part in path.split("/"))
 
 
@@ -204,6 +208,9 @@ def test_learner_a_reaches_their_own_resources_without_internal_state(world) -> 
             if method != "GET":
                 continue
             r = a.get(path)
+            if path.endswith("/content"):  # no artifact type is servable yet (app/services/artifact_content.py)
+                assert (r.status_code, r.json()) == (404, NOT_FOUND), path
+                continue
             assert r.status_code == 200, (path, r.text)
             if path not in ("/agents", "/tools"):  # the catalog describes schemas, not anyone's data
                 assert_no_internals(r)
@@ -211,6 +218,14 @@ def test_learner_a_reaches_their_own_resources_without_internal_state(world) -> 
         internal = env.container.task_service.get(ids["evaluation"]).model_dump_json()
         assert "expected_answer" in internal
         assert env.container.assessment_service.item("sec-item").expected_answer == SENTINEL
+
+
+def test_artifact_ownership_follows_the_task_or_cycle_that_stored_it(world) -> None:
+    env, ids, _ = world
+    own = env.container.ownership
+    assert own.artifact(ids["artifact"]) == LEARNER  # a learning cycle's artifact
+    assert own.artifact(ids["lesson"]) == LEARNER  # a task's artifact
+    assert own.artifact("art_does_not_exist") is None
 
 
 def test_the_author_role_is_needed_to_register_items(world) -> None:

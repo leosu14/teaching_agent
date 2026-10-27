@@ -106,6 +106,7 @@ The owner is read from stored data by `OwnershipService` (`app/services/ownershi
 | assessment item | the learner whose lesson it was registered on |
 | assessment attempt and grade | `attempt.learner_id` |
 | learning cycle (and its events and artifacts) | `cycle.learner_id` |
+| artifact (`/artifacts/{id}/content`) | the learner of the task, or learning cycle, that stored it |
 
 Ids in request bodies are checked too: `learner_id` on `POST /tasks` and on attempts, `task_id` on
 `POST /learners/{id}/assessment`, `lesson_id` and an existing item id on `POST /assessment-items`, and a client-chosen
@@ -161,3 +162,28 @@ names; `tests/e2e/test_security_api.py` checks the actual responses of every rou
 events) for those names and for a sentinel answer key. `tests/e2e/test_learner_event_sanitization.py` injects a
 structured-output validation failure that quotes a canary answer key and checks that the canary reaches the internal
 log and task record but none of the task, cycle or event responses.
+
+## Artifact content
+
+`GET /artifacts/{artifact_id}/content` streams an artifact's stored bytes to the learner who owns it. Every artifact
+type can carry answer keys or material built from them (a deck can have answer slides; a lesson's exercises and check
+questions hold the answers that grade practice; an open teaching question is an `ASSESSMENT_ITEM`), so the route is
+**block-by-default** (`app/services/artifact_content.py`):
+
+- Checks run in order: authentication (the usual `401`), ownership (`OwnershipService.artifact`), then the content
+  policy. An unknown id, another learner's artifact and an artifact whose type is not servable all get the same
+  `404 {"error": "NotFound", "detail": "not found"}`.
+- `SERVABLE` maps a type to the media types it may be served as; anything else is blocked. `BLOCKED` records why
+  each other type is not served. Every `ArtifactType` must be in exactly one of them
+  (`tests/e2e/test_artifact_content.py`), so a new type is blocked until someone classifies it.
+- **`SERVABLE` is currently empty: the route serves nothing.** `IMAGE_ASSET` is the nearest candidate but is not
+  proven answer-free: the visual planner is given the whole lesson, exercise and check-question answers included,
+  when it writes the search query or generation prompt an image comes from, and an SVG image is text. Allowing a type
+  is a reviewed change to `SERVABLE`, `BLOCKED`, its test and this section.
+- Served content is streamed from `ObjectStore.open` in 64 KiB chunks, never read whole. Responses carry
+  `Content-Disposition: attachment; filename="<artifact_id><ext>"`, `X-Content-Type-Options: nosniff`,
+  `Cache-Control: no-store` and `Content-Security-Policy: default-src 'none'; sandbox`, and no `Content-Length`,
+  `ETag` or `Last-Modified`: like `ArtifactView`, nothing reveals the object's location, digest or byte length.
+- A servable artifact whose stored object is missing or unreadable (or whose URI is outside the object store) gets
+  the fixed `500 {"error": "ContentUnavailable", "detail": "artifact content is unavailable"}`; the artifact id is
+  logged for operators. Others still get the `404`, because ownership and the policy are checked first.
