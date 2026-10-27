@@ -100,6 +100,7 @@ from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
 from app.services.curriculum import CurriculumService
 from app.services.learners import LearnerService
+from app.services.artifact_content import ArtifactContentService
 from app.services.ownership import OwnershipService
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
@@ -389,6 +390,7 @@ class Container:
     learning_cycle_service: LearningCycleService
     assessment_service: AssessmentService
     ownership: OwnershipService
+    artifact_content: ArtifactContentService
     catalog: CatalogService
     production: ProductionService
     spend: SpendStore  # the spend ledger: entries and budget counters, read-only for callers
@@ -583,6 +585,7 @@ def build_container(
         assessment_service=assessment_service,
         ownership=OwnershipService(tasks=task_service, artifacts=artifacts, memory=memory, teaching=teaching_service,
                                    assessment=assessment_service, cycles=learning_cycle_service),
+        artifact_content=ArtifactContentService(artifacts),
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         production=ProductionService(settings=settings, events=events, registry=providers.registry,
                                      selector=providers.selector, router=router, agents=agents, tools=tools,

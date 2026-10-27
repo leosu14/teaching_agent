@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.auth import AuthenticationFailed, Authenticator, authenticator_from_settings
 from app.api.authorization import Forbidden, ResourceNotFound, principal
-from app.api.routes import assessment, curriculum, learners, learning_cycles, system, tasks, teaching
+from app.api.routes import artifacts, assessment, curriculum, learners, learning_cycles, system, tasks, teaching
 from app.config.routing import ConfigError
 from app.config.settings import Settings
 from app.learner.frameworks import UnknownFramework
@@ -20,6 +20,7 @@ from app.learner.memory import UnknownGoal, UnknownLearner
 from app.runtime.orchestrator.orchestrator import InvalidInput
 from app.runtime.tasks.state_machine import InvalidTransition
 from app.schemas.lease import LeaseLost, WriteConflict
+from app.services.artifact_content import ArtifactContentNotFound, ArtifactContentUnavailable
 from app.services.assessment import (
     AssessmentItemNotFound,
     AttemptConflict,
@@ -72,9 +73,11 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
     app.add_exception_handler(AuthenticationFailed, _unauthenticated)
     app.add_exception_handler(Forbidden, _handler(403))
     app.add_exception_handler(ResourceNotFound, _handler(404, error="NotFound"))
+    app.add_exception_handler(ArtifactContentNotFound, _handler(404, error="NotFound"))
+    app.add_exception_handler(ArtifactContentUnavailable, _handler(500, error="ContentUnavailable"))
 
     app.include_router(system.public)
-    for module in (system, tasks, learners, curriculum, teaching, assessment, learning_cycles):
+    for module in (system, tasks, artifacts, learners, curriculum, teaching, assessment, learning_cycles):
         app.include_router(module.router, dependencies=[Depends(principal)])
     return app
 

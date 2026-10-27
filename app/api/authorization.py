@@ -78,3 +78,7 @@ def owned_attempt(attempt_id: str, p: Principal = Depends(principal), c: Contain
 
 def owned_cycle(cycle_id: str, p: Principal = Depends(principal), c: Container = Depends(container)) -> str:
     return authorize(p, c.ownership.learning_cycle(cycle_id))
+
+
+def owned_artifact(artifact_id: str, p: Principal = Depends(principal), c: Container = Depends(container)) -> str:
+    return authorize(p, c.ownership.artifact(artifact_id))

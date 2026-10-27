@@ -255,6 +255,10 @@ class ArtifactService:
         """Remove an artifact's corrupt object so that storing the same content again writes it afresh."""
         self._store.delete(artifact.uri)
 
+    def open(self, artifact: Artifact) -> BinaryIO:
+        """A binary reader for an artifact's stored object, for streaming it (never read whole into memory)."""
+        return self._store.open(artifact.uri)
+
     def read(self, artifact_id: str) -> bytes:
         return self._store.get(self._repo.get(artifact_id).uri)
 

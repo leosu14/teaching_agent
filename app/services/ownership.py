@@ -46,6 +46,14 @@ class OwnershipService:
             return self.task(lesson_id)
         return self.task(artifact.task_id) if artifact.type == ArtifactType.LESSON else None
 
+    def artifact(self, artifact_id: str) -> str | None:
+        """An artifact belongs to the learner of the task, or learning cycle, that stored it."""
+        try:
+            artifact = self._artifacts.get(artifact_id)
+        except (NotFound, KeyError):
+            return None
+        return self.task(artifact.task_id) or self.learning_cycle(artifact.task_id)
+
     def teaching_session(self, session_id: str) -> str | None:
         session = self._teaching.repository.get(session_id)
         return session.learner_id if session is not None else None
