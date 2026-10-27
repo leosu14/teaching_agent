@@ -2,9 +2,11 @@
 stores each image as an IMAGE_ASSET artifact.
 
 The model only describes what each visual must show (a VisualPlan, checked against the lesson); it never
-produces URLs or attribution. Everything else goes through tools on the ToolManager: the agent never touches
-providers, the object store or the database. A visual that cannot be produced is recorded as a failure with
-every attempt; whether a failed required visual stops the lesson is the workflow's visual policy.
+produces URLs or attribution. It plans from an answer-free brief (briefing.py), never the lesson itself, and a plan
+whose text states an exercise or check-question answer is rejected: its search queries and generation prompts are the
+only text that reaches image search and generation. Everything else goes through tools on the ToolManager: the agent
+never touches providers, the object store or the database. A visual that cannot be produced is recorded as a failure
+with every attempt; whether a failed required visual stops the lesson is the workflow's visual policy.
 """
 
 from __future__ import annotations
@@ -13,12 +15,14 @@ import hashlib
 import json
 
 from app.agents.base import Agent, AgentContext, AgentSpec, OutputRejected
+from app.agents.visual.briefing import VisualBrief, build_brief
 from app.observability.budget import BudgetExceededError
 from app.schemas.artifact import Artifact, ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
 from app.schemas.common import ModelTier
 from app.schemas.events import EventType
-from app.schemas.lesson import LessonContent, VisualPlanningInput, VisualRequest
+from app.schemas.lesson import LessonContent, VisualRequest
 from app.schemas.visual import (
+    ANSWER_ISOLATED_PLANNING,
     FetchedImage,
     ImageAsset,
     ImageAssetRequest,
@@ -53,6 +57,8 @@ GENERATION_STYLE = {
     VisualType.GENERATED_VISUAL: "educational illustration",
 }
 NEGATIVE_PROMPT = "watermark, logo, illegible text"
+# The plan text that reaches image search and generation, or the stored plan and asset metadata.
+ANSWER_CHECKED_FIELDS = ("purpose", "concept", "description", "search_query", "generation_prompt")
 
 
 def generation_size(aspect_ratio: str) -> tuple[int, int]:
@@ -88,32 +94,44 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
     # --- planning ------------------------------------------------------------------------------
 
     async def plan(self, data: VisualRequest, ctx: AgentContext) -> VisualPlan:
-        planning = data.planning_input()
+        brief = build_brief(data)
         if data.max_visuals == 0:
             proposal = VisualPlanProposal(rationale="Visuals are disabled for this lesson.")
         else:
-            proposal = await self.generate(planning, ctx, source=planning, output_model=VisualPlanProposal)
+            proposal = await self.generate(brief.planning, ctx, source=brief, output_model=VisualPlanProposal)
             assert isinstance(proposal, VisualPlanProposal)
+        # The model names sections by their opaque ref; code puts the lesson's section ids back.
+        proposal = proposal.model_copy(update={"requirements": [
+            r.model_copy(update={"lesson_section_id": brief.sections[r.lesson_section_id]})
+            for r in proposal.requirements]})
         return VisualPlan(plan_id=plan_id_for(data.lesson, proposal), lesson_title=data.lesson.title,
                           requirements=proposal.requirements, rationale=proposal.rationale)
 
     def check(self, output, source) -> None:
         if not isinstance(output, VisualPlanProposal):
             return
-        assert isinstance(source, VisualPlanningInput)
-        sections = {s.section_id for s in source.lesson.sections}
-        unknown = sorted({r.lesson_section_id for r in output.requirements} - sections)
+        assert isinstance(source, VisualBrief)
+        planning = source.planning
+        unknown = sorted({r.lesson_section_id for r in output.requirements} - set(source.sections))
         if unknown:
-            raise OutputRejected(f"visuals reference unknown lesson sections {unknown}")
-        if len(output.requirements) > source.max_visuals:
-            raise OutputRejected(f"{len(output.requirements)} visuals proposed; at most {source.max_visuals} allowed")
+            raise OutputRejected(f"visuals reference unknown lesson sections {unknown}; use a section's ref")
+        if len(output.requirements) > planning.max_visuals:
+            raise OutputRejected(f"{len(output.requirements)} visuals proposed; at most {planning.max_visuals} allowed")
+        # Never quote the answer back: name the visual and the field only.
+        leaking = [f"{r.visual_id}.{name}" for r in output.requirements for name in ANSWER_CHECKED_FIELDS
+                   if source.leaks(getattr(r, name))]
+        if leaking:
+            raise OutputRejected(f"{', '.join(leaking)} state the answer to one of the lesson's exercises or check "
+                                 "questions; describe the concept without it")
+        if source.leaks(output.rationale):
+            raise OutputRejected("the rationale states the answer to one of the lesson's exercises or check questions")
         searched, generated = output.source_counts()
-        if source.max_searched_images is not None and searched > source.max_searched_images:
+        if planning.max_searched_images is not None and searched > planning.max_searched_images:
             raise OutputRejected(f"{searched} visuals may search for an image (fallbacks included); the image budget "
-                                 f"allows {source.max_searched_images}: drop searched visuals or their search_query")
-        if source.max_generated_images is not None and generated > source.max_generated_images:
+                                 f"allows {planning.max_searched_images}: drop searched visuals or their search_query")
+        if planning.max_generated_images is not None and generated > planning.max_generated_images:
             raise OutputRejected(f"{generated} visuals may generate an image (fallbacks included); the image budget "
-                                 f"allows {source.max_generated_images}: drop generated visuals or their "
+                                 f"allows {planning.max_generated_images}: drop generated visuals or their "
                                  "generation_prompt")
 
     # --- the visual loop -----------------------------------------------------------------------
@@ -254,7 +272,7 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
                 selection=SelectionRecord(selector=selection.selector, rank=ranked.rank, score=ranked.score,
                                           signals=ranked.signals, candidates=len(selection.ranked),
                                           rejected=list(rejected)),
-                validation=report,
+                validation=report, planning=ANSWER_ISOLATED_PLANNING,
             )
             ref = await self._create(req, asset, plan_artifact_id, ctx, attempts)
             if ref is not None:
@@ -294,7 +312,7 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
             lesson_section_id=req.lesson_section_id, visual_type=req.visual_type, purpose=req.purpose,
             description=req.description, origin="generated", object=generated.storage,
             width=report.measured.width, height=report.measured.height, format=report.measured.media_type,
-            attribution=generated.metadata, validation=report,
+            attribution=generated.metadata, validation=report, planning=ANSWER_ISOLATED_PLANNING,
         )
         return await self._create(req, asset, plan_artifact_id, ctx, attempts)
 

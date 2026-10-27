@@ -208,7 +208,7 @@ def test_learner_a_reaches_their_own_resources_without_internal_state(world) -> 
             if method != "GET":
                 continue
             r = a.get(path)
-            if path.endswith("/content"):  # no artifact type is servable yet (app/services/artifact_content.py)
+            if path.endswith("/content"):  # a cycle artifact: its type is not servable (app/services/artifact_content.py)
                 assert (r.status_code, r.json()) == (404, NOT_FOUND), path
                 continue
             assert r.status_code == 200, (path, r.text)

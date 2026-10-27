@@ -176,10 +176,24 @@ questions hold the answers that grade practice; an open teaching question is an 
 - `SERVABLE` maps a type to the media types it may be served as; anything else is blocked. `BLOCKED` records why
   each other type is not served. Every `ArtifactType` must be in exactly one of them
   (`tests/e2e/test_artifact_content.py`), so a new type is blocked until someone classifies it.
-- **`SERVABLE` is currently empty: the route serves nothing.** `IMAGE_ASSET` is the nearest candidate but is not
-  proven answer-free: the visual planner is given the whole lesson, exercise and check-question answers included,
-  when it writes the search query or generation prompt an image comes from, and an SVG image is text. Allowing a type
-  is a reviewed change to `SERVABLE`, `BLOCKED`, its test and this section.
+- **Only raster images are servable**: `IMAGE_ASSET` as `image/png`, `image/jpeg`, `image/webp` or `image/gif`, and
+  only when its metadata records `planning: "answer-isolated/1"` (`PROVENANCE`). Every other type stays blocked, and
+  so does `image/svg+xml` (an SVG is text: it could spell an answer out). Allowing a type is a reviewed change to
+  `SERVABLE`, `BLOCKED`, its test and this section.
+- Why images are answer-free (issue #26): an image comes from the search query or generation prompt the visual
+  planner writes, and those are the only lesson-derived text that reaches image search or generation. The planner's
+  model gets an explicit brief (`app/agents/visual/briefing.py`), not the lesson: title, subject, topic, level,
+  objectives and the explanation, example and review sections (concept, heading, explanation, examples, analogy)
+  behind opaque refs. No exercises or check questions, answers, answer explanations, lesson plan, research bundle,
+  narration, introduction, summary or section ids. Any brief field that `reveals()` an exercise or check-question
+  answer is dropped (a section whose concept name does is left out), and `VisualAgent.check` sends back a plan whose
+  purpose, concept, description, search query, generation prompt or rationale states one, without quoting it.
+  Images made before this change were planned from the whole lesson and carry no marker, so they stay blocked
+  (`tests/integration/test_visual_answer_isolation.py`, `tests/e2e/test_image_content.py`).
+- Residual risks: `reveals()` matches whole words, so a paraphrase or translation is not caught; a searched image is
+  third-party and could show an answer by coincidence; a generated image can render text; image metadata (EXIF,
+  PNG text chunks) is not stripped; answers authored after the lesson (evaluations, assessment items) can quote its
+  teaching text, which the planner is meant to illustrate.
 - Served content is streamed from `ObjectStore.open` in 64 KiB chunks, never read whole. Responses carry
   `Content-Disposition: attachment; filename="<artifact_id><ext>"`, `X-Content-Type-Options: nosniff`,
   `Cache-Control: no-store` and `Content-Security-Policy: default-src 'none'; sandbox`, and no `Content-Length`,

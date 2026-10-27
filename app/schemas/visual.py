@@ -405,6 +405,11 @@ class SelectionRecord(Schema):
     rejected: list[dict] = Field(default_factory=list)  # {image_id, stage, reason}
 
 
+# Recorded on an IMAGE_ASSET planned from the answer-free brief (app/agents/visual/briefing.py). Only images with it
+# may be served to learners (app/services/artifact_content.py); older images were planned from the whole lesson.
+ANSWER_ISOLATED_PLANNING = "answer-isolated/1"
+
+
 class ImageAsset(Schema):
     """Metadata of an IMAGE_ASSET artifact. The binary lives in the object store at `object.uri`."""
 
@@ -423,6 +428,7 @@ class ImageAsset(Schema):
     attribution: VisualAttribution
     selection: SelectionRecord | None = None
     validation: ImageValidationReport
+    planning: str | None = None  # ANSWER_ISOLATED_PLANNING when planned from the answer-free brief
 
     @model_validator(mode="after")
     def _consistent(self) -> ImageAsset:
