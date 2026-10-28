@@ -191,7 +191,10 @@ questions hold the answers that grade practice; an open teaching question is an 
   identifiers: code assigns each visual id (`v<section>_<type>`, both system values; a `visual_id` the model writes
   anyway is dropped unread), so nothing model-written becomes an artifact name, and a rejection names a requirement
   by its position and a field by its name, never by a value the model wrote. The marker is written only when the
-  finished plan passes the answer check again over every model-derived field, ids included.
+  finished plan passes the answer check again over every model-derived field, ids included, and then, per image,
+  when its artifact name and every string of its full stored metadata (planned text, provider attribution and
+  titles, selection and validation records), not only the allowlisted keys `ArtifactView` serves, pass it too: an
+  image whose stored record states an answer is stored unmarked and never served.
   Images made before this change were planned from the whole lesson and carry no marker, so they stay blocked
   (`tests/integration/test_visual_answer_isolation.py`, `tests/e2e/test_image_content.py`).
 - Residual risks: `reveals()` matches whole words, so a paraphrase or translation is not caught; a searched image is

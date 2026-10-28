@@ -338,6 +338,38 @@ async def test_images_of_a_plan_that_states_an_answer_get_no_isolation_marker(wo
             assert a.get(f"/artifacts/{image.artifact_id}/content").status_code == 404
 
 
+class TitlingSearch(SpySearch):
+    """A search provider whose results are titled with an answer: third-party text the plan never wrote."""
+
+    async def search(self, request):
+        page = await super().search(request)
+        return page.model_copy(update={"hits": [h.model_copy(update={"title": f"{h.title} {CHECK_ANSWER}"})
+                                                for h in page.hits]})
+
+
+async def test_an_image_whose_stored_record_states_an_answer_is_not_marked(tmp_path) -> None:
+    """The marker is decided last, on everything of the image a learner can read (name and served metadata): a
+    clean plan is not enough when the provider's attribution states an answer."""
+    llm = MockLLMProvider({**default_responders(), "teacher": planting_teacher})
+    container = build_container(Settings(data_dir=tmp_path / "d", log_json=False), llm_providers={"mock": llm},
+                                image_search_provider=TitlingSearch(), image_generation_provider=SpyGeneration())
+    try:
+        task = await run_lesson(container)
+        assert task.status == TaskStatus.COMPLETED, task.errors
+        images = [a for a in container.task_service.artifacts(task.task_id) if a.type == ArtifactType.IMAGE_ASSET]
+        by_origin = {o: [a for a in images if a.metadata["origin"] == o] for o in ("search", "generated")}
+        assert by_origin["search"] and by_origin["generated"]  # valid plans still produce images on both paths
+        assert all(a.metadata.get("planning") is None for a in by_origin["search"])
+        assert all(a.metadata["planning"] == ANSWER_ISOLATED_PLANNING for a in by_origin["generated"])
+        with client_for(container, LEARNER["learner_id"], auth=TestAuth()) as a:
+            for image in by_origin["search"]:
+                assert a.get(f"/artifacts/{image.artifact_id}/content").status_code == 404
+            for image in by_origin["generated"]:
+                assert a.get(f"/artifacts/{image.artifact_id}/content").status_code == 200
+    finally:
+        container.close()
+
+
 async def test_isolation_holds_only_when_every_model_derived_field_is_clean(visual_request) -> None:
     brief = build_brief(visual_request)
     proposal = VisualPlanProposal.model_validate(visuals(type("R", (), {"input_payload": brief.planning.model_dump(

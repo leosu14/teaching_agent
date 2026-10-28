@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.schemas.lesson import LessonContent, SectionPurpose, VisualPlanningInput, VisualRequest, VisualSectionBrief
-from app.schemas.visual import VisualPlan
+from app.schemas.visual import ImageAsset, VisualPlan
 from app.utils.text import normalize, reveals
 
 # Sections whose text teaches. Practice and assessment sections can hold worked answers, so they get no visuals.
@@ -47,6 +47,23 @@ class VisualBrief:
             texts += [v for k, v in r.model_dump(mode="json").items()
                       if isinstance(v, str) and k != "lesson_section_id"]
         return not any(self.leaks(t) for t in texts)
+
+    def persisted_clean(self, name: str, asset: ImageAsset) -> bool:
+        """Does nothing persisted of this image's artifact (its name and every string of its full stored metadata:
+        model-planned text, provider attribution and titles, selection and validation records alike) state an answer?
+        The last check before an image is marked answer-isolated. It checks the whole record, not only what
+        ArtifactView serves today, so the marker never depends on which keys the metadata allowlist hides."""
+        return not any(self.leaks(t) for t in [name, *_strings(asset.model_dump(mode="json"))])
+
+
+def _strings(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
 
 
 def build_brief(data: VisualRequest) -> VisualBrief:

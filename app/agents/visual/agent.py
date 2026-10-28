@@ -147,8 +147,9 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
                    max_visuals=data.max_visuals)
         brief = build_brief(data)
         plan = await self.plan(data, ctx, brief)
-        # The answer-isolation marker goes only on images of a plan whose every model-derived field passed the checks.
-        planning = ANSWER_ISOLATED_PLANNING if brief.isolated(plan) else None
+        # Images can be marked answer-isolated only when every model-derived field of the plan passed the checks;
+        # each image is then checked again on everything of it that is persisted and learner-visible (_create).
+        isolation = brief if brief.isolated(plan) else None
         scope.emit(EventType.VISUAL_PLAN_CREATED, plan_id=plan.plan_id, requirements=[
             {"visual_id": r.visual_id, "lesson_section_id": r.lesson_section_id, "visual_type": r.visual_type.value,
              "preferred_source": r.preferred_source, "required": r.required} for r in plan.requirements])
@@ -165,7 +166,7 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
         failures: list[VisualFailure] = []
         artifacts = list(stored.artifacts)
         for req in plan.requirements:
-            outcome = await self._fulfil(req, plan, plan_artifact_id, data, ctx, planning)
+            outcome = await self._fulfil(req, plan, plan_artifact_id, data, ctx, isolation)
             if isinstance(outcome, VisualFailure):
                 failures.append(outcome)
             else:
@@ -187,13 +188,14 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
         return result
 
     async def _fulfil(self, req: VisualRequirement, plan: VisualPlan, plan_artifact_id: str, data: VisualRequest,
-                      ctx: AgentContext, planning: str | None) -> tuple[VisualAssetRef, Artifact] | VisualFailure:
+                      ctx: AgentContext,
+                      isolation: VisualBrief | None) -> tuple[VisualAssetRef, Artifact] | VisualFailure:
         attempts: list[VisualAttempt] = []
         for source in req.sources():
             if source == "search":
-                ref = await self._search(req, plan, plan_artifact_id, data, ctx, attempts, planning)
+                ref = await self._search(req, plan, plan_artifact_id, data, ctx, attempts, isolation)
             else:
-                ref = await self._generate(req, plan, plan_artifact_id, ctx, attempts, planning)
+                ref = await self._generate(req, plan, plan_artifact_id, ctx, attempts, isolation)
             if ref is not None:
                 return ref
         return VisualFailure(visual_id=req.visual_id, lesson_section_id=req.lesson_section_id, required=req.required,
@@ -220,7 +222,7 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
 
     async def _search(self, req: VisualRequirement, plan: VisualPlan, plan_artifact_id: str, data: VisualRequest,
                       ctx: AgentContext, attempts: list[VisualAttempt],
-                      planning: str | None) -> tuple[VisualAssetRef, Artifact] | None:
+                      isolation: VisualBrief | None) -> tuple[VisualAssetRef, Artifact] | None:
         scope = ctx.scope
         assert req.search_query is not None
         scope.emit(EventType.IMAGE_SEARCH_STARTED, visual_id=req.visual_id, query=req.search_query)
@@ -281,16 +283,17 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
                 selection=SelectionRecord(selector=selection.selector, rank=ranked.rank, score=ranked.score,
                                           signals=ranked.signals, candidates=len(selection.ranked),
                                           rejected=list(rejected)),
-                validation=report, planning=planning,
+                validation=report,
             )
-            ref = await self._create(req, asset, plan_artifact_id, ctx, attempts)
+            ref = await self._create(req, asset, plan_artifact_id, ctx, attempts, isolation)
             if ref is not None:
                 return ref
             rejected.append({"image_id": c.image_id, "stage": "store", "reason": attempts[-1].message})
         return None
 
     async def _generate(self, req: VisualRequirement, plan: VisualPlan, plan_artifact_id: str, ctx: AgentContext,
-                        attempts: list[VisualAttempt], planning: str | None) -> tuple[VisualAssetRef, Artifact] | None:
+                        attempts: list[VisualAttempt],
+                        isolation: VisualBrief | None) -> tuple[VisualAssetRef, Artifact] | None:
         scope = ctx.scope
         assert req.generation_prompt is not None
         width, height = generation_size(req.aspect_ratio)
@@ -321,9 +324,9 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
             lesson_section_id=req.lesson_section_id, visual_type=req.visual_type, purpose=req.purpose,
             description=req.description, origin="generated", object=generated.storage,
             width=report.measured.width, height=report.measured.height, format=report.measured.media_type,
-            attribution=generated.metadata, validation=report, planning=planning,
+            attribution=generated.metadata, validation=report,
         )
-        return await self._create(req, asset, plan_artifact_id, ctx, attempts)
+        return await self._create(req, asset, plan_artifact_id, ctx, attempts, isolation)
 
     async def _validate(self, req: VisualRequirement, payload: ImageValidationRequest, ctx: AgentContext,
                         attempts: list[VisualAttempt], *, source: str, image_id: str) -> ImageValidationReport | None:
@@ -342,10 +345,16 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
         return None
 
     async def _create(self, req: VisualRequirement, asset: ImageAsset, plan_artifact_id: str, ctx: AgentContext,
-                      attempts: list[VisualAttempt]) -> tuple[VisualAssetRef, Artifact] | None:
+                      attempts: list[VisualAttempt],
+                      isolation: VisualBrief | None) -> tuple[VisualAssetRef, Artifact] | None:
         source = "search" if asset.origin == "search" else "generate"
+        name = f"image_{req.visual_id}"
+        if isolation is not None:  # marked only if its whole learner-visible record, marker included, is answer-free
+            marked = asset.model_copy(update={"planning": ANSWER_ISOLATED_PLANNING})
+            if isolation.persisted_clean(name, marked):
+                asset = marked
         artifact = await self._tool("image.create_asset", ImageAssetRequest(
-            name=f"image_{req.visual_id}", asset=asset, attribution_required=req.attribution_required,
+            name=name, asset=asset, attribution_required=req.attribution_required,
             expected_aspect_ratio=req.aspect_ratio, parent_ids=[plan_artifact_id],
         ), ctx, attempts, source=source, stage="store", image_id=asset.asset_id)
         if artifact is None:
