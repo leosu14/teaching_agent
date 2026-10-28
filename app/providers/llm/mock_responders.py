@@ -681,7 +681,7 @@ def visuals(request: LLMRequest) -> dict:
         heading = section.heading or concept
         first = i == 1
         requirements.append({
-            "visual_id": f"v{i}_{'photo' if first else 'illustration'}", "lesson_section_id": section.ref,
+            "lesson_section_id": section.ref,
             "purpose": f"Set the real-world context for {heading.lower()}.",
             "concept": concept, "description": f"A {topic} scene that shows {heading.lower()}.",
             "visual_type": "photo" if first else "illustration", "preferred_source": "search",
@@ -690,7 +690,7 @@ def visuals(request: LLMRequest) -> dict:
             "aspect_ratio": "16:9", "required": first, "attribution_required": True,
         })
         requirements.append({
-            "visual_id": f"v{i}_diagram", "lesson_section_id": section.ref,
+            "lesson_section_id": section.ref,
             "purpose": f"Summarise how {concept.lower()} works.", "concept": concept,
             "description": f"A labelled diagram of {concept.lower()} with one example.",
             "visual_type": "diagram", "preferred_source": "generate",

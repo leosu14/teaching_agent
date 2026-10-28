@@ -187,13 +187,20 @@ questions hold the answers that grade practice; an open teaching question is an 
   behind opaque refs. No exercises or check questions, answers, answer explanations, lesson plan, research bundle,
   narration, introduction, summary or section ids. Any brief field that `reveals()` an exercise or check-question
   answer is dropped (a section whose concept name does is left out), and `VisualAgent.check` sends back a plan whose
-  purpose, concept, description, search query, generation prompt or rationale states one, without quoting it.
+  purpose, concept, description, search query, generation prompt or rationale states one. The model writes no
+  identifiers: code assigns each visual id (`v<section>_<type>`, both system values; a `visual_id` the model writes
+  anyway is dropped unread), so nothing model-written becomes an artifact name, and a rejection names a requirement
+  by its position and a field by its name, never by a value the model wrote. The marker is written only when the
+  finished plan passes the answer check again over every model-derived field, ids included.
   Images made before this change were planned from the whole lesson and carry no marker, so they stay blocked
   (`tests/integration/test_visual_answer_isolation.py`, `tests/e2e/test_image_content.py`).
 - Residual risks: `reveals()` matches whole words, so a paraphrase or translation is not caught; a searched image is
   third-party and could show an answer by coincidence; a generated image can render text; image metadata (EXIF,
   PNG text chunks) is not stripped; answers authored after the lesson (evaluations, assessment items) can quote its
-  teaching text, which the planner is meant to illustrate.
+  teaching text, which the planner is meant to illustrate; a schema error sent back to the planner can replay the
+  model's own rejected value (pydantic's `input_value`), which never reaches a provider or a learner. Images made
+  before the fix keep their metadata in the artifact listing, and a re-run that reuses one returns it unmarked
+  (blocked, so it fails closed).
 - Served content is streamed from `ObjectStore.open` in 64 KiB chunks, never read whole. Responses carry
   `Content-Disposition: attachment; filename="<artifact_id><ext>"`, `X-Content-Type-Options: nosniff`,
   `Cache-Control: no-store` and `Content-Security-Policy: default-src 'none'; sandbox`, and no `Content-Length`,

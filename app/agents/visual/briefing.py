@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.schemas.lesson import LessonContent, SectionPurpose, VisualPlanningInput, VisualRequest, VisualSectionBrief
+from app.schemas.visual import VisualPlan
 from app.utils.text import normalize, reveals
 
 # Sections whose text teaches. Practice and assessment sections can hold worked answers, so they get no visuals.
@@ -36,6 +37,16 @@ class VisualBrief:
 
     def leaks(self, text: str | None) -> bool:
         return bool(text) and reveals(text, self.answers)
+
+    def isolated(self, plan: VisualPlan) -> bool:
+        """Does no model-derived text of the finished plan state an answer? Checked again after the model's output
+        passed `VisualAgent.check`, over every text field (ids included) except the lesson's own section ids and
+        the plan id (a digest): only then are the plan's images marked answer-isolated."""
+        texts = [plan.lesson_title, plan.rationale]
+        for r in plan.requirements:
+            texts += [v for k, v in r.model_dump(mode="json").items()
+                      if isinstance(v, str) and k != "lesson_section_id"]
+        return not any(self.leaks(t) for t in texts)
 
 
 def build_brief(data: VisualRequest) -> VisualBrief:

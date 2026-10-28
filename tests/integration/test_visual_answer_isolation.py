@@ -24,9 +24,17 @@ from app.providers.llm.mock_responders import default_responders, make_teacher, 
 from app.schemas.artifact import ArtifactType
 from app.schemas.lesson import VisualPlanningInput, VisualRequest
 from app.schemas.task import TaskStatus
-from app.schemas.visual import ANSWER_ISOLATED_PLANNING, ImageAsset, VisualPlanProposal
+from app.schemas.visual import (
+    ANSWER_ISOLATED_PLANNING,
+    ImageAsset,
+    VisualPlan,
+    VisualPlanProposal,
+    VisualRequirement,
+    VisualResult,
+)
 from app.services.container import build_container
-from tests.conftest import FIXTURES, run_lesson
+from tests.auth import TestAuth, client_for
+from tests.conftest import FIXTURES, LEARNER, run_lesson
 
 CATALOG = FIXTURES / "image_catalog.json"
 EXERCISE_ANSWER = "zebraquartz"
@@ -98,6 +106,10 @@ def assert_absent(text: str, where: str, planted=PLANTED) -> None:
     lowered = text.lower()
     for secret in planted:
         assert secret.lower() not in lowered, f"{secret!r} reached {where}"
+
+
+def visuals_of(task) -> VisualResult:
+    return VisualResult.model_validate(task.workflow.node_states["visual_policy"].output)
 
 
 def visual_requests(llm):
@@ -233,9 +245,109 @@ async def test_check_rejects_every_answer_bearing_field_without_quoting_the_answ
         reqs[target] = reqs[target].model_copy(update={field: f"{getattr(reqs[target], field)} {CHECK_ANSWER.title()}"})
         with pytest.raises(OutputRejected) as exc:
             VisualAgent.check(None, clean.model_copy(update={"requirements": reqs}), brief)
-        assert f"{reqs[target].visual_id}.{field}" in str(exc.value)
+        assert f"requirement {target + 1}.{field}" in str(exc.value)  # by position, never by a model-written value
         assert_absent(str(exc.value), "the rejection message")
-    with pytest.raises(OutputRejected, match="unknown lesson sections"):
+    section_id = visual_request.lesson.sections[0].section_id
+    with pytest.raises(OutputRejected, match=r"requirements \[1\] reference unknown lesson sections") as exc:
         VisualAgent.check(None, clean.model_copy(update={"requirements": [
-            clean.requirements[0].model_copy(update={"lesson_section_id": visual_request.lesson.sections[0].section_id})
-        ]}), brief)
+            clean.requirements[0].model_copy(update={"lesson_section_id": section_id})]}), brief)
+    assert section_id not in str(exc.value)
+
+
+# --- B1: model-written visual ids ------------------------------------------------------------------------------
+
+
+def naming(answer: str, *, leak_query_times: int = 0):
+    """A visual model that names every visual after the answer (and, `leak_query_times` times, also puts it in the
+    search query)."""
+    calls = {"n": 0}
+
+    def respond(request) -> dict:
+        calls["n"] += 1
+        proposal = visuals(request)
+        for i, r in enumerate(proposal["requirements"]):
+            r["visual_id"] = f"{answer}.{i}"
+            if calls["n"] <= leak_query_times and r.get("search_query"):
+                r["search_query"] = f"{r['search_query']} {answer}"
+        return proposal
+
+    return respond
+
+
+def learner_visual_listing(container, task) -> str:
+    """The learner's artifact listing, for the visual stage's artifacts (the plan and its images)."""
+    with client_for(container, LEARNER["learner_id"], auth=TestAuth()) as a:
+        r = a.get(f"/tasks/{task.task_id}/artifacts")
+    assert r.status_code == 200
+    visual = [v for v in r.json() if v["type"] in (ArtifactType.IMAGE_ASSET.value, ArtifactType.VISUAL_PLAN.value)]
+    assert len(visual) == 5
+    return json.dumps(visual, ensure_ascii=False)
+
+
+async def test_a_visual_id_the_model_writes_is_ignored_and_never_stored_or_quoted(world) -> None:
+    container, llm, search, generation = world(naming(EXERCISE_ANSWER))
+    task = await run_lesson(container)
+    assert task.status == TaskStatus.COMPLETED, task.errors
+    assert len(visual_requests(llm)) == 1  # accepted as is: the id was dropped unread, nothing to correct
+
+    plan = VisualPlan.model_validate_json(container.artifacts.read(
+        container.artifacts.find(task.task_id, "visual_plan").artifact_id))
+    assert [r.visual_id for r in plan.requirements] == ["v1_photo", "v1_diagram", "v2_illustration", "v2_diagram"]
+    assert_absent(plan.model_dump_json(), "the VISUAL_PLAN")
+    images = [a for a in container.task_service.artifacts(task.task_id) if a.type == ArtifactType.IMAGE_ASSET]
+    assert len(images) == 4
+    for art in images:
+        assert_absent(art.name, "an artifact name")
+        assert_absent(json.dumps(art.metadata, ensure_ascii=False), "IMAGE_ASSET metadata")
+        assert art.metadata["planning"] == ANSWER_ISOLATED_PLANNING  # what was stored is clean, so it is marked
+    assert_absent(learner_visual_listing(container, task), "the learner's artifact listing")
+    assert_absent(json.dumps(visuals_of(task).model_dump(mode="json")), "the visual result")
+    for text in [*search.queries, *generation.prompts]:
+        assert_absent(text, "an image provider")
+
+
+async def test_a_correction_names_rejected_items_by_position_even_when_the_model_named_them(world) -> None:
+    container, llm, _, _ = world(naming(EXERCISE_ANSWER, leak_query_times=1))
+    task = await run_lesson(container)
+    assert task.status == TaskStatus.COMPLETED, task.errors
+    requests = visual_requests(llm)
+    assert len(requests) == 2
+    correction = requests[1].messages[-1].content
+    assert "requirement 1.search_query" in correction
+    assert_absent(requests[1].system + requests[1].messages[0].content + correction, "the correction")
+    for art in container.task_service.artifacts(task.task_id):
+        assert_absent(art.name, "an artifact name")
+
+
+async def test_images_of_a_plan_that_states_an_answer_get_no_isolation_marker(world, monkeypatch) -> None:
+    """Defence in depth: should a leaking plan ever get past `check`, its images are not marked and not served."""
+    monkeypatch.setattr(VisualAgent, "check", lambda self, output, source: None)
+
+    def leaky(request) -> dict:
+        proposal = visuals(request)
+        proposal["requirements"][0]["description"] += f" Shows {EXERCISE_ANSWER}."
+        return proposal
+
+    container, _, _, _ = world(leaky)
+    task = await run_lesson(container)
+    assert task.status == TaskStatus.COMPLETED, task.errors
+    images = [a for a in container.task_service.artifacts(task.task_id) if a.type == ArtifactType.IMAGE_ASSET]
+    assert images and all(a.metadata.get("planning") is None for a in images)
+    with client_for(container, LEARNER["learner_id"], auth=TestAuth()) as a:
+        for image in images:
+            assert a.get(f"/artifacts/{image.artifact_id}/content").status_code == 404
+
+
+async def test_isolation_holds_only_when_every_model_derived_field_is_clean(visual_request) -> None:
+    brief = build_brief(visual_request)
+    proposal = VisualPlanProposal.model_validate(visuals(type("R", (), {"input_payload": brief.planning.model_dump(
+        mode="json")})()))
+    req = VisualRequirement(**proposal.requirements[0].model_dump(exclude={"lesson_section_id"}), visual_id="v1_photo",
+                            lesson_section_id=visual_request.lesson.sections[0].section_id)
+    plan = VisualPlan(plan_id="vp_1", lesson_title="", requirements=[req], rationale="r")
+    assert brief.isolated(plan)
+    for leak in ({"visual_id": f"{EXERCISE_ANSWER}.1"}, {"description": CHECK_ANSWER}, {"aspect_ratio": "16:9"}):
+        changed = plan.model_copy(update={"requirements": [req.model_copy(update=leak)]})
+        assert brief.isolated(changed) is ("aspect_ratio" in leak)
+    assert not brief.isolated(plan.model_copy(update={"lesson_title": f"All about {EXERCISE_ANSWER}"}))
+    assert not brief.isolated(plan.model_copy(update={"rationale": CHECK_ANSWER}))

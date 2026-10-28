@@ -93,33 +93,38 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
 
     # --- planning ------------------------------------------------------------------------------
 
-    async def plan(self, data: VisualRequest, ctx: AgentContext) -> VisualPlan:
-        brief = build_brief(data)
+    async def plan(self, data: VisualRequest, ctx: AgentContext, brief: VisualBrief | None = None) -> VisualPlan:
+        brief = brief or build_brief(data)
         if data.max_visuals == 0:
             proposal = VisualPlanProposal(rationale="Visuals are disabled for this lesson.")
         else:
             proposal = await self.generate(brief.planning, ctx, source=brief, output_model=VisualPlanProposal)
             assert isinstance(proposal, VisualPlanProposal)
-        # The model names sections by their opaque ref; code puts the lesson's section ids back.
-        proposal = proposal.model_copy(update={"requirements": [
-            r.model_copy(update={"lesson_section_id": brief.sections[r.lesson_section_id]})
-            for r in proposal.requirements]})
-        return VisualPlan(plan_id=plan_id_for(data.lesson, proposal), lesson_title=data.lesson.title,
-                          requirements=proposal.requirements, rationale=proposal.rationale)
+        # Code names every visual (its section's ref number and its type, both system values) and puts the lesson's
+        # section ids back in place of the refs: nothing the model wrote becomes an identifier.
+        requirements: list[VisualRequirement] = []
+        for r in proposal.requirements:
+            base = f"v{r.lesson_section_id.removeprefix('s')}_{r.visual_type.value}"
+            taken = {q.visual_id for q in requirements}
+            visual_id = next(v for v in (base, *(f"{base}_{n}" for n in range(2, 100))) if v not in taken)
+            requirements.append(VisualRequirement(**r.model_dump(exclude={"lesson_section_id"}), visual_id=visual_id,
+                                                  lesson_section_id=brief.sections[r.lesson_section_id]))
+        return VisualPlan(plan_id=plan_id_for(data.lesson, proposal), lesson_title=brief.planning.lesson_title or "",
+                          requirements=requirements, rationale=proposal.rationale)
 
     def check(self, output, source) -> None:
         if not isinstance(output, VisualPlanProposal):
             return
         assert isinstance(source, VisualBrief)
         planning = source.planning
-        unknown = sorted({r.lesson_section_id for r in output.requirements} - set(source.sections))
+        # Rejections name a requirement by its position and a field by its name: never a value the model wrote.
+        unknown = [i for i, r in enumerate(output.requirements, start=1) if r.lesson_section_id not in source.sections]
         if unknown:
-            raise OutputRejected(f"visuals reference unknown lesson sections {unknown}; use a section's ref")
+            raise OutputRejected(f"requirements {unknown} reference unknown lesson sections; use a section's ref")
         if len(output.requirements) > planning.max_visuals:
             raise OutputRejected(f"{len(output.requirements)} visuals proposed; at most {planning.max_visuals} allowed")
-        # Never quote the answer back: name the visual and the field only.
-        leaking = [f"{r.visual_id}.{name}" for r in output.requirements for name in ANSWER_CHECKED_FIELDS
-                   if source.leaks(getattr(r, name))]
+        leaking = [f"requirement {i}.{name}" for i, r in enumerate(output.requirements, start=1)
+                   for name in ANSWER_CHECKED_FIELDS if source.leaks(getattr(r, name))]
         if leaking:
             raise OutputRejected(f"{', '.join(leaking)} state the answer to one of the lesson's exercises or check "
                                  "questions; describe the concept without it")
@@ -140,7 +145,10 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
         scope = ctx.scope
         scope.emit(EventType.VISUAL_STARTED, lesson_title=data.lesson.title, sections=len(data.lesson.sections),
                    max_visuals=data.max_visuals)
-        plan = await self.plan(data, ctx)
+        brief = build_brief(data)
+        plan = await self.plan(data, ctx, brief)
+        # The answer-isolation marker goes only on images of a plan whose every model-derived field passed the checks.
+        planning = ANSWER_ISOLATED_PLANNING if brief.isolated(plan) else None
         scope.emit(EventType.VISUAL_PLAN_CREATED, plan_id=plan.plan_id, requirements=[
             {"visual_id": r.visual_id, "lesson_section_id": r.lesson_section_id, "visual_type": r.visual_type.value,
              "preferred_source": r.preferred_source, "required": r.required} for r in plan.requirements])
@@ -157,7 +165,7 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
         failures: list[VisualFailure] = []
         artifacts = list(stored.artifacts)
         for req in plan.requirements:
-            outcome = await self._fulfil(req, plan, plan_artifact_id, data, ctx)
+            outcome = await self._fulfil(req, plan, plan_artifact_id, data, ctx, planning)
             if isinstance(outcome, VisualFailure):
                 failures.append(outcome)
             else:
@@ -179,13 +187,13 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
         return result
 
     async def _fulfil(self, req: VisualRequirement, plan: VisualPlan, plan_artifact_id: str, data: VisualRequest,
-                      ctx: AgentContext) -> tuple[VisualAssetRef, Artifact] | VisualFailure:
+                      ctx: AgentContext, planning: str | None) -> tuple[VisualAssetRef, Artifact] | VisualFailure:
         attempts: list[VisualAttempt] = []
         for source in req.sources():
             if source == "search":
-                ref = await self._search(req, plan, plan_artifact_id, data, ctx, attempts)
+                ref = await self._search(req, plan, plan_artifact_id, data, ctx, attempts, planning)
             else:
-                ref = await self._generate(req, plan, plan_artifact_id, ctx, attempts)
+                ref = await self._generate(req, plan, plan_artifact_id, ctx, attempts, planning)
             if ref is not None:
                 return ref
         return VisualFailure(visual_id=req.visual_id, lesson_section_id=req.lesson_section_id, required=req.required,
@@ -211,7 +219,8 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
             return None
 
     async def _search(self, req: VisualRequirement, plan: VisualPlan, plan_artifact_id: str, data: VisualRequest,
-                      ctx: AgentContext, attempts: list[VisualAttempt]) -> tuple[VisualAssetRef, Artifact] | None:
+                      ctx: AgentContext, attempts: list[VisualAttempt],
+                      planning: str | None) -> tuple[VisualAssetRef, Artifact] | None:
         scope = ctx.scope
         assert req.search_query is not None
         scope.emit(EventType.IMAGE_SEARCH_STARTED, visual_id=req.visual_id, query=req.search_query)
@@ -272,7 +281,7 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
                 selection=SelectionRecord(selector=selection.selector, rank=ranked.rank, score=ranked.score,
                                           signals=ranked.signals, candidates=len(selection.ranked),
                                           rejected=list(rejected)),
-                validation=report, planning=ANSWER_ISOLATED_PLANNING,
+                validation=report, planning=planning,
             )
             ref = await self._create(req, asset, plan_artifact_id, ctx, attempts)
             if ref is not None:
@@ -281,7 +290,7 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
         return None
 
     async def _generate(self, req: VisualRequirement, plan: VisualPlan, plan_artifact_id: str, ctx: AgentContext,
-                        attempts: list[VisualAttempt]) -> tuple[VisualAssetRef, Artifact] | None:
+                        attempts: list[VisualAttempt], planning: str | None) -> tuple[VisualAssetRef, Artifact] | None:
         scope = ctx.scope
         assert req.generation_prompt is not None
         width, height = generation_size(req.aspect_ratio)
@@ -312,7 +321,7 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
             lesson_section_id=req.lesson_section_id, visual_type=req.visual_type, purpose=req.purpose,
             description=req.description, origin="generated", object=generated.storage,
             width=report.measured.width, height=report.measured.height, format=report.measured.media_type,
-            attribution=generated.metadata, validation=report, planning=ANSWER_ISOLATED_PLANNING,
+            attribution=generated.metadata, validation=report, planning=planning,
         )
         return await self._create(req, asset, plan_artifact_id, ctx, attempts)
 
