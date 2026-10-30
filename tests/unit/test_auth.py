@@ -241,10 +241,10 @@ def test_artifact_view_drops_storage_locations_digests_and_sizes() -> None:
                         metadata={"object": {"uri": "file:///srv/y", "checksum": "c", "key": "objects/sha256/cc/c.png",
                                              "size_bytes": 9, "media_type": "image/png"},
                                   "items": [{"uri": "z", "timeline_checksum": "d", "bytes": 3}],
-                                  "generation_key": "g", "concept_id": "preterite"})
+                                  "generation_key": "g", "width": 640, "format": "png"})
     view = ArtifactView.of(artifact).model_dump(mode="json")
     assert "content_hash" not in view and "size_bytes" not in view
-    assert view["metadata"] == {"object": {"media_type": "image/png"}, "items": [{}], "concept_id": "preterite"}
+    assert view["metadata"] == {"width": 640, "format": "png"}  # the allowlisted flat fields only
     assert "uri" not in json.dumps(view) and "h" * 64 not in json.dumps(view) and "4321" not in json.dumps(view)
     # the internal model is unchanged
     assert artifact.content_hash == "h" * 64 and artifact.size_bytes == 4321 and artifact.metadata["object"]["checksum"]
