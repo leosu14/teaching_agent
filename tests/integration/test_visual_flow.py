@@ -104,11 +104,12 @@ async def test_end_to_end_lesson_with_visual_assets(make_container) -> None:
     assert order == ["diagnostic", "research", "plan", "teach_review", "visual_gate", "visual", "visual_policy",
                      "store_artifacts", "slide_plan"]
 
-    # Visual planning got the lesson plan, the approved lesson and the research bundle.
+    # Visual planning got the answer-free brief of the approved lesson: its teaching sections behind opaque refs.
     planning = VisualPlanningInput.model_validate(next(r for r in llm.requests if r.agent_id == "visual").input_payload)
     research = ResearchBundle.model_validate_json(container.artifacts.read(
         container.artifacts.find(task.task_id, "research_bundle").artifact_id))
-    assert planning.research == research and planning.plan.title and planning.lesson.sections
+    assert planning.topic == research.objective.topic and planning.lesson_title == lesson_of(container, task).title
+    assert [s.ref for s in planning.sections] == ["s1", "s2"]
 
     result = visuals_of(task)
     assert result.status == "complete" and result.failures == [] and task.result.warnings == []
@@ -262,8 +263,8 @@ async def test_visuals_run_once_after_revision_on_the_approved_lesson(make_conta
     planned = VisualPlanningInput.model_validate(next(r for r in llm.requests if r.agent_id == "visual").input_payload)
     review = task.workflow.node_states["teach_review"].output
     approved = LessonContent.model_validate(review["candidate"])
-    assert planned.lesson.model_dump(exclude={"references"}) == approved.model_dump(exclude={"references"})
-    assert planned.lesson.sections[-1].citations  # the revision, not the rejected draft (which had none)
+    assert [s.explanation for s in planned.sections] == [s.explanation for s in approved.sections]
+    assert visuals_of(task).plan.requirements[-1].lesson_section_id == approved.sections[-1].section_id
 
 
 async def test_optional_visual_failure_continues_with_a_recorded_warning(make_container) -> None:

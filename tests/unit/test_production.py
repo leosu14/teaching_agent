@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import io
 import json
-from types import SimpleNamespace
 
 import pytest
 
 from app.agents.base import OutputRejected
 from app.agents.visual.agent import VisualAgent
+from app.agents.visual.briefing import VisualBrief
 from app.config.production import ProductionSettings, production_readiness, required_capabilities
 from app.config.providers import ProviderSettings
 from app.config.routing import ConfigError
@@ -237,14 +237,14 @@ def visual(visual_id: str, source: str, fallback: str | None = None) -> VisualRe
     ([visual("v1", "generate", "search")], {"max_searched_images": 0}, "fallbacks included"),
 ])
 def test_visual_plan_over_the_image_budget_is_rejected_for_revision(requirements, budget, message) -> None:
-    source = VisualPlanningInput.model_construct(lesson=SimpleNamespace(sections=[SimpleNamespace(section_id="s1")]),
-                                                 max_visuals=4, **{"max_generated_images": None,
-                                                                   "max_searched_images": None, **budget})
+    def brief(**limits) -> VisualBrief:
+        return VisualBrief(planning=VisualPlanningInput(max_visuals=4, **limits), sections={"s1": "sec_1"},
+                           answers=())
+
     with pytest.raises(OutputRejected, match=message):
-        VisualAgent.check(None, VisualPlanProposal(requirements=requirements, rationale="r"), source)
+        VisualAgent.check(None, VisualPlanProposal(requirements=requirements, rationale="r"), brief(**budget))
     within = {k: v + len(requirements) for k, v in budget.items()}
-    VisualAgent.check(None, VisualPlanProposal(requirements=requirements, rationale="r"),
-                      source.model_copy(update=within))
+    VisualAgent.check(None, VisualPlanProposal(requirements=requirements, rationale="r"), brief(**within))
 
 
 # --- failure classification ------------------------------------------------------------------------------------

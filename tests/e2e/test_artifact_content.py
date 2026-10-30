@@ -1,8 +1,9 @@
 """GET /artifacts/{id}/content: ownership, authentication, the block-by-default content policy, response headers,
 streaming and missing objects (issue #24).
 
-The production policy serves no type yet (`SERVABLE` is empty), so the serving path is exercised with a test-only
-policy injected into the container; every type is checked under both."""
+The production policy serves only raster IMAGE_ASSETs planned from the answer-free visual brief (issue #26; their tests
+are in test_image_content.py). The generic serving path is exercised with a test-only policy injected into the
+container; every type is checked under both."""
 
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.api.app import create_app
 from app.schemas.artifact import ArtifactType
-from app.services.artifact_content import BLOCKED, CHUNK, SERVABLE, ArtifactContentService
+from app.services.artifact_content import BLOCKED, CHUNK, PROVENANCE, SERVABLE, ArtifactContentService
 from app.storage.object_store import FilesystemObjectStore
 from tests.auth import TestAuth, client_for
 from tests.unit.helpers import scope
@@ -39,8 +40,9 @@ def env(container):
 
 
 def allow(container, *types: ArtifactType, media: str = MEDIA) -> None:
-    """A test-only policy: these types are servable as `media`."""
-    container.artifact_content = ArtifactContentService(container.artifacts, {t: frozenset({media}) for t in types})
+    """A test-only policy: these types are servable as `media`, with no provenance requirement."""
+    container.artifact_content = ArtifactContentService(container.artifacts, {t: frozenset({media}) for t in types},
+                                                        provenance={})
 
 
 def object_path(artifact) -> Path:
@@ -56,12 +58,14 @@ def test_every_artifact_type_is_classified_exactly_once() -> None:
     assert all(reason.strip() for reason in BLOCKED.values())
 
 
-def test_no_type_is_servable_until_proven_free_of_answer_keys() -> None:
+def test_only_raster_images_are_servable_once_proven_free_of_answer_keys() -> None:
     """Allowing a type is a deliberate change: update this test, BLOCKED, SERVABLE and docs/security.md together."""
-    assert dict(SERVABLE) == {}
+    assert dict(SERVABLE) == {
+        ArtifactType.IMAGE_ASSET: frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})}
+    assert set(PROVENANCE) == {ArtifactType.IMAGE_ASSET}  # and only with the answer-isolated planning marker
     for answer_bearing in (ArtifactType.LESSON, ArtifactType.EXERCISE, ArtifactType.ASSESSMENT_ITEM,
                            ArtifactType.PRESENTATION, ArtifactType.SLIDE_PLAN, ArtifactType.LEARNER_EVALUATION,
-                           ArtifactType.TEACHING_SESSION, ArtifactType.IMAGE_ASSET):
+                           ArtifactType.TEACHING_SESSION, ArtifactType.VISUAL_PLAN):
         assert answer_bearing in BLOCKED
 
 
@@ -69,7 +73,7 @@ def test_no_type_is_servable_until_proven_free_of_answer_keys() -> None:
 
 
 @pytest.mark.parametrize("type_", ALL_TYPES, ids=lambda t: t.value)
-def test_production_policy_serves_no_type(env, type_) -> None:
+def test_production_policy_serves_no_type_stored_as_octet_stream(env, type_) -> None:
     container, stored, auth = env
     with client_for(container, OWNER, auth=auth) as a:
         theirs = a.get(f"/artifacts/{stored[type_].artifact_id}/content")
