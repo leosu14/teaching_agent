@@ -348,8 +348,9 @@ class TitlingSearch(SpySearch):
 
 
 async def test_an_image_whose_stored_record_states_an_answer_is_not_marked(tmp_path) -> None:
-    """The marker is decided last, on everything of the image a learner can read (name and served metadata): a
-    clean plan is not enough when the provider's attribution states an answer."""
+    """The marker is decided last, on the image's name and its full stored metadata, not only the keys the listing
+    serves: a clean plan is not enough when the provider's attribution states an answer. The listing still never
+    shows that title (the metadata allowlist), and the image is not downloadable."""
     llm = MockLLMProvider({**default_responders(), "teacher": planting_teacher})
     container = build_container(Settings(data_dir=tmp_path / "d", log_json=False), llm_providers={"mock": llm},
                                 image_search_provider=TitlingSearch(), image_generation_provider=SpyGeneration())
@@ -361,6 +362,8 @@ async def test_an_image_whose_stored_record_states_an_answer_is_not_marked(tmp_p
         assert by_origin["search"] and by_origin["generated"]  # valid plans still produce images on both paths
         assert all(a.metadata.get("planning") is None for a in by_origin["search"])
         assert all(a.metadata["planning"] == ANSWER_ISOLATED_PLANNING for a in by_origin["generated"])
+        assert all(CHECK_ANSWER in a.metadata["attribution"]["title"] for a in by_origin["search"])
+        assert CHECK_ANSWER not in learner_visual_listing(container, task)
         with client_for(container, LEARNER["learner_id"], auth=TestAuth()) as a:
             for image in by_origin["search"]:
                 assert a.get(f"/artifacts/{image.artifact_id}/content").status_code == 404
