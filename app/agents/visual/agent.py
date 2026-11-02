@@ -16,7 +16,7 @@ import json
 
 from app.agents.base import Agent, AgentContext, AgentSpec, OutputRejected
 from app.agents.visual.briefing import VisualBrief, build_brief
-from app.observability.budget import BudgetExceededError
+from app.observability.budget import BudgetExceededError, refusal_reason
 from app.schemas.artifact import Artifact, ArtifactBatch, ArtifactDraft, ArtifactType, StoredArtifacts
 from app.schemas.common import ModelTier
 from app.schemas.events import EventType
@@ -211,8 +211,10 @@ class VisualAgent(Agent[VisualRequest, VisualResult]):
             return await self.use_tool(name, payload, ctx)
         except (ToolPermissionError, ToolNotFound):
             raise
-        except BudgetExceededError as exc:
-            attempts.append(VisualAttempt(source=source, stage="budget", message=str(exc)[:1000], image_id=image_id))
+        except BudgetExceededError as exc:  # not str(exc): its "raise the limit and resume" does not apply here
+            what = "image search" if source == "search" else "image generation"
+            attempts.append(VisualAttempt(source=source, stage="budget", message=refusal_reason(exc, what),
+                                          image_id=image_id))
             return None
         except ToolError as exc:
             report = getattr(exc, "report", None)

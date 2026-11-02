@@ -36,6 +36,13 @@ def _exceeded(limit: str, used: float, maximum: float, what: str, *, scope: str 
                                limit=limit, used=used, maximum=maximum, scope=scope)
 
 
+def refusal_reason(exc: BudgetExceededError, what: str) -> str:
+    """The failure reason recorded when the budget refuses one image or generated clip. Unlike the exception's own
+    text it gives no resume advice: such a refusal fails only that visual or clip, not the task, and resuming does not
+    retry it unless the node that recorded it is invalidated first (see docs/production.md, Budgets)."""
+    return f"the {what} was not sent: the {exc.scope} budget is used up ({exc.limit}={exc.maximum:g})"
+
+
 def admit(budget: TaskBudget, usage: TaskUsage, capability: Capability, operation: str,
           units: dict[str, float] | None = None) -> None:
     """Raise BudgetExceededError if sending this request would exceed the budget."""

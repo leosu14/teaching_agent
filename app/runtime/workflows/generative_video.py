@@ -29,7 +29,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
-from app.observability.budget import BudgetExceededError
+from app.observability.budget import BudgetExceededError, refusal_reason
 from app.runtime.workflow.nodes import Node, NodeFatal, NodeResult, NodeRuntime, StateView
 from app.schemas.events import EventType
 from app.schemas.generative_video import (
@@ -94,7 +94,7 @@ class GenerativeVideoNode(Node):
                 job = await rt.tools.call(caller, "video_generation.submit", GenerationSubmitRequest(segment=segment),
                                           rt.scope)
             except BudgetExceededError as exc:
-                state.fail(segment, "budget", str(exc))
+                state.fail(segment, "budget", refusal_reason(exc, "video generation job"))
                 continue
             except ToolError as exc:
                 state.fail(segment, "submit", str(exc))

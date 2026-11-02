@@ -158,6 +158,34 @@ async def test_a_required_clip_that_fails_fails_the_task_unless_the_policy_conti
     assert task.status == TaskStatus.COMPLETED and len(generation(task).failures) == 2
 
 
+async def test_a_clip_the_budget_refuses_falls_back_without_resume_advice(make, monkeypatch) -> None:
+    """R1 (#30): a refused video generation job fails only that clip, so its reason names the limit and gives no
+    "raise the limit and resume" advice (resuming alone would not retry it; see docs/production.md)."""
+    from app.observability.budget import _exceeded
+    from app.observability.scope import UsageLedger
+    from app.schemas.providers import Capability
+
+    reserve = UsageLedger.reserve
+
+    def refuse_video(self, **attempt):
+        if attempt["capability"] == Capability.VIDEO_GENERATION:
+            raise _exceeded("MAX_GENERATED_VIDEO_SEGMENTS", 3, 2, "one more generated video segment")
+        return reserve(self, **attempt)
+
+    monkeypatch.setattr(UsageLedger, "reserve", refuse_video)
+    provider = MockVideoGenerationProvider(processing_polls=0)
+    container = make(provider)
+    task = await finish(container, await start(container))
+    assert task.status == TaskStatus.COMPLETED, task.errors
+    result = generation(task)
+    assert len(result.failures) == 2 and provider.submits == 0
+    for failure in result.failures:
+        assert failure.stage == "budget"
+        assert failure.error == ("the video generation job was not sent: the task budget is used up "
+                                 "(MAX_GENERATED_VIDEO_SEGMENTS=2)")
+    assert not any("resume" in w.lower() for w in task.result.warnings)
+
+
 async def test_slow_jobs_wait_and_resume_without_being_submitted_again(make) -> None:
     provider = MockVideoGenerationProvider(processing_polls=6)
     container = make(provider, generated_video_poll_interval_seconds=0.02, generated_video_poll_timeout_seconds=0.05)
