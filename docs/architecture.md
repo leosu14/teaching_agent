@@ -197,11 +197,13 @@ is recorded only when the provider reports one.
 
 `VisualAgent` (`app/agents/visual/`) runs only for a lesson the reviewer approved: the `visual_gate` node skips it
 for a lesson accepted with warnings (with a warning saying so), and a rejected draft never reaches it, so no image
-is made for a lesson that did not pass review. It asks the model for a `VisualPlan` from the lesson plan, the
-approved lesson and the research bundle: one `VisualRequirement` per visual (visual id, purpose, lesson section,
+is made for a lesson that did not pass review. It asks the model for a `VisualPlan` from an answer-free brief of the
+approved lesson (`briefing.py`: its teaching sections behind opaque refs, never its exercises, check questions or
+their answers; see docs/security.md, "Artifact content"): one `VisualRequirement` per visual (visual id, purpose, lesson section,
 concept, description, `VisualType`, preferred source, search query and/or generation prompt, aspect ratio, required,
 attribution required). The schema rejects URLs anywhere in a requirement, a photo or map that is not searched, and
-a generated visual that is not generated; the agent's `check` rejects unknown sections and too many visuals. The
+a generated visual that is not generated; the agent's `check` rejects unknown sections, too many visuals and any
+requirement text that states an exercise or check-question answer. The
 plan id is a hash of the plan, so re-planning the same lesson the same way reuses the stored plan and images.
 `VisualType` (photo, illustration, diagram, chart, map, icon, generated_visual) carries no subject logic.
 

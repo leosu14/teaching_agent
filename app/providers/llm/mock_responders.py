@@ -674,28 +674,28 @@ def plan_audio(request: LLMRequest) -> dict:
 def visuals(request: LLMRequest) -> dict:
     """A searched picture per section (the first one required) plus a required generated concept diagram."""
     p = VisualPlanningInput.model_validate(request.input_payload)
-    topic = p.research.objective.topic
-    names = {c.concept_id: c.name for c in p.plan.concepts}
+    topic = p.topic or p.subject or "lesson"
     requirements = []
-    for i, section in enumerate(p.lesson.sections, start=1):
-        concept = names.get(section.concept_id, section.heading)
+    for i, section in enumerate(p.sections, start=1):
+        concept = section.concept
+        heading = section.heading or concept
         first = i == 1
         requirements.append({
-            "visual_id": f"v{i}_{'photo' if first else 'illustration'}", "lesson_section_id": section.section_id,
-            "purpose": f"Set the real-world context for {section.heading.lower()}.",
-            "concept": concept, "description": f"A {topic} scene that shows {section.heading.lower()}.",
+            "lesson_section_id": section.ref,
+            "purpose": f"Set the real-world context for {heading.lower()}.",
+            "concept": concept, "description": f"A {topic} scene that shows {heading.lower()}.",
             "visual_type": "photo" if first else "illustration", "preferred_source": "search",
-            "search_query": f"{section.heading} {topic}",
-            "generation_prompt": None if first else f"Illustration of {section.heading.lower()} in a {topic} setting",
+            "search_query": f"{heading} {topic}",
+            "generation_prompt": None if first else f"Illustration of {heading.lower()} in a {topic} setting",
             "aspect_ratio": "16:9", "required": first, "attribution_required": True,
         })
         requirements.append({
-            "visual_id": f"v{i}_diagram", "lesson_section_id": section.section_id,
+            "lesson_section_id": section.ref,
             "purpose": f"Summarise how {concept.lower()} works.", "concept": concept,
             "description": f"A labelled diagram of {concept.lower()} with one example.",
             "visual_type": "diagram", "preferred_source": "generate",
             "generation_prompt": f"Labelled teaching diagram explaining {concept.lower()}, with the example: "
-                                 f"{(section.examples or [section.heading])[0]}",
+                                 f"{(section.examples or [heading])[0]}",
             "aspect_ratio": "16:9", "required": True, "attribution_required": False,
         })
     within: list[dict] = []

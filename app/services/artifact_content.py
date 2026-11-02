@@ -6,20 +6,24 @@ block-by-default: a type is served only when it is in `SERVABLE` (with the media
 every `ArtifactType` is classified in `BLOCKED` or `SERVABLE` (a test enforces it, so a new type stays blocked until
 someone decides). A blocked artifact gets the same "not found" as one that does not exist.
 
-`SERVABLE` is empty: no type is yet proven free of answer keys. IMAGE_ASSET is the closest candidate, but the visual
-planner is given the whole lesson (exercise and check-question answers included) when it writes the search query or
-generation prompt an image comes from, and an SVG is text. Allowing a type is a deliberate, reviewed change."""
+Only raster IMAGE_ASSETs are servable (issue #26). The visual planner writes the search query or generation prompt an
+image comes from, and it now plans from an answer-free brief (app/agents/visual/briefing.py): no exercises or check
+questions, any text stating one of their answers dropped, and a plan stating one rejected. An image is served only
+when its metadata records that planning (`PROVENANCE`): images made before the fix were planned from the whole lesson.
+An SVG is text (it could spell an answer out and carries script), so it stays blocked. Allowing a type is a
+deliberate, reviewed change."""
 
 from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import BinaryIO
 
 from app.artifacts.service import EXTENSIONS, ArtifactService
 from app.schemas.artifact import Artifact, ArtifactType
+from app.schemas.visual import ANSWER_ISOLATED_PLANNING
 from app.storage.repositories import NotFound
 
 log = logging.getLogger(__name__)
@@ -27,8 +31,14 @@ log = logging.getLogger(__name__)
 CHUNK = 64 * 1024
 _SAFE = re.compile(r"[^A-Za-z0-9_-]")  # the download name is the artifact id, made header-safe
 
-# Type -> the media types it may be served as. Empty: nothing is served yet (see the module docstring).
-SERVABLE: Mapping[ArtifactType, frozenset[str]] = {}
+# Type -> the media types it may be served as (see the module docstring). Never image/svg+xml.
+SERVABLE: Mapping[ArtifactType, frozenset[str]] = {
+    ArtifactType.IMAGE_ASSET: frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"}),
+}
+# Type -> what its stored metadata must prove before it is served, on top of SERVABLE.
+PROVENANCE: Mapping[ArtifactType, Callable[[Artifact], bool]] = {
+    ArtifactType.IMAGE_ASSET: lambda a: a.metadata.get("planning") == ANSWER_ISOLATED_PLANNING,
+}
 
 _LESSON_ANSWERS = "built from the lesson, whose exercises and check questions carry their answers"
 _DECK = "built from the slide plan, which can hold answer slides"
@@ -60,8 +70,7 @@ BLOCKED: Mapping[ArtifactType, str] = {
     ArtifactType.VIDEO: "rendered from the deck, which can hold answer slides",
     ArtifactType.VIDEO_SEGMENT_PLAN: _ANSWER_INPUTS,
     ArtifactType.GENERATED_VIDEO_ASSET: _ANSWER_INPUTS,
-    ArtifactType.IMAGE_ASSET: _ANSWER_INPUTS + " (its search query or generation prompt); SVG is text",
-    ArtifactType.VISUAL_PLAN: _ANSWER_INPUTS,
+    ArtifactType.VISUAL_PLAN: _INTERNAL,
     ArtifactType.CODE: "unclassified generated content",
     ArtifactType.REPORT: "review report quoting the lesson draft",
     ArtifactType.LESSON_PLAN: _INTERNAL,
@@ -113,12 +122,16 @@ class ArtifactContent:
 
 class ArtifactContentService:
     def __init__(self, artifacts: ArtifactService,
-                 servable: Mapping[ArtifactType, frozenset[str]] = SERVABLE) -> None:
+                 servable: Mapping[ArtifactType, frozenset[str]] = SERVABLE,
+                 provenance: Mapping[ArtifactType, Callable[[Artifact], bool]] = PROVENANCE) -> None:
         self._artifacts = artifacts
         self._servable = servable
+        self._provenance = provenance
 
     def servable(self, artifact: Artifact) -> bool:
-        return artifact.media_type in self._servable.get(artifact.type, frozenset())
+        proven = self._provenance.get(artifact.type)
+        return (artifact.media_type in self._servable.get(artifact.type, frozenset())
+                and (proven is None or proven(artifact)))
 
     def open(self, artifact_id: str) -> ArtifactContent:
         """The content of a servable artifact, opened for streaming. The caller has already checked ownership."""

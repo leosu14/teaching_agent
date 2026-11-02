@@ -121,7 +121,12 @@ def test_visual_requirement_rules() -> None:
         with pytest.raises(ValidationError):
             requirement(**over)
     with pytest.raises(ValidationError, match="unique"):
-        VisualPlanProposal(requirements=[requirement(), requirement()])
+        VisualPlan(plan_id="vp1", lesson_title="L", requirements=[requirement(), requirement()])
+    # The model proposes no ids: one it writes anyway is dropped unread, before validation.
+    proposal = VisualPlanProposal.model_validate({"requirements": [
+        {**requirement().model_dump(mode="json"), "visual_id": "zebraquartz"}]})
+    assert "visual_id" not in proposal.requirements[0].model_dump()
+    assert "zebraquartz" not in proposal.model_dump_json()
 
 
 def test_visual_result_must_account_for_every_planned_visual() -> None:

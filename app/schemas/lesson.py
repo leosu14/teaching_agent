@@ -388,12 +388,30 @@ class ReviewerInput(Schema):
 # --- Visuals -----------------------------------------------------------------------------
 
 
-class VisualPlanningInput(Schema):
-    """What the model sees when planning visuals for an approved lesson."""
+class VisualSectionBrief(Schema):
+    """One teaching section as the visual planner sees it: the learner-facing text it teaches, nothing else."""
 
-    plan: LessonPlan
-    lesson: LessonContent
-    research: ResearchBundle
+    ref: str  # opaque ("s1", "s2", ...): code maps it back to the lesson section
+    concept: str
+    purpose: SectionPurpose
+    heading: str | None = None
+    explanation: str | None = None
+    examples: list[str] = Field(default_factory=list)
+    analogy: str | None = None
+
+
+class VisualPlanningInput(Schema):
+    """What the model sees when planning visuals for an approved lesson: an explicit, minimal brief built by the
+    VisualAgent (app/agents/visual/briefing.py). Never the lesson's exercises or check questions, their answers or
+    explanations, the lesson plan, the research bundle or real section ids: the search query and generation prompt
+    the model writes are the only text that reaches image search and generation."""
+
+    lesson_title: str | None = None
+    subject: str | None = None
+    topic: str | None = None
+    level: str | None = None
+    objectives: list[str] = Field(default_factory=list)
+    sections: list[VisualSectionBrief] = Field(default_factory=list)
     max_visuals: int = Field(default=6, ge=0)
     # The task's image budget (None: no limit). A visual counts against each source it may use, fallback included.
     max_generated_images: int | None = Field(default=None, ge=0)
@@ -401,7 +419,8 @@ class VisualPlanningInput(Schema):
 
 
 class VisualRequest(Schema):
-    """Input of the VisualAgent: an approved lesson and where its artifacts hang in the artifact graph."""
+    """Input of the VisualAgent: an approved lesson and where its artifacts hang in the artifact graph. The agent's
+    code holds all of it (it needs the answers to keep them out); its model sees only the VisualPlanningInput brief."""
 
     plan: LessonPlan
     lesson: LessonContent
@@ -412,11 +431,6 @@ class VisualRequest(Schema):
     max_generated_images: int | None = Field(default=None, ge=0)
     max_searched_images: int | None = Field(default=None, ge=0)
     parent_artifact_ids: list[str] = Field(default_factory=list)  # parents of the VISUAL_PLAN artifact
-
-    def planning_input(self) -> VisualPlanningInput:
-        return VisualPlanningInput(plan=self.plan, lesson=self.lesson, research=self.research,
-                                   max_visuals=self.max_visuals, max_generated_images=self.max_generated_images,
-                                   max_searched_images=self.max_searched_images)
 
 
 # --- Learner memory update -----------------------------------------------------------------
