@@ -42,7 +42,7 @@ class EventType:
     PROVIDER_RATE_LIMITED = "provider.rate_limited"
     # Spend ledger (ids and numbers only; stored even when the emitting task worker has lost its lease)
     BUDGET_EXHAUSTED = "budget.exhausted"  # a reservation was refused: nothing was sent
-    SPEND_UNKNOWN = "spend.unknown"  # an attempt that may have been billed (timeout, cancellation, unusable answer)
+    SPEND_UNKNOWN = "spend.unknown"  # an attempt that may have been billed (timeout, cancellation, unusable answer or usage)
     SPEND_ABANDONED = "spend.abandoned"  # a reservation nobody settled in time: its estimate was charged
     SPEND_AFTER_LEASE_LOSS = "spend.after_lease_loss"  # settled after the worker lost its task lease (kept)
     SPEND_SETTLE_FAILED = "spend.settle_failed"  # the outcome could not be stored; the sweep will charge the estimate

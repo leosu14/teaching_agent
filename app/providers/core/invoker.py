@@ -10,7 +10,8 @@
   budgets before it is sent (a request that would exceed one is never sent; a task worker that lost its lease cannot
   reserve) and settles it once its outcome is known, in the durable spend ledger, whatever happens to the lease
   afterwards. A timed-out, cancelled or garbled attempt that may have been billed is recorded as `unknown` with its
-  estimate charged; every attempt is also kept in the work's in-memory usage summary.
+  estimate charged, as is a successful attempt whose reported usage cannot be read; every attempt is also kept in
+  the work's in-memory usage summary.
 
 Events go to the scope of the task being executed when there is one, otherwise to the application event bus.
 """
@@ -179,7 +180,22 @@ class ProviderInvoker:
             finally:
                 release_request_id(token)
             latency = round((self._clock() - started) * 1000, 3)
-            record = usage(result, request_id).model_copy(update={"attempt": attempt, "latency_ms": latency})
+            try:
+                record = usage(result, request_id).model_copy(update={"attempt": attempt, "latency_ms": latency})
+            except Exception as exc:  # noqa: BLE001 - e.g. a vendor changed its usage payload
+                # The provider did (and billed) the work, but what it used cannot be read. The attempt is settled at
+                # once as unknown with its estimate charged, instead of staying reserved until the sweep, and is
+                # not retried (a retry would pay again). The original error is re-raised.
+                if ledger is not None:
+                    self._settle(ledger, scope, reservation, ProviderRequestRecord(
+                        request_id=request_id, provider=provider.name, capability=capability.value,
+                        operation=operation, model=model, attempt=attempt, status="failed",
+                        error_type=type(exc).__name__, latency_ms=latency, node_id=scope.node_id,
+                        agent_id=scope.agent_id), SpendState.UNKNOWN, "usage_unreadable", base)
+                self.emit(EventType.PROVIDER_REQUEST_FAILED, **base, request_id=request_id, attempt=attempt,
+                          error_type=type(exc).__name__, error=redact_text(str(exc))[:500], status=None,
+                          will_retry=False, latency_ms=latency, reason="usage_unreadable")
+                raise
             self.usage_log.append(record)
             self.emit(EventType.PROVIDER_REQUEST_COMPLETED, **base, request_id=request_id, attempt=attempt,
                       latency_ms=latency, usage=record.model_dump(mode="json", exclude_none=True))
