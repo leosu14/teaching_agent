@@ -102,6 +102,10 @@ async def test_a_retry_the_image_budget_refuses_fails_that_visual_not_the_lesson
         [failure] = [f for f in result.failures if any(a.stage == "budget" for a in f.attempts)]
         assert [(a.source, a.stage) for a in failure.attempts][-1] == ("generate", "budget")
         assert "MAX_GENERATED_IMAGES" in failure.reason
+        # R1 (#30): the refusal fails only this visual, so the reason gives no "raise the limit and resume" advice.
+        assert failure.reason == "the image generation was not sent: the task budget is used up (MAX_GENERATED_IMAGES=1)"
+        assert "resume" not in failure.reason.lower()
+        assert not any("resume" in w.lower() for w in task.result.warnings)
         assert any(failure.visual_id in w for w in task.result.warnings)
         # The failed attempt keeps its charge (no refund to make room for the retry); the retry was never reserved.
         [entry] = [e for e in c.spend.entries(task_id=task.task_id) if e.capability == "image"]
@@ -121,6 +125,39 @@ async def test_a_required_visual_the_image_budget_cannot_retry_follows_the_failu
         assert task.errors[-1].node_id == "visual_policy" and "required visuals failed" in task.errors[-1].message
         assert task.errors[-1].category != "BudgetExceededError"
         assert flaky.calls == 1 and len(image_attempts(task)) == 1
+        assert "resume" not in task.errors[-1].message.lower()
+    finally:
+        c.close()
+
+
+async def test_raising_the_image_limit_and_invalidating_the_visual_node_completes_the_lesson(tmp_path) -> None:
+    """R1 (#30), the documented recovery. Resuming alone re-applies the checkpointed visual failure; after raising
+    the limit and invalidating `visual`, the resume generates the image within the new limit and the lesson completes."""
+    flaky = GenerationFailing(transient_once=True)
+    c = flaky_lesson_container(tmp_path, flaky)
+    try:
+        task = await run_lesson(c)
+        assert task.status == TaskStatus.FAILED and task.errors[-1].node_id == "visual_policy"
+        task_id = task.task_id
+    finally:
+        c.close()
+
+    c = build_container(Settings(data_dir=tmp_path / "d", log_json=False,
+                                 production=ProductionSettings(max_generated_images=2)),
+                        llm_providers={"mock": MockLLMProvider(default_responders())},
+                        image_generation_provider=flaky)
+    try:
+        task = await c.task_service.resume(task_id)  # the limit alone: the visual's failure is checkpointed
+        assert task.status == TaskStatus.FAILED and task.errors[-1].node_id == "visual_policy"
+        assert flaky.calls == 1
+
+        reset = c.task_service.invalidate(task_id, ["visual"])
+        assert reset[0] == "visual" and "visual_policy" in reset
+        task = await c.task_service.resume(task_id)
+        assert task.status == TaskStatus.COMPLETED, task.errors
+        assert flaky.calls == 2 and len(image_attempts(task)) == 2  # the first (failed) attempt and the new one
+        result = VisualResult.model_validate(task.workflow.node_states["visual_policy"].output)
+        assert not [f for f in result.failures if f.required]
     finally:
         c.close()
 

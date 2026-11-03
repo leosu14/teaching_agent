@@ -120,6 +120,14 @@ attempt whose outcome is unknown, configured pricing applied to its estimate. Wh
 report says so (`cost_complete: false`, `unpriced: [...]`) and the unit limits are what bounds the spending. A
 budget-stopped task can be resumed after raising the limit; the new limits are applied on resume.
 
+A refused image generation or generated video job is different: it fails only that visual or clip (the reason reads
+`the image generation was not sent: the task budget is used up (MAX_GENERATED_IMAGES=1)`), and the visual or video
+failure policy decides whether the lesson continues. The node's result, failure included, is checkpointed, so raising
+the limit and resuming alone fails the same way. After raising the limit, invalidate the `visual` node (and
+`generate_video_segments` for a generated clip) before resuming, for example
+`TaskService.invalidate(task_id, ["visual"])`; the nodes after it run again too. A lesson that completed without the
+visual (policy `continue`) cannot be resumed: start a new run (`--fresh`).
+
 Interactive work has its own budgets (see [configuration](configuration.md#budgets)): the teacher turns of a teaching
 session, and the grading of one assessment attempt submitted through the API. When one is used up the route answers
 **429** with fixed text (`BudgetExhausted`: "The spending limit for this work has been reached. Try again later.");
