@@ -1057,16 +1057,34 @@ class SqlTaskJobRepository:
                 q = q.where(TaskJobRow.status == status.value)
             return [self._job(r) for r in s.scalars(q)]
 
+    def _abandoned(self, now_ms: int):
+        return (TaskJobRow.status == JobStatus.RUNNING.value) & (TaskJobRow.lease_expires_ms <= now_ms)
+
     def _claimable(self, now_ms: int):
         return or_(
             (TaskJobRow.status == JobStatus.QUEUED.value) & (TaskJobRow.available_at_ms <= now_ms),
-            (TaskJobRow.status == JobStatus.RUNNING.value) & (TaskJobRow.lease_expires_ms <= now_ms))
+            self._abandoned(now_ms) & (TaskJobRow.attempts < TaskJobRow.max_attempts))
+
+    def fail_exhausted(self, now: datetime | None = None) -> int:
+        """FAIL every job whose worker died (its lease ran out) on its last allowed attempt: a job that kills its
+        worker each time is not claimed forever. One conditional UPDATE, so a racing claim cannot also take it.
+        Returns how many jobs it failed."""
+        now = now or self._clock()
+        with self._sessions.begin() as s:
+            done = s.execute(update(TaskJobRow).where(
+                self._abandoned(_ms(now)), TaskJobRow.attempts >= TaskJobRow.max_attempts).values(
+                status=JobStatus.FAILED.value, lease_owner=None, lease_expires_ms=None,
+                error="the worker stopped (died or hung) on the job's last attempt",
+                error_category=JobErrorCategory.WORKER_ERROR.value, updated_at=now, finished_at=now))
+        return done.rowcount
 
     def claim(self, owner: str, ttl: timedelta) -> TaskJob | None:
         """Claim the oldest available job: a QUEUED one whose backoff has passed, or a RUNNING one whose worker's
-        lease ran out (that worker died or hung; the claim counts as a new attempt). None when there is none."""
+        lease ran out (that worker died or hung; the claim counts as a new attempt). A RUNNING job whose worker died
+        on its last allowed attempt is FAILED instead (`fail_exhausted`). None when there is none."""
         now = self._clock()
         now_ms = _ms(now)
+        self.fail_exhausted(now)
         with self._sessions() as s:
             candidates = list(s.scalars(select(TaskJobRow.job_id).where(self._claimable(now_ms))
                                         .order_by(TaskJobRow.available_at_ms, TaskJobRow.created_at)

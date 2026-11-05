@@ -8,7 +8,8 @@ Guarantees, layered on the orchestrator's (see docs/architecture.md, background 
   the job runs. One worker per task: the orchestrator still claims the task's own lease and fences every task,
   event and artifact write, so a job reclaimed from a hung worker cannot commit twice.
 - Recovery: a job whose worker died is claimed again once its lease runs out and continues the task from its last
-  checkpoint (completed nodes and stored artifacts are not produced again). Answers whose submission already reached
+  checkpoint (completed nodes and stored artifacts are not produced again). A job whose worker died on its last allowed
+  attempt is FAILED instead of claimed again. Answers whose submission already reached
   the task are never applied twice: the job carries the task version it was validated against.
 - Failure handling: an unexpected error is retried with exponential backoff up to the job's `max_attempts`, then the
   job is FAILED (the task stays at its checkpoint and can be resumed). A busy task (another worker's live lease) is

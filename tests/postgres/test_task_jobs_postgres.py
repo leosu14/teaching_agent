@@ -202,3 +202,36 @@ def test_a_lesson_runs_end_to_end_through_the_queue_on_postgres(tmp_path) -> Non
         assert c.task_service.job(again.task_id).status == JobStatus.CANCELLED
     finally:
         c.close()
+
+
+def test_a_job_whose_last_worker_died_is_failed_not_reclaimed_under_racing_claims(repos) -> None:
+    """Its worker died on the job's last allowed attempt: racing claims all skip it and it ends FAILED, once."""
+    _, tasks, sessions = repos
+    clock = Clock()
+    jobs = SqlTaskJobRepository(sessions, clock)
+    job = _job(_task(tasks)).model_copy(update={"max_attempts": 1})
+    jobs.enqueue(job)
+    claimed = jobs.claim(new_id("dying"), timedelta(minutes=5))
+    assert claimed is not None
+    while claimed.job_id != job.job_id:  # an older leftover job came first: finish it and claim again
+        jobs.finish(claimed.job_id, claimed.lease_owner, JobStatus.DONE)
+        claimed = jobs.claim(new_id("dying"), timedelta(minutes=5))
+    clock.offset += timedelta(minutes=10)  # that worker died: its lease ran out
+    barrier = threading.Barrier(THREADS)
+    taken: list[str] = []
+
+    def claim() -> None:
+        owner = new_id("w")
+        barrier.wait()
+        while (got := jobs.claim(owner, timedelta(minutes=5))) is not None:
+            taken.append(got.job_id)
+            jobs.finish(got.job_id, owner, JobStatus.DONE)
+
+    threads = [threading.Thread(target=claim) for _ in range(THREADS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert job.job_id not in taken
+    final = jobs.get(job.job_id)
+    assert final.status == JobStatus.FAILED and final.attempts == 1 and final.lease_owner is None

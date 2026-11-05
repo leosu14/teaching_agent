@@ -397,3 +397,29 @@ def test_an_embedded_worker_runs_queued_tasks_inside_the_api_process(tmp_path) -
             assert polled["status"] == "WAITING"
     finally:
         container.close()
+
+
+def test_a_job_whose_worker_dies_on_every_attempt_ends_failed(tmp_path) -> None:
+    """Each attempt's worker dies (its claim is never finished and its lease runs out). After `max_attempts` such
+    deaths the job is not handed out again: it is FAILED with the fixed worker-error message."""
+    clock = Clock()
+    container, llm = open_container(tmp_path / "data", clock=clock)
+    try:
+        lid = add_demo_learner(container)
+        task, job = container.task_service.enqueue_task(request=LEARNER["request"], learner_id=lid, user_id="u1")
+        jobs = SqlTaskJobRepository(container._sessions, clock)
+        for i in range(job.max_attempts):
+            claimed = jobs.claim(f"dying-{i}", AHEAD / 2)
+            assert claimed is not None and claimed.attempts == i + 1
+            clock.offset += AHEAD
+        assert jobs.claim("next", AHEAD / 2) is None  # the last attempt's death fails the job
+        failed = container.task_service.job(task.task_id)
+        assert failed.status == JobStatus.FAILED and failed.attempts == job.max_attempts
+        assert failed.error_category == JobErrorCategory.WORKER_ERROR and failed.finished_at is not None
+        with client_for(container, LID, user_id="u1") as client:
+            view = client.get(f"/tasks/{task.task_id}").json()["job"]
+        assert view["status"] == "FAILED" and view["message"] == JOB_ERROR_MESSAGES[JobErrorCategory.WORKER_ERROR]
+        assert sum(llm.calls.values()) == 0
+        container.task_service.enqueue_resume(task.task_id)  # the task itself can still be resumed
+    finally:
+        container.close()

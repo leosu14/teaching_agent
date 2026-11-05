@@ -136,7 +136,8 @@ fencing and checkpoints above still apply unchanged.
   per `(task_id, name, version)`, so even two workers on one task produce each artifact once.
 - **Recovery.** A worker that dies leaves its job RUNNING; once the job lease runs out, the next claim takes it as a
   new attempt and continues the task from its checkpoint (a RUN or RESUME runs the task again, which skips completed
-  nodes). A SUBMIT_INPUT job carries the task version its answers were validated against: they are applied only while
+  nodes). A job whose worker dies on its last allowed attempt (`TA_JOB_MAX_ATTEMPTS`) is not claimed
+  again: the next claim marks it FAILED (`worker_error`), so a job that kills its worker every time cannot loop. A SUBMIT_INPUT job carries the task version its answers were validated against: they are applied only while
   the task is still at that version and waiting at that node; if an earlier attempt already stored them, the job just
   continues the task, so answers are never applied twice or to a later diagnostic round.
 - **Failure handling.** `TaskBusy` (another worker's live task lease, e.g. the dead worker's, still running out)
