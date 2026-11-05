@@ -182,3 +182,59 @@ async def test_retries_are_separate_attempts_of_one_operation() -> None:
     assert [e.attempt for e in es] == [1, 2, 3] and len({e.operation_id for e in es}) == 1
     assert len({e.entry_id for e in es}) == 3
     assert [e.state for e in es] == [SpendState.UNKNOWN, SpendState.UNKNOWN, SpendState.SETTLED]
+
+
+class UsagePayloadChanged(Exception):
+    pass
+
+
+def unreadable_usage(_result, _request_id: str) -> ProviderUsage:
+    raise UsagePayloadChanged("usage.prompt_tokens missing")
+
+
+async def test_a_successful_call_whose_usage_cannot_be_read_is_settled_unknown_at_once() -> None:
+    """F5 (#32): the vendor did the work, but the usage mapping raises. The attempt is settled as unknown with its
+    estimate charged (not left reserved for the sweep), recorded, not retried, and the original error escapes."""
+    inv, scope, ledger, seen = setup(attempts=3)
+    sent = []
+
+    async def counted():
+        sent.append(1)
+        return "answer"
+
+    with pytest.raises(UsagePayloadChanged):
+        await call(inv, scope, counted, usage=unreadable_usage)
+    assert len(sent) == 1  # a retry would pay again
+    [e] = entries(ledger)
+    assert (e.state, e.usage_source, e.charged["llm_tokens"], e.error_type) == (
+        SpendState.UNKNOWN, "estimate", 500, "UsagePayloadChanged")
+    assert counters(ledger) == (0, 500)  # nothing is left reserved
+    unknown = [ev for ev in seen if ev.type == EventType.SPEND_UNKNOWN]
+    assert unknown and unknown[0].data["reason"] == "usage_unreadable"
+    failed = [ev for ev in seen if ev.type == EventType.PROVIDER_REQUEST_FAILED]
+    assert failed and failed[0].data["will_retry"] is False and failed[0].data["error_type"] == "UsagePayloadChanged"
+    assert not [ev for ev in seen if ev.type == EventType.PROVIDER_REQUEST_COMPLETED]
+    [req] = ledger.summary.provider_requests
+    assert (req.status, req.error_type) == ("failed", "UsagePayloadChanged")
+    assert not inv.usage_log
+
+
+async def test_an_unreadable_usage_does_not_turn_into_a_budget_error() -> None:
+    """The estimate was admitted at reservation; settling it as unknown runs no post-settlement cap check, so the
+    caller sees the mapping error, not a BudgetExceededError, even when the budget is now full."""
+    inv, scope, ledger, _ = setup(TaskBudget(max_llm_tokens=500))
+    with pytest.raises(UsagePayloadChanged):
+        await call(inv, scope, ok, usage=unreadable_usage)
+    assert counters(ledger) == (0, 500)
+
+
+async def test_an_unreadable_usage_without_a_ledger_still_raises_and_is_reported() -> None:
+    bus = EventBus()
+    seen: list[Event] = []
+    bus.subscribe(seen.append)
+    inv = ProviderInvoker(policies={c: ProviderPolicy(max_attempts=3, backoff_seconds=0) for c in Capability},
+                          events=bus, sleep=no_sleep)
+    with pytest.raises(UsagePayloadChanged):
+        await inv.call(Vendor(), Capability.LLM, "generate", ok, usage=unreadable_usage, model="m")
+    failed = [ev for ev in seen if ev.type == EventType.PROVIDER_REQUEST_FAILED]
+    assert len(failed) == 1 and failed[0].data["reason"] == "usage_unreadable"
