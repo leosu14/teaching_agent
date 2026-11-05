@@ -7,7 +7,7 @@ from app.schemas.task import Task, TaskStatus
 
 S = TaskStatus
 ALLOWED: dict[TaskStatus, frozenset[TaskStatus]] = {
-    S.CREATED: frozenset({S.PLANNING, S.CANCELLED, S.FAILED}),
+    S.CREATED: frozenset({S.PLANNING, S.CANCELLED, S.FAILED, S.PAUSED}),  # paused before a worker started it
     S.PLANNING: frozenset({S.RUNNING, S.FAILED, S.CANCELLED, S.PAUSED}),
     S.RUNNING: frozenset({S.WAITING, S.REVIEWING, S.COMPLETED, S.FAILED, S.CANCELLED, S.PAUSED}),
     S.REVIEWING: frozenset({S.RUNNING, S.COMPLETED, S.FAILED, S.CANCELLED, S.PAUSED}),

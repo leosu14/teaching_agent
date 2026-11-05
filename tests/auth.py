@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import threading
+
+import httpx
 
 from fastapi.testclient import TestClient
 
@@ -40,4 +44,33 @@ def client_for(container: Container, *learner_ids: str, user_id: str | None = No
     client = TestClient(create_app(container, authenticator=auth.authenticator),
                         headers=auth.headers(*learner_ids, user_id=user_id, roles=roles))
     client.test_auth = auth
+    client.container = container
     return client
+
+
+def drain(container: Container) -> list:
+    """Run every queued task job now, as the worker process would (from a sync test, even inside a running loop)."""
+    out: dict = {}
+
+    def target() -> None:
+        try:
+            out["jobs"] = asyncio.run(container.task_worker.drain())
+        except BaseException as exc:  # re-raised in the test's thread
+            out["error"] = exc
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join()
+    if "error" in out:
+        raise out["error"]
+    return out["jobs"]
+
+
+def settle(client: TestClient, response: httpx.Response) -> dict:
+    """For a 202 from a task-executing route: let the worker run the queued job, then read the task back."""
+    assert response.status_code == 202, response.text
+    task_id = response.json()["task_id"]
+    drain(client.container)
+    fetched = client.get(f"/tasks/{task_id}")
+    assert fetched.status_code == 200, fetched.text
+    return fetched.json()

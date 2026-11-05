@@ -13,6 +13,12 @@ They are validated when the container is built; errors say what to fix.
 | `TA_AUTH_GATEWAY_SECRET` | unset | `gateway` mode: the secret shared with the gateway (32+ characters). Unset: the API refuses to start |
 | `TA_AUTH_GATEWAY_MAX_SKEW_SECONDS` | `300` | `gateway` mode: how old a signed identity may be |
 | `TA_AUTH_STATIC_TOKENS_FILE` | unset | `static` mode: JSON `{token: {user_id, learner_ids, roles}}`, kept outside the repository |
+| `TA_WORKER_EMBEDDED` | `false` | Run the task worker inside the API process (development). Otherwise run `python -m app.services.worker` next to the API |
+| `TA_WORKER_POLL_SECONDS` | `1.0` | How often an idle worker looks for queued jobs |
+| `TA_JOB_MAX_ATTEMPTS` | `3` | Attempts of a task job whose worker errors or dies before the job is FAILED |
+| `TA_JOB_RETRY_BACKOFF_SECONDS` | `5` | Delay before a failed job's next attempt, doubled per attempt |
+| `TA_JOB_RETRY_MAX_BACKOFF_SECONDS` | `300` | Longest delay between attempts |
+| `TA_JOB_BUSY_RETRY_SECONDS` | `10` | Delay before retrying a job whose task was being executed by someone else (no attempt used) |
 | `TA_RETRIEVAL_PROVIDER` | `local` | Knowledge-base retrieval |
 | `TA_VIDEO_COMPOSER` | `ffmpeg` | `ffmpeg` composes a real MP4 (needs `ffmpeg` and `ffprobe`); `mock` writes a manifest-only file for tests |
 | `TA_CORPUS_DIR` | `fixtures/demo` | Corpus for the mock search, mock image search (`image_catalog.json`) and local knowledge base |

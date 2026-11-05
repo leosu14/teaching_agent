@@ -164,6 +164,16 @@ class Settings(BaseSettings):
     # is then recorded as `unknown` and its estimate charged.
     spend_reservation_grace_seconds: float = Field(default=60.0, ge=0, le=3600)
 
+    # The task worker (app/services/worker.py; docs/architecture.md, background worker). The API only queues task
+    # work; a worker process (`python -m app.services.worker`) runs it. `worker_embedded` runs one inside the API
+    # process instead, for local development with a single process.
+    worker_embedded: bool = False
+    worker_poll_seconds: float = Field(default=1.0, gt=0, le=60)
+    job_max_attempts: int = Field(default=3, ge=1, le=20)  # attempts of a job whose worker errors or dies
+    job_retry_backoff_seconds: float = Field(default=5.0, ge=0, le=3600)  # doubled per failed attempt
+    job_retry_max_backoff_seconds: float = Field(default=300.0, ge=0, le=86400)
+    job_busy_retry_seconds: float = Field(default=10.0, ge=0, le=3600)  # the task's lease was held by another worker
+
     log_level: str = "INFO"
     log_json: bool = True
 

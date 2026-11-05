@@ -104,6 +104,7 @@ from app.services.artifact_content import ArtifactContentService
 from app.services.ownership import OwnershipService
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
+from app.services.worker import TaskWorker
 from app.services.assessment import AssessmentService
 from app.services.learning_cycles import LearningCycleService
 from app.services.teaching import TeachingSessionService
@@ -118,6 +119,7 @@ from app.storage.repositories import (
     SqlLearnerRepository,
     SqlLearningEventRepository,
     SqlSpendRepository,
+    SqlTaskJobRepository,
     SqlTaskRepository,
     SqlAssessmentRepository,
     SqlLearningCycleRepository,
@@ -384,6 +386,7 @@ class Container:
     artifacts: ArtifactService
     orchestrator: Orchestrator
     task_service: TaskService
+    task_worker: TaskWorker
     learner_service: LearnerService
     curriculum_service: CurriculumService
     teaching_service: TeachingSessionService
@@ -558,7 +561,13 @@ def build_container(
     orchestrator = Orchestrator(tasks=task_repo, engine=WorkflowEngine(agents, tools, router), planner=planner,
                                 agents=agents, tools=tools, router=router, events=events, observers=observers,
                                 spend=spend, budgets=budgets, clock=clock)
-    task_service = TaskService(orchestrator, task_repo, event_repo, artifacts)
+    jobs = SqlTaskJobRepository(sessions, clock)
+    task_service = TaskService(orchestrator, task_repo, event_repo, artifacts, jobs=jobs,
+                               job_max_attempts=settings.job_max_attempts)
+    task_worker = TaskWorker(jobs, task_service, poll_seconds=settings.worker_poll_seconds,
+                             retry_backoff_seconds=settings.job_retry_backoff_seconds,
+                             retry_max_backoff_seconds=settings.job_retry_max_backoff_seconds,
+                             busy_retry_seconds=settings.job_busy_retry_seconds, clock=clock)
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
     curriculum_service = CurriculumService(memory, RetrieverKnowledgeBase(retriever), curriculum, task_service, events)
     assessment_service = AssessmentService(
@@ -579,7 +588,7 @@ def build_container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
         frameworks=frameworks, memory=memory, artifacts=artifacts, orchestrator=orchestrator,
-        task_service=task_service, learner_service=learner_service, curriculum_service=curriculum_service,
+        task_service=task_service, task_worker=task_worker, learner_service=learner_service, curriculum_service=curriculum_service,
         teaching_service=teaching_service,
         learning_cycle_service=learning_cycle_service,
         assessment_service=assessment_service,

@@ -11,6 +11,7 @@ from app.schemas.artifact import ArtifactType
 from app.schemas.common import CostSummary, Schema, utcnow
 from app.schemas.curriculum import CurriculumPlan, NextLearningAction
 from app.schemas.evaluation import LearningRecommendation
+from app.schemas.job import TaskJob, TaskJobView
 from app.schemas.learner import MasteryChange
 from app.schemas.lesson import LessonRequest
 from app.schemas.pedagogy import EvaluationFeedback, NextLearningRecommendation
@@ -226,10 +227,13 @@ class TaskView(Schema):
     result: TaskResultView | None
     created_at: datetime
     updated_at: datetime
+    # The task's latest background job (app/schemas/job.py), when it was queued through the API: poll the task until
+    # the job is no longer QUEUED or RUNNING, then read the task's status.
+    job: TaskJobView | None = None
 
     @classmethod
-    def of(cls, task: Task) -> TaskView:
-        return cls(
+    def of(cls, task: Task, job: TaskJob | None = None) -> TaskView:
+        return cls(job=TaskJobView.of(job) if job is not None else None,
             task_id=task.task_id, learner_id=task.learner_id, request=task.request, status=task.status,
             current_step=task.current_step,
             waiting=WaitingView(kind=task.waiting.kind, prompt=task.waiting.prompt) if task.waiting else None,

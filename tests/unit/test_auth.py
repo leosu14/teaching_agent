@@ -229,7 +229,8 @@ def test_task_view_drops_internal_state() -> None:
                     uri="file:///srv/data/objects/x", parent_ids=[])]))
     view = TaskView.of(task).model_dump(mode="json")
     assert set(view) == {"task_id", "learner_id", "request", "status", "current_step", "waiting", "errors",
-                         "artifact_ids", "cost", "result", "created_at", "updated_at"}
+                         "artifact_ids", "cost", "result", "created_at", "updated_at", "job"}
+    assert view["job"] is None  # a task never queued through the API has no job
     assert view["waiting"] == {"kind": "diagnostic_answers", "prompt": {"questions": []}}
     assert "uri" not in json.dumps(view) and "secret" not in json.dumps(view)
     assert set(view["cost"]) == {"estimated_cost_usd", "actual_cost_usd"}
