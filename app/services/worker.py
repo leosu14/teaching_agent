@@ -2,6 +2,7 @@
 
     python -m app.services.worker            # run until interrupted (SIGINT / SIGTERM)
     python -m app.services.worker --drain    # run every job that is available now, then exit
+    python -m app.services.worker --sweep    # queue the continuation of work killed workers left mid-run, then exit
 
 Guarantees, layered on the orchestrator's (see docs/architecture.md, background worker):
 - One worker per job: a claim is a conditional UPDATE of the job row under a job lease, renewed by a heartbeat while
@@ -10,7 +11,9 @@ Guarantees, layered on the orchestrator's (see docs/architecture.md, background 
 - Recovery: a job whose worker died is claimed again once its lease runs out and continues the task from its last
   checkpoint (completed nodes and stored artifacts are not produced again). A job whose worker died on its last allowed
   attempt is FAILED instead of claimed again. Answers whose submission already reached
-  the task are never applied twice: the job carries the task version it was validated against.
+  the task are never applied twice: the job carries the task version it was validated against. A task left mid-run
+  with no job at all (run in-process by a killed process) is found by the sweeper (app/services/sweeper.py), which
+  this worker runs between jobs, and continued through a RECOVER job.
 - Failure handling: an unexpected error is retried with exponential backoff up to the job's `max_attempts`, then the
   job is FAILED (the task stays at its checkpoint and can be resumed). A busy task (another worker's live lease) is
   retried later without using an attempt. Work that no longer applies (the task moved on) fails at once.
@@ -31,6 +34,7 @@ from app.runtime.tasks.state_machine import InvalidTransition
 from app.schemas.common import new_id, utcnow
 from app.schemas.job import JobErrorCategory, JobKind, JobStatus, TaskJob
 from app.schemas.task import Task, TaskStatus
+from app.services.sweeper import STRANDED, TaskSweeper
 from app.services.tasks import TaskService
 from app.storage.repositories import NotFound, SqlTaskJobRepository
 
@@ -56,7 +60,8 @@ class TaskWorker:
                  heartbeat_seconds: float | None = None, poll_seconds: float = 1.0,
                  retry_backoff_seconds: float = 5.0, retry_max_backoff_seconds: float = 300.0,
                  busy_retry_seconds: float = 10.0, clock: Callable[[], datetime] = utcnow,
-                 worker_id: str | None = None) -> None:
+                 worker_id: str | None = None, sweeper: TaskSweeper | None = None,
+                 sweep_seconds: float = 60.0) -> None:
         self._jobs = jobs
         self._tasks = tasks
         self._ttl = lease_ttl
@@ -67,6 +72,8 @@ class TaskWorker:
         self._busy = busy_retry_seconds
         self._clock = clock
         self.worker_id = worker_id or new_id("worker")
+        self._sweeper = sweeper
+        self._sweep_seconds = sweep_seconds
 
     # --- loops ------------------------------------------------------------------------------------------------------
 
@@ -88,10 +95,23 @@ class TaskWorker:
             done.append(job)
         return done
 
+    def sweep(self):
+        """One sweeper pass (app/services/sweeper.py), or None without a sweeper."""
+        return self._sweeper.sweep() if self._sweeper is not None else None
+
     async def run_forever(self, stop: asyncio.Event) -> None:
-        """Poll for jobs until `stop` is set. A job that is running when `stop` is set finishes first."""
+        """Poll for jobs until `stop` is set. A job that is running when `stop` is set finishes first. With a sweeper,
+        a sweep pass runs at start and then every `sweep_seconds`, between jobs."""
         logger.info("task worker %s started", self.worker_id)
+        next_sweep = 0.0
+        loop = asyncio.get_running_loop()
         while not stop.is_set():
+            if self._sweeper is not None and self._sweep_seconds > 0 and loop.time() >= next_sweep:
+                next_sweep = loop.time() + self._sweep_seconds
+                try:
+                    self._sweeper.sweep()
+                except Exception:  # e.g. the database is down: the next pass tries again
+                    logger.exception("task worker %s: sweeping stranded work failed", self.worker_id)
             try:
                 job = await self.run_once()
             except Exception:  # the queue itself failed (e.g. the database is down): wait and try again
@@ -148,6 +168,10 @@ class TaskWorker:
                 return task
             return await self._tasks.run(task.task_id)
         if job.kind == JobKind.RESUME:
+            return await self._tasks.resume(task.task_id)
+        if job.kind == JobKind.RECOVER:  # queued by the sweeper: continue only if the task is still mid-run
+            if task.status not in STRANDED:
+                return task
             return await self._tasks.resume(task.task_id)
         if job.kind == JobKind.SUBMIT_INPUT:
             return await self._submit(job, task)
@@ -212,11 +236,18 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process en
 
     parser = argparse.ArgumentParser(description="Run the task worker: execute queued lesson and evaluation tasks.")
     parser.add_argument("--drain", action="store_true", help="run every available job, then exit")
+    parser.add_argument("--sweep", action="store_true",
+                        help="queue the continuation of work killed workers left mid-run (one pass), then exit")
     args = parser.parse_args(argv)
     settings = Settings()
     configure_logging(settings.log_level, settings.log_json)
     container = build_container(settings)
     try:
+        if args.sweep:
+            report = container.task_worker.sweep()
+            print(f"failed jobs: {report.failed_jobs}; recovered tasks: {len(report.recovered)}; "
+                  f"left failed: {len(report.left_failed)}")
+            return 0
         if args.drain:
             asyncio.run(container.task_worker.drain())
             return 0

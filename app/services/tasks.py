@@ -92,6 +92,14 @@ class TaskService:
             raise InvalidTransition(f"task {task_id} in status {task.status.value} cannot be resumed")
         return task, self._enqueue(task_id, JobKind.RESUME, {})
 
+    def enqueue_recovery(self, task_id: str) -> tuple[TaskJob, bool]:
+        """Queue the continuation of a task left mid-run by a worker that died with no job left to reclaim (the
+        sweeper). Returns (the task's active job, whether this call queued it): when the task already has an active
+        job, that job will continue it and nothing is added."""
+        job = TaskJob(job_id=new_id("job"), task_id=task_id, kind=JobKind.RECOVER, dedupe_key="RECOVER",
+                      max_attempts=self._job_max_attempts)
+        return self._job_store().enqueue(job)
+
     def job(self, task_id: str) -> TaskJob | None:
         """The task's latest job (None for a task that was only ever run in-process)."""
         return self._jobs.latest_for_task(task_id) if self._jobs is not None else None

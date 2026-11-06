@@ -57,10 +57,14 @@ class ArtifactRow(Base):
 
 
 class LearnerRow(Base):
+    """A learner's profile. `version` is its optimistic lock: every save raises it and applies only at the version
+    the profile was read at."""
+
     __tablename__ = "learners"
     learner_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     body: Mapped[str] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class LearningEvidenceRow(Base):
@@ -96,13 +100,14 @@ class LearningGoalRow(Base):
 
 
 class CurriculumRow(Base):
-    """The current-version pointer of a goal's curriculum."""
+    """The current-version pointer of a goal's curriculum; `version` is its optimistic lock (as for learners)."""
 
     __tablename__ = "curricula"
     curriculum_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     learner_id: Mapped[str] = mapped_column(String(128), index=True)
     goal_id: Mapped[str] = mapped_column(String(64), index=True)
     body: Mapped[str] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class CurriculumVersionRow(Base):

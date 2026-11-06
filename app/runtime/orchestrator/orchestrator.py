@@ -27,7 +27,7 @@ from app.runtime.workflow.engine import EngineOutcome, WorkflowDefinition, Workf
 from app.runtime.workflow.nodes import HumanApprovalNode, Node, ReviewNode, StateView
 from app.schemas.common import new_id, utcnow
 from app.schemas.events import EventType
-from app.schemas.lease import Lease, LeaseLost
+from app.schemas.lease import Lease, LeaseLost, fenced_writes
 from app.schemas.lesson import InterpretRequest, LessonRequest
 from app.schemas.task import Task, TaskControl, TaskError, TaskPlan, TaskStatus
 from app.schemas.usage import BudgetDefaults
@@ -285,13 +285,14 @@ class Orchestrator:
     @asynccontextmanager
     async def _held(self, task_id: str) -> AsyncIterator[Lease]:
         """Claim the task's lease for this request (TaskBusy while another worker's is live), renew it while the
-        work runs, and give it back however the work ends. The task record, events, artifact rows and assessment
-        grades written under it are fenced by the storage layer; learner-memory and curriculum writes are only
-        pre-checked by the tool manager (see docs/architecture.md, execution leases)."""
+        work runs, and give it back however the work ends. Everything written under it is fenced at commit by the
+        storage layer: the task record, events, artifact rows and assessment grades by the lease they are given, and
+        learner-memory and curriculum writes by `fenced_writes` (see docs/architecture.md, execution leases)."""
         lease = self._claim(task_id)
         beat = asyncio.create_task(self._renew_until_lost(lease)) if self._heartbeat > 0 else None
         try:
-            yield lease
+            with fenced_writes(lease):
+                yield lease
         except LeaseLost:
             self._lease_lost(lease)
             raise
@@ -305,7 +306,8 @@ class Orchestrator:
         """`_held` for a short synchronous change (no heartbeat)."""
         lease = self._claim(task_id)
         try:
-            yield lease
+            with fenced_writes(lease):
+                yield lease
         except LeaseLost:
             self._lease_lost(lease)
             raise

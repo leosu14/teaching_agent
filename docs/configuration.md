@@ -19,6 +19,7 @@ They are validated when the container is built; errors say what to fix.
 | `TA_JOB_RETRY_BACKOFF_SECONDS` | `5` | Delay before a failed job's next attempt, doubled per attempt |
 | `TA_JOB_RETRY_MAX_BACKOFF_SECONDS` | `300` | Longest delay between attempts |
 | `TA_JOB_BUSY_RETRY_SECONDS` | `10` | Delay before retrying a job whose task was being executed by someone else (no attempt used) |
+| `TA_WORKER_SWEEP_SECONDS` | `60` | How often a serving worker queues the continuation of tasks a killed worker left mid-run (`0`: off; run `python -m app.services.worker --sweep` from cron instead) |
 | `TA_RETRIEVAL_PROVIDER` | `local` | Knowledge-base retrieval |
 | `TA_VIDEO_COMPOSER` | `ffmpeg` | `ffmpeg` composes a real MP4 (needs `ffmpeg` and `ffprobe`); `mock` writes a manifest-only file for tests |
 | `TA_CORPUS_DIR` | `fixtures/demo` | Corpus for the mock search, mock image search (`image_catalog.json`) and local knowledge base |

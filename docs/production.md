@@ -332,6 +332,17 @@ Without `RUN_LIVE_E2E=true`, or in offline mode, it is skipped.
 - Provider error messages are sanitized before they reach task errors, events and reports.
 - Network access exists only in the provider layer (enforced by the architecture tests); scripts go through services.
 
+## Upgrading an existing database
+
+Tables and indexes are created on startup. Columns added to an existing table are added automatically on SQLite only
+(`app/storage/db.py`, `ADDED_COLUMNS`); on PostgreSQL apply them before starting the new version, for example (MVP
+item 2, the versioned learner profile and curriculum pointer):
+
+```sql
+ALTER TABLE learners ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE curricula ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+```
+
 ## Known limitations
 
 - Image search has no real adapter yet: searched images come from the local catalog, so production plans use

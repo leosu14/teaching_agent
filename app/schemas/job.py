@@ -24,6 +24,7 @@ class JobKind(str, Enum):
     RUN = "RUN"  # plan (if needed) and execute a created task
     SUBMIT_INPUT = "SUBMIT_INPUT"  # attach a waiting task's answers and continue it
     RESUME = "RESUME"  # continue a paused, failed or abandoned task from its last checkpoint
+    RECOVER = "RECOVER"  # queued by the sweeper: continue a task whose worker died mid-run, if it is still stranded
 
 
 class JobStatus(str, Enum):
