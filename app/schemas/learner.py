@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import AliasChoices, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from app.schemas.common import Schema, utcnow
 
@@ -128,6 +128,9 @@ class LearnerProfile(Schema):
     preferences: LearnerPreferences = Field(default_factory=LearnerPreferences)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    # The stored row's version this profile was read at (None: never stored). Kept out of the body and the API: the
+    # repository sets it on read and checks it on save, so a write made from a stale read is refused, not lost.
+    _row_version: int | None = PrivateAttr(default=None)
 
 
 class AnswerOutcomeView(Schema):
@@ -281,6 +284,11 @@ def stable_id(prefix: str, *parts: str) -> str:
 
 class EvidenceConflict(ValueError):
     """Evidence is immutable: the same id was recorded before with different content."""
+
+
+class ProfileConflict(RuntimeError):
+    """A learner profile was saved from a stale read: another writer stored a newer version since (or created the
+    profile first). Nothing was written; read the profile again and redo the change."""
 
 
 class LearningEvidence(Schema):

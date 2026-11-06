@@ -166,7 +166,8 @@ Task work runs in the background: the routes that would run a lesson or an evalu
 job and answer `202 Accepted` at once (`Location: /tasks/{id}`), and the client polls `GET /tasks/{id}` until
 `job.status` is DONE (then the task's `status` says whether it is WAITING for answers, COMPLETED or FAILED). Run a
 worker next to the API (`python -m app.services.worker`), or set `TA_WORKER_EMBEDDED=true` to run one inside the API
-process for development. See [architecture](docs/architecture.md#background-worker).
+process for development. The worker also sweeps for tasks a killed process left mid-run and queues their continuation
+(`--sweep` runs one pass, for cron). See [architecture](docs/architecture.md#background-worker).
 
 Every route except `/health` requires authentication, and every learner-owned resource is checked against the
 caller's learner scope (another learner's resource is a 404, exactly like a missing one). Learner-facing responses

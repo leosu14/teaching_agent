@@ -21,6 +21,8 @@ ADDED_COLUMNS = {
               "lease_fence": "INTEGER NOT NULL DEFAULT 0", "lease_expires_ms": "BIGINT",
               "pause_requested": "BOOLEAN NOT NULL DEFAULT 0", "cancel_requested": "BOOLEAN NOT NULL DEFAULT 0"},
     "learning_cycles": {"lease_token": "VARCHAR(64)", "lease_expires_ms": "BIGINT"},
+    "learners": {"version": "INTEGER NOT NULL DEFAULT 1"},
+    "curricula": {"version": "INTEGER NOT NULL DEFAULT 1"},
 }
 
 
