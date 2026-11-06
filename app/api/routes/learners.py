@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 
 from app.api.auth import Principal
 from app.api.authorization import authorize, principal, require_learner
@@ -35,9 +35,13 @@ def learner_progress(learner_id: str, c: Container = Depends(container)) -> Lear
     return c.learner_service.progress(learner_id)
 
 
-@router.post("/{learner_id}/assessment", response_model=TaskView, dependencies=[Depends(require_learner)])
-async def submit_assessment(learner_id: str, body: AssessmentSubmission,
-                            p: Principal = Depends(principal), c: Container = Depends(container)) -> TaskView:
+@router.post("/{learner_id}/assessment", response_model=TaskView, status_code=202,
+             dependencies=[Depends(require_learner)])
+def submit_assessment(learner_id: str, body: AssessmentSubmission, response: Response,
+                      p: Principal = Depends(principal), c: Container = Depends(container)) -> TaskView:
+    """The diagnostic answers of a WAITING lesson task: validated, then queued like POST /tasks/{id}/answers."""
     authorize(p, c.ownership.task(body.task_id))
-    return TaskView.of(await c.task_service.submit_assessment_for(learner_id, body.task_id,
-                                                                  DiagnosticAnswers(answers=body.answers)))
+    task, job = c.task_service.enqueue_assessment_for(learner_id, body.task_id,
+                                                      DiagnosticAnswers(answers=body.answers))
+    response.headers["Location"] = f"/tasks/{task.task_id}"
+    return TaskView.of(task, job)

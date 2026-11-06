@@ -15,7 +15,7 @@ from app.api.app import create_app
 from app.api.auth import AUTHOR
 from app.schemas.learner import LearnerProfileInput
 from app.schemas.learning_cycle import LearnerPrompt
-from tests.auth import TestAuth, client_for
+from tests.auth import TestAuth, client_for, settle
 from tests.learning_cycle_fixtures import CONCEPT, LEARNER, ScriptedLearner
 
 INTRUDER = "intruder-learner"
@@ -54,7 +54,7 @@ def world(cycle_env_at):
     lesson_task, session = children["LESSON"], children["TEACHING_SESSION"]
     auth = TestAuth()
     with client_for(c, LEARNER, roles=(AUTHOR,), auth=auth) as a:
-        evaluation = a.post(f"/tasks/{lesson_task}/evaluation").json()["task_id"]
+        evaluation = settle(a, a.post(f"/tasks/{lesson_task}/evaluation"))["task_id"]
         item = {"item": {"assessment_item_id": "sec-item", "lesson_id": lesson_task, "concept_id": CONCEPT,
                          "prompt": "Ayer yo ___ (hablar) con María.", "expected_answer": SENTINEL,
                          "response_type": "SHORT_TEXT", "language": "es"}}
@@ -250,7 +250,7 @@ def test_get_task_never_exposes_the_answer_key(container) -> None:
     lid = DEMO["learner_id"]
     with client_for(container, lid) as a:
         a.put(f"/learners/{lid}", json=DEMO["profile"])
-        task = a.post("/tasks", json={"request": DEMO["request"], "learner_id": lid}).json()
+        task = settle(a, a.post("/tasks", json={"request": DEMO["request"], "learner_id": lid}))
         assert task["status"] == "WAITING"
         while task["status"] == "WAITING":
             fetched = a.get(f"/tasks/{task['task_id']}")
@@ -259,7 +259,7 @@ def test_get_task_never_exposes_the_answer_key(container) -> None:
             sheet = fetched.json()["waiting"]["prompt"]
             key = ANSWERS["rounds"][sheet["round_number"] - 1]
             answers = [{"question_id": q["question_id"], "answer": key[q["concept_id"]]} for q in sheet["questions"]]
-            task = a.post(f"/tasks/{task['task_id']}/answers", json={"answers": answers}).json()
+            task = settle(a, a.post(f"/tasks/{task['task_id']}/answers", json={"answers": answers}))
         done = a.get(f"/tasks/{task['task_id']}")
         assert done.json()["status"] == "COMPLETED"
         assert_no_internals(done)
@@ -293,7 +293,7 @@ def test_cross_learner_attack_end_to_end(cycle_env_at) -> None:
         cycle = view["cycle_id"]
         steps = {s["kind"]: s["child_id"] for s in view["steps"]}
         lesson, session = steps["LESSON"], steps["TEACHING_SESSION"]
-        evaluation = a.post(f"/tasks/{lesson}/evaluation").json()
+        evaluation = settle(a, a.post(f"/tasks/{lesson}/evaluation"))
         assert evaluation["status"] == "WAITING" and "expected_answer" not in json.dumps(evaluation)
         item = {"item": {"assessment_item_id": "a-item", "lesson_id": lesson, "concept_id": CONCEPT,
                          "prompt": "Ayer yo ___ (hablar).", "expected_answer": SENTINEL, "response_type": "SHORT_TEXT",

@@ -5,6 +5,7 @@ protected by default; routes that touch learner data also check ownership (app/a
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -31,6 +32,7 @@ from app.services.assessment import (
 from app.services.budgets import BudgetExhausted
 from app.services.container import Container, build_container
 from app.services.curriculum import InvalidGoal
+from app.services.tasks import JobConflict
 from app.services.learning_cycles import CycleConflict, CycleNotFound, InvalidCycleRequest, InvalidCycleTransition
 from app.services.teaching import (
     InvalidSessionTransition,
@@ -52,7 +54,14 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
     async def lifespan(app: FastAPI):
         owned = container is None
         app.state.container = container or build_container()
+        worker = None
+        if app.state.container.settings.worker_embedded:  # development: run the task worker in this process
+            stop = asyncio.Event()
+            worker = asyncio.create_task(app.state.container.task_worker.run_forever(stop))
         yield
+        if worker is not None:
+            stop.set()
+            await worker
         if owned:
             app.state.container.close()
 
@@ -68,7 +77,7 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
                              (AssessmentItemNotFound, 404), (AttemptNotFound, 404), (AttemptConflict, 409),
                              (ItemConflict, 409), (InvalidAssessmentRequest, 422),
                              (CycleNotFound, 404), (CycleConflict, 409), (InvalidCycleTransition, 409),
-                             (InvalidCycleRequest, 422), (LeaseLost, 409), (WriteConflict, 409)):
+                             (InvalidCycleRequest, 422), (LeaseLost, 409), (WriteConflict, 409), (JobConflict, 409)):
         app.add_exception_handler(exc_type, _handler(status))
     app.add_exception_handler(AuthenticationFailed, _unauthenticated)
     app.add_exception_handler(Forbidden, _handler(403))

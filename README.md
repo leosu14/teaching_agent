@@ -79,6 +79,7 @@ python scripts/run_provider_demo.py    # provider registry, selection, health, u
 python scripts/run_production_demo.py --dry-run  # a production lesson's plan: providers, budget, stages
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
 uvicorn app.api.main:app --reload   # the same services over HTTP (authenticated: see docs/security.md)
+python -m app.services.worker       # the task worker: runs the lessons and evaluations the API queues
 ```
 
 `run_demo.py` prints the task id, final status, every workflow step, the generated artifacts and their
@@ -161,6 +162,12 @@ graph, per-request traceability, usage and cost. `--mock` rehearses the same pat
 
 ## API
 
+Task work runs in the background: the routes that would run a lesson or an evaluation validate the request, queue a
+job and answer `202 Accepted` at once (`Location: /tasks/{id}`), and the client polls `GET /tasks/{id}` until
+`job.status` is DONE (then the task's `status` says whether it is WAITING for answers, COMPLETED or FAILED). Run a
+worker next to the API (`python -m app.services.worker`), or set `TA_WORKER_EMBEDDED=true` to run one inside the API
+process for development. See [architecture](docs/architecture.md#background-worker).
+
 Every route except `/health` requires authentication, and every learner-owned resource is checked against the
 caller's learner scope (another learner's resource is a 404, exactly like a missing one). Learner-facing responses
 never carry answer keys or internal workflow state. See [docs/security.md](docs/security.md) for the gateway contract,
@@ -168,15 +175,15 @@ development tokens and the test mechanism.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/tasks` | Create and run a task (`{"request", "learner_id"}`); returns WAITING if the diagnostic needs answers |
-| POST | `/tasks/{id}/answers` | Submit answers (`{"answers": [{"question_id", "answer"}]}`) for whatever a WAITING task is waiting on |
-| POST | `/tasks/{id}/evaluation` | Start the post-lesson evaluation of a COMPLETED lesson task; returns the new task, WAITING for answers |
-| GET | `/tasks/{id}` | Task state, what it is waiting for, cost totals, result (never the workflow state or answer keys) |
-| POST | `/tasks/{id}/pause` · `/resume` · `/cancel` | Task control; resume also recovers crashed or failed tasks |
+| POST | `/tasks` | Create a task (`{"request", "learner_id"}`) and queue it: **202** with the task and its `job`; optional `Idempotency-Key` header |
+| POST | `/tasks/{id}/answers` | Validate answers (`{"answers": [{"question_id", "answer"}]}`) for whatever a WAITING task is waiting on (422 if they do not fit) and queue its continuation: 202 |
+| POST | `/tasks/{id}/evaluation` | Create the post-lesson evaluation of a COMPLETED lesson task and queue it: 202 with the new task |
+| GET | `/tasks/{id}` | Poll here: task state, its latest `job` (QUEUED, RUNNING, DONE, FAILED, CANCELLED), what it is waiting for, cost totals, result (never the workflow state or answer keys) |
+| POST | `/tasks/{id}/pause` · `/resume` · `/cancel` | Task control; resume (202, queued) also recovers crashed or failed tasks; cancel also cancels queued work |
 | GET | `/tasks/{id}/artifacts` · `/events` | Artifacts with parent links; the event log as learner events (type, status, fixed message) |
 | PUT/GET | `/learners/{id}` | Learner profile (subjects with a level framework, preferences) |
 | GET | `/learners/{id}/progress` | Mastery, weak concepts, due reviews |
-| POST | `/learners/{id}/assessment` | Submit diagnostic answers for a WAITING task |
+| POST | `/learners/{id}/assessment` | Submit diagnostic answers for a WAITING task (queued like `/tasks/{id}/answers`: 202) |
 | POST/GET | `/learners/{id}/goals` | Create a learning goal (idempotent per `idempotency_key`) / list the learner's goals |
 | GET/PATCH | `/goals/{id}` | A goal / change it (a changed definition or target date replans its curriculum) |
 | POST/GET | `/goals/{id}/curriculum` | Build (or rebuild) the goal's curriculum / the current version with its progress |

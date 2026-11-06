@@ -46,7 +46,8 @@ from app.schemas.spend import (
     SpendSettlement,
     SpendState,
 )
-from app.schemas.task import Task, TaskControl
+from app.schemas.job import ACTIVE_JOB_STATUSES, JobErrorCategory, JobKind, JobStatus, TaskJob
+from app.schemas.task import Task, TaskControl, TaskStatus
 from app.schemas.teaching import (
     InteractionEvidence,
     OutboxItem,
@@ -75,6 +76,7 @@ from app.storage.orm import (
     LearningGoalRow,
     SpendCounterRow,
     SpendEntryRow,
+    TaskJobRow,
     TaskRow,
     InteractionEvidenceRow,
     TeachingOutboxRow,
@@ -984,3 +986,198 @@ class SqlSpendRepository:
             error_type=row.error_type, latency_ms=row.latency_ms, created_at=row.created_at,
             settled_at=row.settled_at,
             reserved_until=datetime.fromtimestamp(row.reserved_until_ms / 1000, tz=timezone.utc))
+
+
+_ACTIVE = [s.value for s in ACTIVE_JOB_STATUSES]
+
+
+def _at(ms: int | None) -> datetime | None:
+    return None if ms is None else datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+
+
+class SqlTaskJobRepository:
+    """The task job queue. Persistence only: the worker (app/services/worker.py) decides what a job does.
+
+    Every write is one conditional statement in its own transaction: enqueue is an insert guarded by the partial
+    unique index on the task's active job; a claim is an UPDATE that matches only a QUEUED, available job or a RUNNING
+    one whose lease ran out; renew, finish and retry match only the claiming worker's own RUNNING job. Two workers can
+    therefore never both claim a job, and a worker whose job was reclaimed cannot overwrite the new claim's outcome.
+    """
+
+    CANDIDATES = 8
+
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+        self._sessions = sessions
+        self._clock = clock
+
+    def enqueue(self, job: TaskJob) -> tuple[TaskJob, bool]:
+        """Insert `job` unless its task already has an active job. Returns (the task's active job, inserted)."""
+        existing = self.active_for_task(job.task_id)
+        if existing is not None:
+            return existing, False
+        try:
+            with self._sessions.begin() as s:
+                s.add(self._row(job))
+        except IntegrityError:  # a concurrent enqueue for the same task won
+            existing = self.active_for_task(job.task_id)
+            if existing is None:  # it already finished: this one is not a duplicate any more
+                return self.enqueue(job)
+            return existing, False
+        return job, True
+
+    def get(self, job_id: str) -> TaskJob:
+        with self._sessions() as s:
+            row = s.get(TaskJobRow, job_id)
+            if row is None:
+                raise NotFound(job_id)
+            return self._job(row)
+
+    def active_for_task(self, task_id: str) -> TaskJob | None:
+        with self._sessions() as s:
+            row = s.scalars(select(TaskJobRow).where(TaskJobRow.task_id == task_id,
+                                                     TaskJobRow.status.in_(_ACTIVE))).first()
+            return self._job(row) if row is not None else None
+
+    def latest_for_task(self, task_id: str) -> TaskJob | None:
+        with self._sessions() as s:
+            row = s.scalars(select(TaskJobRow).where(TaskJobRow.task_id == task_id)
+                            .order_by(TaskJobRow.created_at.desc(), TaskJobRow.job_id.desc())).first()
+            return self._job(row) if row is not None else None
+
+    def for_task(self, task_id: str) -> list[TaskJob]:
+        with self._sessions() as s:
+            rows = s.scalars(select(TaskJobRow).where(TaskJobRow.task_id == task_id)
+                             .order_by(TaskJobRow.created_at, TaskJobRow.job_id))
+            return [self._job(r) for r in rows]
+
+    def list(self, status: JobStatus | None = None) -> list[TaskJob]:
+        with self._sessions() as s:
+            q = select(TaskJobRow).order_by(TaskJobRow.created_at, TaskJobRow.job_id)
+            if status is not None:
+                q = q.where(TaskJobRow.status == status.value)
+            return [self._job(r) for r in s.scalars(q)]
+
+    def _abandoned(self, now_ms: int):
+        return (TaskJobRow.status == JobStatus.RUNNING.value) & (TaskJobRow.lease_expires_ms <= now_ms)
+
+    def _claimable(self, now_ms: int):
+        return or_(
+            (TaskJobRow.status == JobStatus.QUEUED.value) & (TaskJobRow.available_at_ms <= now_ms),
+            self._abandoned(now_ms) & (TaskJobRow.attempts < TaskJobRow.max_attempts))
+
+    def fail_exhausted(self, now: datetime | None = None) -> int:
+        """FAIL every job whose worker died (its lease ran out) on its last allowed attempt: a job that kills its
+        worker each time is not claimed forever. One conditional UPDATE, so a racing claim cannot also take it.
+        Returns how many jobs it failed."""
+        now = now or self._clock()
+        with self._sessions.begin() as s:
+            done = s.execute(update(TaskJobRow).where(
+                self._abandoned(_ms(now)), TaskJobRow.attempts >= TaskJobRow.max_attempts).values(
+                status=JobStatus.FAILED.value, lease_owner=None, lease_expires_ms=None,
+                error="the worker stopped (died or hung) on the job's last attempt",
+                error_category=JobErrorCategory.WORKER_ERROR.value, updated_at=now, finished_at=now))
+        return done.rowcount
+
+    def claim(self, owner: str, ttl: timedelta) -> TaskJob | None:
+        """Claim the oldest available job: a QUEUED one whose backoff has passed, or a RUNNING one whose worker's
+        lease ran out (that worker died or hung; the claim counts as a new attempt). A RUNNING job whose worker died
+        on its last allowed attempt is FAILED instead (`fail_exhausted`). None when there is none."""
+        now = self._clock()
+        now_ms = _ms(now)
+        self.fail_exhausted(now)
+        with self._sessions() as s:
+            candidates = list(s.scalars(select(TaskJobRow.job_id).where(self._claimable(now_ms))
+                                        .order_by(TaskJobRow.available_at_ms, TaskJobRow.created_at)
+                                        .limit(self.CANDIDATES)))
+        for job_id in candidates:
+            with self._sessions.begin() as s:
+                done = s.execute(update(TaskJobRow).where(TaskJobRow.job_id == job_id, self._claimable(now_ms))
+                                 .values(status=JobStatus.RUNNING.value, lease_owner=owner,
+                                         lease_expires_ms=_ms(now + ttl), attempts=TaskJobRow.attempts + 1,
+                                         updated_at=now))
+            if done.rowcount == 1:
+                return self.get(job_id)
+        return None
+
+    def _owned(self, job_id: str, owner: str):
+        return ((TaskJobRow.job_id == job_id) & (TaskJobRow.status == JobStatus.RUNNING.value)
+                & (TaskJobRow.lease_owner == owner))
+
+    def renew(self, job_id: str, owner: str, ttl: timedelta) -> bool:
+        """Extend the worker's claim; False once the job was reclaimed by another worker (or finished)."""
+        now = self._clock()
+        with self._sessions.begin() as s:
+            done = s.execute(update(TaskJobRow).where(self._owned(job_id, owner), TaskJobRow.lease_expires_ms > _ms(now))
+                             .values(lease_expires_ms=_ms(now + ttl), updated_at=now))
+        return done.rowcount == 1
+
+    def finish(self, job_id: str, owner: str, status: JobStatus, *, task_status: TaskStatus | None = None,
+               error: str | None = None, error_category: JobErrorCategory | None = None) -> bool:
+        """Record the job's outcome (DONE, FAILED or CANCELLED); False when the job is no longer this worker's."""
+        now = self._clock()
+        with self._sessions.begin() as s:
+            done = s.execute(update(TaskJobRow).where(self._owned(job_id, owner)).values(
+                status=status.value, lease_owner=None, lease_expires_ms=None,
+                task_status=task_status.value if task_status is not None else None, error=error,
+                error_category=error_category.value if error_category is not None else None, updated_at=now,
+                finished_at=now))
+        return done.rowcount == 1
+
+    def retry(self, job_id: str, owner: str, *, delay: timedelta, error: str | None = None,
+              count_attempt: bool = True) -> bool:
+        """Put the job back in the queue, not claimable for `delay`. `count_attempt=False` gives the attempt back
+        (the task was busy: nothing ran). False when the job is no longer this worker's."""
+        now = self._clock()
+        values: dict = {"status": JobStatus.QUEUED.value, "lease_owner": None, "lease_expires_ms": None,
+                        "available_at_ms": _ms(now + delay), "updated_at": now}
+        if error is not None:
+            values["error"] = error
+        if not count_attempt:
+            values["attempts"] = TaskJobRow.attempts - 1
+        with self._sessions.begin() as s:
+            done = s.execute(update(TaskJobRow).where(self._owned(job_id, owner)).values(**values))
+        return done.rowcount == 1
+
+    def cancel_queued(self, task_id: str) -> list[str]:
+        """Cancel the task's QUEUED job (a cancelled task needs no more work). A RUNNING job is left to its worker,
+        which stops at the task's next node boundary."""
+        now = self._clock()
+        with self._sessions() as s:
+            ids = list(s.scalars(select(TaskJobRow.job_id).where(TaskJobRow.task_id == task_id,
+                                                                 TaskJobRow.status == JobStatus.QUEUED.value)))
+        cancelled = []
+        for job_id in ids:
+            with self._sessions.begin() as s:
+                done = s.execute(update(TaskJobRow).where(TaskJobRow.job_id == job_id,
+                                                          TaskJobRow.status == JobStatus.QUEUED.value)
+                                 .values(status=JobStatus.CANCELLED.value, updated_at=now, finished_at=now))
+            if done.rowcount == 1:
+                cancelled.append(job_id)
+        return cancelled
+
+    @staticmethod
+    def _row(job: TaskJob) -> TaskJobRow:
+        return TaskJobRow(
+            job_id=job.job_id, task_id=job.task_id, kind=job.kind.value, status=job.status.value,
+            dedupe_key=job.dedupe_key, payload=json.dumps(job.payload), attempts=job.attempts,
+            max_attempts=job.max_attempts, available_at_ms=_ms(job.available_at), lease_owner=job.lease_owner,
+            lease_expires_ms=_ms(job.lease_until) if job.lease_until else None,
+            task_status=job.task_status, error=job.error,
+            error_category=job.error_category.value if job.error_category else None, created_at=job.created_at,
+            updated_at=job.updated_at, finished_at=job.finished_at)
+
+    @staticmethod
+    def _job(row: TaskJobRow) -> TaskJob:
+        return TaskJob(
+            job_id=row.job_id, task_id=row.task_id, kind=JobKind(row.kind), status=JobStatus(row.status),
+            payload=json.loads(row.payload), dedupe_key=row.dedupe_key, attempts=row.attempts,
+            max_attempts=row.max_attempts, available_at=_at(row.available_at_ms), lease_owner=row.lease_owner,
+            lease_until=_at(row.lease_expires_ms), task_status=row.task_status,
+            error=row.error, error_category=JobErrorCategory(row.error_category) if row.error_category else None,
+            created_at=_aware(row.created_at), updated_at=_aware(row.updated_at),
+            finished_at=_aware(row.finished_at) if row.finished_at else None)
+
+
+def _aware(at: datetime) -> datetime:
+    """SQLite returns naive datetimes for timezone-aware columns: they were written in UTC."""
+    return at if at.tzinfo is not None else at.replace(tzinfo=timezone.utc)

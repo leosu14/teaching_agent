@@ -92,9 +92,12 @@ class Orchestrator:
 
     # --- commands ----------------------------------------------------------------------------
 
-    def create_task(self, *, request: str, learner_id: str, user_id: str) -> Task:
-        task = Task(task_id=new_id("task"), user_id=user_id, learner_id=learner_id, request=request)
-        self._tasks.create(task)
+    def create_task(self, *, request: str, learner_id: str, user_id: str, task_id: str | None = None) -> Task:
+        """A new task to be planned from its free-text request. A deterministic `task_id` makes creation idempotent:
+        when that task exists it is returned unchanged."""
+        task = Task(task_id=task_id or new_id("task"), user_id=user_id, learner_id=learner_id, request=request)
+        if not self._tasks.create(task):
+            return self._tasks.get(task.task_id)
         self._events.emit(EventType.TASK_CREATED, task_id=task.task_id, learner_id=learner_id, request=request)
         return task
 
@@ -140,10 +143,11 @@ class Orchestrator:
         async with self._held(task_id) as lease:  # checked under the lease: a concurrent submit cannot also pass
             return await self._submit_input(self._tasks.get(task_id), node_id, payload, lease)
 
-    async def _submit_input(self, task: Task, node_id: str, payload: dict, lease: Lease) -> Task:
-        task_id = task.task_id
+    def check_input(self, task: Task, node_id: str, payload: dict) -> dict:
+        """Validate a waiting task's input without changing anything (no lease): what `submit_input` would store.
+        Lets a caller refuse bad answers before queueing them; `submit_input` validates again under the lease."""
         if task.status != TaskStatus.WAITING or task.waiting is None or task.waiting.node_id != node_id:
-            raise InvalidTransition(f"task {task_id} is not waiting for input at '{node_id}'")
+            raise InvalidTransition(f"task {task.task_id} is not waiting for input at '{node_id}'")
         definition = self._definition(task)
         node = definition.all_nodes[node_id]
         assert isinstance(node, HumanApprovalNode)
@@ -154,7 +158,14 @@ class Orchestrator:
                 node.validate_input(StateView(task.workflow, task, self._budgets.for_task(task.metadata)), data)
         except ValueError as exc:  # includes pydantic ValidationError
             raise InvalidInput(str(exc)) from exc
-        task.workflow.node_states[node_id].human_input = data.model_dump(mode="json")
+        return data.model_dump(mode="json")
+
+    async def _submit_input(self, task: Task, node_id: str, payload: dict, lease: Lease) -> Task:
+        task_id = task.task_id
+        data = self.check_input(task, node_id, payload)
+        node = self._definition(task).all_nodes[node_id]
+        assert task.workflow is not None
+        task.workflow.node_states[node_id].human_input = data
         task.waiting = None
         self._save(task, None, lease)
         if node.submitted_event:

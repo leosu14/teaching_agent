@@ -29,7 +29,7 @@ from app.schemas.task import (
     TaskErrorView,
 )
 from app.services.container import build_container
-from tests.auth import client_for
+from tests.auth import client_for, settle
 from tests.conftest import ANSWERS, EVALUATION_ANSWERS
 from tests.conftest import LEARNER as DEMO
 from tests.learning_cycle_fixtures import LEARNER as CYCLE_LEARNER
@@ -63,7 +63,7 @@ def keys_in(value) -> set[str]:
 
 def assert_learner_safe(response) -> None:
     """No canary, no host path, no provider/model/cost metadata in a learner-visible body."""
-    assert response.status_code in (200, 201), response.text
+    assert response.status_code in (200, 201, 202), response.text
     text = response.text
     assert CANARY not in text, (response.request.url, text[:2000])
     assert "input_value" not in text and "file://" not in text and "/data/objects" not in text
@@ -91,12 +91,12 @@ def world(settings):
     lid = DEMO["learner_id"]
     with client_for(c, lid) as client:
         client.put(f"/learners/{lid}", json=DEMO["profile"])
-        task = client.post("/tasks", json={"request": DEMO["request"], "learner_id": lid}).json()
+        task = settle(client, client.post("/tasks", json={"request": DEMO["request"], "learner_id": lid}))
         while task["status"] == "WAITING":
             sheet = task["waiting"]["prompt"]
             key = ANSWERS["rounds"][sheet["round_number"] - 1]
-            task = client.post(f"/tasks/{task['task_id']}/answers", json={"answers": [
-                {"question_id": q["question_id"], "answer": key[q["concept_id"]]} for q in sheet["questions"]]}).json()
+            task = settle(client, client.post(f"/tasks/{task['task_id']}/answers", json={"answers": [
+                {"question_id": q["question_id"], "answer": key[q["concept_id"]]} for q in sheet["questions"]]}))
         assert task["status"] == "COMPLETED", task
         yield c, llm, client, task["task_id"]
     c.close()
@@ -114,7 +114,7 @@ def test_validation_failure_with_answer_key_is_not_served_to_learners(world) -> 
 
     created = client.post(f"/tasks/{lesson}/evaluation")
     assert_learner_safe(created)
-    evaluation = created.json()
+    evaluation = settle(client, created)
     tid = evaluation["task_id"]
     assert evaluation["status"] == "WAITING" and evaluation["errors"] == []
 
@@ -134,7 +134,8 @@ def test_validation_failure_with_answer_key_is_not_served_to_learners(world) -> 
     # Workflow behavior is unchanged: the evaluation completes as it would without the slip.
     done = client.post(f"/tasks/{tid}/answers", json=evaluation_answers(evaluation["waiting"]["prompt"]))
     assert_learner_safe(done)
-    assert done.json()["status"] == "COMPLETED" and done.json()["result"]["score"] is not None
+    done = settle(client, done)
+    assert done["status"] == "COMPLETED" and done["result"]["score"] is not None
     events = assert_learner_events(client.get(f"/tasks/{tid}/events"))
     assert events[-1]["type"] == EventType.TASK_COMPLETED and events[-1]["status"] == "completed"
     assert CANARY in internal_text(c.task_service.events(tid))
@@ -147,8 +148,9 @@ def test_exhausted_validation_retries_give_learners_a_generic_task_error(world) 
     created = client.post(f"/tasks/{lesson}/evaluation")
     assert_learner_safe(created)
     tid = created.json()["task_id"]
-    for body in (created.json(), client.get(f"/tasks/{tid}").json()):
+    for body in (settle(client, created), client.get(f"/tasks/{tid}").json()):
         assert body["status"] == "FAILED"
+        assert body["job"]["status"] == "DONE"  # the worker ran it; the task's own status says it failed
         [error] = body["errors"]
         assert set(error) == TASK_ERROR_FIELDS
         assert error["category"] == FailureCategory.EVALUATION.value
@@ -169,7 +171,7 @@ def test_exhausted_validation_retries_give_learners_a_generic_task_error(world) 
     assert llm.calls["learner_evaluation"] == EXHAUST
     resumed = client.post(f"/tasks/{tid}/resume")
     assert_learner_safe(resumed)
-    assert resumed.json()["status"] == "WAITING"
+    assert settle(client, resumed)["status"] == "WAITING"
 
 
 def test_cycle_and_child_task_responses_carry_no_answer_key(cycle_env_at) -> None:

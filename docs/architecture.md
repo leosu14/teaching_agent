@@ -46,7 +46,8 @@ services, schemas and a few exception types.
 
 ## Task lifecycle
 
-`CREATED → PLANNING → RUNNING ⇄ REVIEWING / WAITING → COMPLETED`, plus `PAUSED`, `CANCELLED`, `FAILED`
+`CREATED → PLANNING → RUNNING ⇄ REVIEWING / WAITING → COMPLETED`, plus `PAUSED` (a queued task can be paused before
+its worker starts it), `CANCELLED`, `FAILED`
 (`app/runtime/tasks/state_machine.py`). Planning runs the Request Interpreter agent and picks a workflow
 template by required capabilities. The orchestrator itself holds no educational logic.
 
@@ -104,6 +105,49 @@ curriculum writes are only pre-checked (below).
   reuses it by content hash).
 - **Time.** Expiry is judged by the process clock of whoever checks (`build_container(clock=...)`); with one
   database and roughly synchronised clocks that is enough. Database time is a PR20 (multi-machine) concern.
+
+## Background worker
+
+Lessons and evaluations run outside the HTTP request (`app/schemas/job.py`, `SqlTaskJobRepository`,
+`app/services/worker.py`). The routes that would run a task's workflow (`POST /tasks`, `POST /tasks/{id}/answers`,
+`POST /learners/{id}/assessment`, `POST /tasks/{id}/evaluation`, `POST /tasks/{id}/resume`) do only the cheap, synchronous
+part: authorization, creating the task, checking its state (409) and validating the answers against the waiting node
+(422, `Orchestrator.check_input`, which changes nothing). Then they insert a `task_jobs` row (kind RUN, SUBMIT_INPUT
+or RESUME) and answer 202 with the task and its job. The client polls `GET /tasks/{id}`.
+
+A worker process (`python -m app.services.worker`, or `TA_WORKER_EMBEDDED=true` in the API for development) claims
+one job at a time and runs it through the same `TaskService`/orchestrator calls the CLI uses, so the task lease,
+fencing and checkpoints above still apply unchanged.
+
+- **Job states.** `QUEUED → RUNNING → DONE | FAILED | CANCELLED`, and `RUNNING → QUEUED` for a retry. DONE means the
+  worker ran the task to a stop; the task's own status says how it ended (WAITING for answers, COMPLETED, or FAILED
+  with its classified error). FAILED means the worker could not run it; the task stays at its last checkpoint and
+  `POST /tasks/{id}/resume` queues a RESUME. Clients see `TaskJobView`: kind, status, attempts, timestamps and a fixed
+  message per failure category; never the payload, the worker's identity or exception text.
+- **One worker per job.** A claim is one conditional `UPDATE` (QUEUED and past its backoff, or RUNNING with an expired
+  job lease) that sets the owner and the lease and counts the attempt. The worker renews it every third of
+  `JOB_LEASE` (5 minutes, like the task lease); renew, finish and retry match only the owner's own RUNNING row, so a
+  worker whose job was reclaimed cannot record an outcome over the new claim's.
+- **No duplicate work.** A partial unique index allows one active (QUEUED or RUNNING) job per task. Submitting the
+  same work again (same kind and payload hash) returns that job; different work is `JobConflict` (409). `POST /tasks`
+  takes an optional `Idempotency-Key`: the task id is derived from the user and the key, so a retried request returns
+  the same task and job (409 if the key was used for another request). A cancel also cancels the task's queued job.
+  Execution itself is still single-flight through the task lease (`TaskBusy`), and artifacts are fenced and unique
+  per `(task_id, name, version)`, so even two workers on one task produce each artifact once.
+- **Recovery.** A worker that dies leaves its job RUNNING; once the job lease runs out, the next claim takes it as a
+  new attempt and continues the task from its checkpoint (a RUN or RESUME runs the task again, which skips completed
+  nodes). A job whose worker dies on its last allowed attempt (`TA_JOB_MAX_ATTEMPTS`) is not claimed
+  again: the next claim marks it FAILED (`worker_error`), so a job that kills its worker every time cannot loop. A SUBMIT_INPUT job carries the task version its answers were validated against: they are applied only while
+  the task is still at that version and waiting at that node; if an earlier attempt already stored them, the job just
+  continues the task, so answers are never applied twice or to a later diagnostic round.
+- **Failure handling.** `TaskBusy` (another worker's live task lease, e.g. the dead worker's, still running out)
+  re-queues the job after `TA_JOB_BUSY_RETRY_SECONDS` without using an attempt. Work that no longer applies (the task
+  moved on, was cancelled, or refuses the answers under its lease) ends at once. Any other exception, `LeaseLost`
+  included, is retried with exponential backoff (`TA_JOB_RETRY_BACKOFF_SECONDS`, doubled, capped) up to
+  `TA_JOB_MAX_ATTEMPTS`, then FAILED; the redacted exception text stays in the job row for operators.
+- **Scope.** This is the single-worker pilot setup: one API replica and one worker. Learning cycles still run their
+  child tasks inline in the request, and learner-memory writes are still only pre-checked (above), so more than one
+  worker process waits for the multi-process reliability item.
 
 ## Workflow engine
 

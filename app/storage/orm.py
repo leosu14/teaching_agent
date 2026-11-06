@@ -305,3 +305,35 @@ class SpendCounterRow(Base):
     reserved: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     settled: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TaskJobRow(Base):
+    """The task job queue (see app/schemas/job.py). A worker claims a job with one conditional UPDATE (QUEUED and
+    available, or RUNNING with an expired lease); its later writes apply only while `lease_owner` is still its own.
+    At most one active (QUEUED or RUNNING) job per task: a partial unique index, so concurrent enqueues of the same
+    task cannot both insert."""
+
+    __tablename__ = "task_jobs"
+    __table_args__ = (
+        Index("ix_task_jobs_claim", "status", "available_at_ms"),
+        Index("uq_task_jobs_active", "task_id", unique=True,
+              sqlite_where=text("status IN ('QUEUED', 'RUNNING')"),
+              postgresql_where=text("status IN ('QUEUED', 'RUNNING')")),
+    )
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16))
+    dedupe_key: Mapped[str] = mapped_column(String(128))
+    payload: Mapped[str] = mapped_column(Text)  # JSON
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer)
+    available_at_ms: Mapped[int] = mapped_column(BigInteger)
+    lease_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    task_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

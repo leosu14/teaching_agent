@@ -100,7 +100,7 @@ jobs:
           else:
               raise SystemExit("PostgreSQL did not become ready")
           PY
-      - name: PostgreSQL spend ledger tests (must run, not skip)
+      - name: PostgreSQL spend ledger and task job queue tests (must run, not skip)
         run: |
           set -o pipefail
           python -m pytest -q -rs tests/postgres | tee pg-tests.log

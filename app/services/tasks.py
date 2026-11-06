@@ -3,32 +3,119 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import threading
 from collections.abc import Coroutine
 from pathlib import Path
 
 from app.artifacts.service import ArtifactService
-from app.runtime.orchestrator.orchestrator import Orchestrator, TaskBusy
+from app.runtime.orchestrator.orchestrator import RESUMABLE, Orchestrator, TaskBusy
 from app.runtime.workflows.lesson_evaluation import LESSON_TASK
 from app.runtime.workflows.lesson_evaluation import WORKFLOW_ID as EVALUATION_WORKFLOW
 from app.runtime.workflows.lesson_generation import WORKFLOW_ID as LESSON_WORKFLOW
 from app.schemas.artifact import Artifact
+from app.schemas.common import new_id
 from app.schemas.events import Event
+from app.schemas.job import JobConflict, JobKind, TaskJob
 from app.schemas.lesson import DiagnosticAnswers, LessonRequest
 from app.schemas.task import Task, TaskStatus
 from app.runtime.tasks.state_machine import InvalidTransition
-from app.storage.repositories import NotFound, SqlEventRepository, SqlTaskRepository
+from app.storage.repositories import NotFound, SqlEventRepository, SqlTaskJobRepository, SqlTaskRepository
 
-__all__ = ["TaskBusy", "TaskService"]
+__all__ = ["JobConflict", "TaskBusy", "TaskService"]
 
 
 class TaskService:
+    """Two ways to execute a task. The `enqueue_*` methods (the API) validate, persist a job and return at once; the
+    worker (app/services/worker.py) runs the job. The awaiting methods (`create_and_run`, `run`, `submit_answers`,
+    `resume`, ...) run the workflow in the caller, for the CLI demos and the services that drive tasks themselves."""
+
     def __init__(self, orchestrator: Orchestrator, tasks: SqlTaskRepository, events: SqlEventRepository,
-                 artifacts: ArtifactService) -> None:
+                 artifacts: ArtifactService, jobs: SqlTaskJobRepository | None = None,
+                 job_max_attempts: int = 3) -> None:
         self._orchestrator = orchestrator
         self._tasks = tasks
         self._events = events
         self._artifacts = artifacts
+        self._jobs = jobs
+        self._job_max_attempts = job_max_attempts
+
+    # --- background execution: validate, enqueue, return ----------------------------------------------------------
+
+    def enqueue_task(self, *, request: str, learner_id: str, user_id: str,
+                     idempotency_key: str | None = None) -> tuple[Task, TaskJob]:
+        """Create a lesson task from its request and queue its execution. With an `idempotency_key`, a repeated
+        call by the same user returns the same task and job (JobConflict when the key was used for another request)."""
+        task_id = None
+        if idempotency_key is not None:
+            digest = hashlib.sha256(json.dumps(["task", user_id, idempotency_key]).encode()).hexdigest()
+            task_id = f"task_{digest[:24]}"
+        task = self._orchestrator.create_task(request=request, learner_id=learner_id, user_id=user_id,
+                                              task_id=task_id)
+        if task_id is not None and (task.request != request or task.learner_id != learner_id
+                                    or task.user_id != user_id):
+            raise JobConflict(task.task_id)
+        if task_id is not None and task.status != TaskStatus.CREATED:  # a retry of a request that already ran
+            job = self._job_store().latest_for_task(task.task_id)
+            if job is not None:
+                return task, job
+        return task, self._enqueue(task.task_id, JobKind.RUN, {})
+
+    def enqueue_answers(self, task_id: str, payload: dict) -> tuple[Task, TaskJob]:
+        """Validate the answers to whatever the task is waiting on (InvalidInput, InvalidTransition) and queue them.
+        The same answers submitted again while queued return the same job; different ones get JobConflict."""
+        task = self._tasks.get(task_id)
+        if task.status != TaskStatus.WAITING or task.waiting is None:
+            raise InvalidTransition(f"task {task_id} is not waiting for answers")
+        node_id = task.waiting.node_id
+        data = self._orchestrator.check_input(task, node_id, payload)
+        return task, self._enqueue(task_id, JobKind.SUBMIT_INPUT,
+                                   {"node_id": node_id, "answers": data, "task_version": task.version})
+
+    def enqueue_assessment_for(self, learner_id: str, task_id: str,
+                               answers: DiagnosticAnswers) -> tuple[Task, TaskJob]:
+        task = self._tasks.get(task_id)
+        if task.learner_id != learner_id:
+            raise NotFound(f"task {task_id} does not belong to learner {learner_id}")
+        return self.enqueue_answers(task_id, answers.model_dump(mode="json"))
+
+    def enqueue_evaluation(self, lesson_task_id: str, *, user_id: str) -> tuple[Task, TaskJob]:
+        """Create the evaluation task of a completed lesson and queue its execution."""
+        task = self.create_evaluation(lesson_task_id, user_id=user_id)
+        return task, self._enqueue(task.task_id, JobKind.RUN, {})
+
+    def enqueue_resume(self, task_id: str) -> tuple[Task, TaskJob]:
+        """Queue the continuation of a paused, failed or abandoned task (InvalidTransition when it cannot resume)."""
+        task = self._tasks.get(task_id)
+        if task.status not in RESUMABLE and not self._orchestrator.waiting_on_work(task):
+            raise InvalidTransition(f"task {task_id} in status {task.status.value} cannot be resumed")
+        return task, self._enqueue(task_id, JobKind.RESUME, {})
+
+    def job(self, task_id: str) -> TaskJob | None:
+        """The task's latest job (None for a task that was only ever run in-process)."""
+        return self._jobs.latest_for_task(task_id) if self._jobs is not None else None
+
+    def jobs(self, task_id: str) -> list[TaskJob]:
+        return self._jobs.for_task(task_id) if self._jobs is not None else []
+
+    def _enqueue(self, task_id: str, kind: JobKind, payload: dict) -> TaskJob:
+        """One active job per task: the same work again returns the queued job; other work is a JobConflict."""
+        body = json.dumps({k: v for k, v in payload.items() if k != "task_version"}, sort_keys=True)
+        dedupe_key = f"{kind.value}:{hashlib.sha256(body.encode()).hexdigest()[:32]}"
+        job = TaskJob(job_id=new_id("job"), task_id=task_id, kind=kind, payload=payload, dedupe_key=dedupe_key,
+                      max_attempts=self._job_max_attempts)
+        active, inserted = self._job_store().enqueue(job)
+        if not inserted and active.dedupe_key != dedupe_key:
+            raise JobConflict(task_id)
+        return active
+
+    def _job_store(self) -> SqlTaskJobRepository:
+        if self._jobs is None:
+            raise RuntimeError("no job queue is configured")
+        return self._jobs
+
+    # --- in-process execution --------------------------------------------------------------------------------------
 
     async def create_and_run(self, *, request: str, learner_id: str, user_id: str) -> Task:
         task = self._orchestrator.create_task(request=request, learner_id=learner_id, user_id=user_id)
@@ -123,6 +210,8 @@ class TaskService:
         before = self._tasks.get(task_id)
         on_work = self._orchestrator.waiting_on_work(before)
         task = self._orchestrator.request_cancel(task_id)
+        if self._jobs is not None:  # queued work for a cancelled task never starts
+            self._jobs.cancel_queued(task_id)
         if on_work:
             _run_sync(self._orchestrator.release(task_id))
             task = self._tasks.get(task_id)

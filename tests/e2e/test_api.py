@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.auth import client_for
+from tests.auth import client_for, settle
 from tests.conftest import ANSWERS, EVALUATION_ANSWERS, LEARNER
 
 
@@ -27,8 +27,9 @@ def test_lesson_task_over_http(client: TestClient) -> None:
     assert client.put(f"/learners/{learner_id}", json=LEARNER["profile"]).status_code == 200
 
     created = client.post("/tasks", json={"request": LEARNER["request"], "learner_id": learner_id})
-    assert created.status_code == 201
-    task = created.json()
+    assert created.status_code == 202  # queued: the worker runs it, the client polls GET /tasks/{id}
+    assert created.json()["status"] == "CREATED" and created.json()["job"]["status"] == "QUEUED"
+    task = settle(client, created)
     assert task["status"] == "WAITING"
     assert task["waiting"]["kind"] == "diagnostic_answers"
     assert all("expected_answer" not in q for q in task["waiting"]["prompt"]["questions"])  # no answer keys leak
@@ -38,8 +39,7 @@ def test_lesson_task_over_http(client: TestClient) -> None:
         rounds += 1
         resp = client.post(f"/learners/{learner_id}/assessment",
                            json={"task_id": task["task_id"], "answers": answer(task)})
-        assert resp.status_code == 200, resp.text
-        task = resp.json()
+        task = settle(client, resp)
     assert rounds == 2
     assert task["status"] == "COMPLETED"
 
@@ -85,14 +85,14 @@ def test_errors_map_to_http_status(client: TestClient) -> None:
 def test_lesson_evaluation_over_http(client: TestClient) -> None:
     learner_id = LEARNER["learner_id"]
     client.put(f"/learners/{learner_id}", json=LEARNER["profile"])
-    lesson = client.post("/tasks", json={"request": LEARNER["request"], "learner_id": learner_id}).json()
+    lesson = settle(client, client.post("/tasks", json={"request": LEARNER["request"], "learner_id": learner_id}))
     while lesson["status"] == "WAITING":
-        lesson = client.post(f"/tasks/{lesson['task_id']}/answers", json={"answers": answer(lesson)}).json()
+        lesson = settle(client, client.post(f"/tasks/{lesson['task_id']}/answers",
+                                            json={"answers": answer(lesson)}))
     assert lesson["status"] == "COMPLETED"  # POST /tasks/{id}/answers also serves the diagnostic
 
     created = client.post(f"/tasks/{lesson['task_id']}/evaluation", json={"user_id": "u1"})
-    assert created.status_code == 201, created.text
-    task = created.json()
+    task = settle(client, created)
     assert task["status"] == "WAITING" and task["waiting"]["kind"] == "assessment_answers"
     questions = task["waiting"]["prompt"]["questions"]
     assert questions and all("expected_answer" not in q for q in questions)
@@ -104,10 +104,9 @@ def test_lesson_evaluation_over_http(client: TestClient) -> None:
     key = EVALUATION_ANSWERS["answers"]
     body = {"answers": [{"question_id": q["question_id"], "answer": key[q["concept_id"]][q["kind"]]}
                         for q in questions]}
-    done = client.post(f"/tasks/{task['task_id']}/answers", json=body)
-    assert done.status_code == 200, done.text
-    result = done.json()["result"]
-    assert done.json()["status"] == "COMPLETED"
+    done = settle(client, client.post(f"/tasks/{task['task_id']}/answers", json=body))
+    result = done["result"]
+    assert done["status"] == "COMPLETED"
     assert result["remaining_gaps"] == ["es.football.opinions"]
     assert result["recommendation"]["action"] == "reteach"
 
