@@ -230,6 +230,51 @@ def test_concurrent_profile_changes_are_all_kept(tmp_path) -> None:
         other.close()
 
 
+def _edit_on_first_save_with(container, other, lid, kind: str) -> dict:
+    """Make another process edit the profile between the first read and save of the change that records `kind`."""
+    repo = container.memory._repo
+    save = repo.save
+    raced = {"n": 0}
+
+    def save_after_an_edit(profile):
+        if not raced["n"] and any(a.kind == kind for a in profile.assessments):
+            raced["n"] += 1
+            other.memory.upsert(lid, LearnerProfileInput.model_validate(
+                {**LEARNER["profile"], "display_name": "Edited elsewhere"}))
+        return save(profile)
+
+    repo.save = save_after_an_edit
+    return raced
+
+
+async def test_a_diagnostic_and_an_evaluation_redone_after_a_profile_race_are_kept(tmp_path) -> None:
+    """The redo of an assessment's change must rebuild the evidence the first attempt already stored byte for byte
+    (same time), or the immutable evidence store refuses it and the task fails instead of keeping both changes."""
+    container, _ = open_container(tmp_path / "data")
+    other, _ = open_container(tmp_path / "data")
+    try:
+        lid = add_demo_learner(container)
+        raced = _edit_on_first_save_with(container, other, lid, "diagnostic")
+        task = await container.task_service.create_and_run(request=LEARNER["request"], learner_id=lid, user_id="u1")
+        task = await finish(container, task.task_id)
+        assert raced["n"] == 1
+        assert task.status == TaskStatus.COMPLETED, task.errors
+
+        raced = _edit_on_first_save_with(container, other, lid, "lesson_evaluation")
+        evaluation = await container.task_service.start_evaluation(task.task_id, user_id="u1")
+        evaluation = await container.task_service.submit_answers(evaluation.task_id,
+                                                                 evaluation_answers_for(evaluation))
+        assert raced["n"] == 1
+        assert evaluation.status == TaskStatus.COMPLETED, evaluation.errors
+        profile = other.memory.get(lid)
+        assert profile.display_name == "Edited elsewhere"
+        assert [a.kind for a in profile.assessments if a.task_id in (task.task_id, evaluation.task_id)] == [
+            "diagnostic", "lesson_evaluation"]
+    finally:
+        container.close()
+        other.close()
+
+
 def test_a_curriculum_pointer_saved_from_a_stale_read_is_refused(sessions) -> None:
     curricula = SqlCurriculumRepository(sessions)
     now = utcnow()

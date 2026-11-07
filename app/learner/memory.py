@@ -13,6 +13,7 @@ kept. Every change is idempotent (evidence by id, records per task), which makes
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Protocol, TypeVar
 
@@ -59,6 +60,10 @@ from app.schemas.pedagogy import LearnerModel, PedagogyConfig
 T = TypeVar("T")
 # How often a change is made again after losing a race to another writer of the same profile.
 PROFILE_ATTEMPTS = 8
+# The time of the change being made (`_changing`): every attempt of one change reads the same clock value, so a redo
+# rebuilds byte-identical evidence (immutable, idempotent by id and content) instead of a later-stamped copy that the
+# evidence store would refuse as an EvidenceConflict.
+_change_time: ContextVar[datetime | None] = ContextVar("learner_change_time", default=None)
 
 
 class LearnerRepository(Protocol):
@@ -90,7 +95,7 @@ class LearnerMemoryService:
     ) -> None:
         self._repo = repository
         self._frameworks = frameworks
-        self._clock = clock
+        self._base_clock = clock
         self._evidence = evidence if evidence is not None else InMemoryEvidenceRepository()
         self._events = events if events is not None else InMemoryLearningEventRepository()
         self._goals = goals if goals is not None else InMemoryGoalRepository()
@@ -117,15 +122,28 @@ class LearnerMemoryService:
                     raise
         return profile
 
+    def _clock(self) -> datetime:
+        """Now, or the time of the change being made: one change is stamped with one time on every attempt."""
+        pinned = _change_time.get()
+        return pinned if pinned is not None else self._base_clock()
+
     def _changing(self, change: Callable[[], T]) -> T:
-        """Run a read-modify-write of a profile, again on a fresh read whenever another writer saved it first."""
-        for attempt in range(1, PROFILE_ATTEMPTS + 1):
-            try:
-                return change()
-            except ProfileConflict:
-                if attempt == PROFILE_ATTEMPTS:
-                    raise
-        raise AssertionError("unreachable")
+        """Run a read-modify-write of a profile, again on a fresh read whenever another writer saved it first. Every
+        attempt sees the same time, so what an earlier attempt already stored (evidence, learning events) is rebuilt
+        identically and recorded as a no-op."""
+        if _change_time.get() is not None:  # nested in a change: the outer one retries and pins the time
+            return change()
+        token = _change_time.set(self._base_clock())
+        try:
+            for attempt in range(1, PROFILE_ATTEMPTS + 1):
+                try:
+                    return change()
+                except ProfileConflict:
+                    if attempt == PROFILE_ATTEMPTS:
+                        raise
+            raise AssertionError("unreachable")
+        finally:
+            _change_time.reset(token)
 
     def upsert(self, learner_id: str, data: LearnerProfileInput) -> LearnerProfile:
         return self._changing(lambda: self._upsert(learner_id, data))
