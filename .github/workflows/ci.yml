@@ -55,8 +55,9 @@ jobs:
         run: python scripts/run_learning_cycle_demo.py
 
   postgres:
-    # The spend ledger's concurrency guarantees on PostgreSQL 16 (tests/postgres): races between threads and
-    # processes, the lease fence, the in-flight key and the sweep. SQLite serializes writers and cannot detect a
+    # The concurrency guarantees on PostgreSQL 16 (tests/postgres): the spend ledger (races between threads and
+    # processes, the lease fence, the in-flight key and the sweep), the task job queue, and the fenced, versioned
+    # learner-memory and curriculum writes and the stranded-task sweeper. SQLite serializes writers and cannot detect a
     # regression to check-then-write; this job can. The database is a throwaway service with trust auth: no
     # credential exists to leak.
     runs-on: ubuntu-latest
@@ -100,7 +101,7 @@ jobs:
           else:
               raise SystemExit("PostgreSQL did not become ready")
           PY
-      - name: PostgreSQL spend ledger and task job queue tests (must run, not skip)
+      - name: PostgreSQL spend ledger, task job queue and learner fence tests (must run, not skip)
         run: |
           set -o pipefail
           python -m pytest -q -rs tests/postgres | tee pg-tests.log

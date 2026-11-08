@@ -173,6 +173,9 @@ class Settings(BaseSettings):
     job_retry_backoff_seconds: float = Field(default=5.0, ge=0, le=3600)  # doubled per failed attempt
     job_retry_max_backoff_seconds: float = Field(default=300.0, ge=0, le=86400)
     job_busy_retry_seconds: float = Field(default=10.0, ge=0, le=3600)  # the task's lease was held by another worker
+    # How often a serving worker sweeps for tasks a killed worker left mid-run (app/services/sweeper.py); 0 turns it
+    # off (then run `python -m app.services.worker --sweep` from cron instead).
+    worker_sweep_seconds: float = Field(default=60.0, ge=0, le=86400)
 
     log_level: str = "INFO"
     log_json: bool = True

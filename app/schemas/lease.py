@@ -2,17 +2,21 @@
 
 One worker at a time may execute a task. It claims the task's lease, a persisted row update that raises the task's
 fencing generation (`fence`) by one, so every claim, including a takeover after expiry, makes all earlier holders
-stale. The task record, its events, its artifacts and its assessment attempts and grades are written only if, at
-commit time and in the same transaction, the stored generation is still `fence` and the lease has not expired, so a
-worker that lost its lease cannot commit any of them, however long its slow call took; expiry alone stops it.
+stale. The task record, its events, its artifacts, its assessment attempts and grades, and every learner-memory and
+curriculum write made while the task runs are written only if, at commit time and in the same transaction, the stored
+generation is still `fence` and the lease has not expired, so a worker that lost its lease cannot commit any of them,
+however long its slow call took; expiry alone stops it.
 
-Not yet fenced at commit: learner-memory and curriculum writes made by a task's tools. The tool manager checks the
-lease just before each such tool runs (a separate read, not part of the write); those writes are idempotent per task,
-but making them atomic with the fence is a follow-up required before running workers in several processes.
+The task record, events, artifacts and grades take the lease as an argument. Learner memory and curricula are written
+by services several layers below the task (tools, the curriculum tracker), so the orchestrator instead names the lease
+for everything that runs under it (`fenced_writes`), and those repositories fence each write by `write_fence()`.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 
 from pydantic import Field
@@ -44,3 +48,24 @@ class LeaseLost(RuntimeError):
 
 class WriteConflict(RuntimeError):
     """An unleased, version-checked write lost to a newer version, or the resource is leased by a running worker."""
+
+
+# The lease that fences learner-memory and curriculum writes made by the work running in this asyncio task (and the
+# tasks and threads it starts, which copy the context). None outside a task's execution: writes are then unfenced
+# (API requests, teaching sessions), and version checks alone protect them.
+_write_fence: ContextVar[Lease | None] = ContextVar("write_fence", default=None)
+
+
+def write_fence() -> Lease | None:
+    return _write_fence.get()
+
+
+@contextmanager
+def fenced_writes(lease: Lease | None) -> Iterator[None]:
+    """Fence the learner-memory and curriculum writes made inside the block by `lease`: each is committed only while
+    the lease is still current and unexpired (LeaseLost otherwise, and nothing of that write is stored)."""
+    token = _write_fence.set(lease)
+    try:
+        yield
+    finally:
+        _write_fence.reset(token)

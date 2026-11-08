@@ -3,13 +3,19 @@
 Mastery is never written directly: every update records LearningEvidence (immutable, idempotent by id) and the
 affected concepts are rebuilt from their full evidence and exposure history by the deterministic MasteryUpdater.
 So the current state is always reconstructible, and a resumed or repeated task never applies evidence twice.
+
+The profile is one stored document that several writers change (a lesson task in the worker, a teaching session or a
+profile edit in the API). Each change reads it, applies itself and saves it at the version it read; a save from a
+stale read is refused (ProfileConflict) and the change is made again on a fresh read, so concurrent changes are all
+kept. Every change is idempotent (evidence by id, records per task), which makes redoing it safe.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from app.learner.frameworks import FrameworkRegistry
 from app.learner.history import (
@@ -43,6 +49,7 @@ from app.schemas.learner import (
     MasteryChange,
     MasteryUpdate,
     MistakeRecord,
+    ProfileConflict,
     SubjectState,
     stable_id,
 )
@@ -50,10 +57,20 @@ from app.schemas.lesson import ConceptRef, DiagnosticOutcome, LessonOutcome
 from app.schemas.pedagogy import LearnerModel, PedagogyConfig
 
 
+T = TypeVar("T")
+# How often a change is made again after losing a race to another writer of the same profile.
+PROFILE_ATTEMPTS = 8
+# The time of the change being made (`_changing`): every attempt of one change reads the same clock value, so a redo
+# rebuilds byte-identical evidence (immutable, idempotent by id and content) instead of a later-stamped copy that the
+# evidence store would refuse as an EvidenceConflict.
+_change_time: ContextVar[datetime | None] = ContextVar("learner_change_time", default=None)
+
+
 class LearnerRepository(Protocol):
     def get(self, learner_id: str) -> LearnerProfile | None: ...
 
-    def save(self, profile: LearnerProfile) -> None: ...
+    def save(self, profile: LearnerProfile) -> None:
+        """Store the profile; may raise ProfileConflict when it was changed since `profile` was read."""
 
 
 class UnknownLearner(KeyError):
@@ -78,7 +95,7 @@ class LearnerMemoryService:
     ) -> None:
         self._repo = repository
         self._frameworks = frameworks
-        self._clock = clock
+        self._base_clock = clock
         self._evidence = evidence if evidence is not None else InMemoryEvidenceRepository()
         self._events = events if events is not None else InMemoryLearningEventRepository()
         self._goals = goals if goals is not None else InMemoryGoalRepository()
@@ -97,10 +114,41 @@ class LearnerMemoryService:
         profile = self._repo.get(learner_id)
         if profile is None:
             profile = LearnerProfile(learner_id=learner_id, created_at=self._clock(), updated_at=self._clock())
-            self._repo.save(profile)
+            try:
+                self._repo.save(profile)
+            except ProfileConflict:  # created concurrently by another writer: use theirs
+                profile = self._repo.get(learner_id)
+                if profile is None:
+                    raise
         return profile
 
+    def _clock(self) -> datetime:
+        """Now, or the time of the change being made: one change is stamped with one time on every attempt."""
+        pinned = _change_time.get()
+        return pinned if pinned is not None else self._base_clock()
+
+    def _changing(self, change: Callable[[], T]) -> T:
+        """Run a read-modify-write of a profile, again on a fresh read whenever another writer saved it first. Every
+        attempt sees the same time, so what an earlier attempt already stored (evidence, learning events) is rebuilt
+        identically and recorded as a no-op."""
+        if _change_time.get() is not None:  # nested in a change: the outer one retries and pins the time
+            return change()
+        token = _change_time.set(self._base_clock())
+        try:
+            for attempt in range(1, PROFILE_ATTEMPTS + 1):
+                try:
+                    return change()
+                except ProfileConflict:
+                    if attempt == PROFILE_ATTEMPTS:
+                        raise
+            raise AssertionError("unreachable")
+        finally:
+            _change_time.reset(token)
+
     def upsert(self, learner_id: str, data: LearnerProfileInput) -> LearnerProfile:
+        return self._changing(lambda: self._upsert(learner_id, data))
+
+    def _upsert(self, learner_id: str, data: LearnerProfileInput) -> LearnerProfile:
         profile = self.get_or_create(learner_id)
         for state in data.subjects:
             self._frameworks.get(state.framework_id)  # reject unknown frameworks early
@@ -249,6 +297,10 @@ class LearnerMemoryService:
     def record_evidence(self, learner_id: str, subject: str, evidence: list[LearningEvidence],
                         concepts: list[ConceptRef], scope: ExecutionScope | None = None) -> MasteryUpdate:
         """Record evidence from any source (exercise, manual placement, ...) and update mastery from it."""
+        return self._changing(lambda: self._record_evidence(learner_id, subject, evidence, concepts, scope))
+
+    def _record_evidence(self, learner_id: str, subject: str, evidence: list[LearningEvidence],
+                         concepts: list[ConceptRef], scope: ExecutionScope | None = None) -> MasteryUpdate:
         if any(e.learner_id != learner_id for e in evidence):
             raise ValueError("evidence must belong to the learner it is recorded for")
         profile = self.get_or_create(learner_id)
@@ -272,6 +324,9 @@ class LearnerMemoryService:
     def record_diagnostic(self, outcome: DiagnosticOutcome, scope: ExecutionScope) -> MasteryUpdate:
         """Turn a finished diagnostic into evidence and mastery, before the lesson is planned. Idempotent per task.
         The diagnostic agent graded the answers; it never touches mastery."""
+        return self._changing(lambda: self._record_diagnostic(outcome, scope))
+
+    def _record_diagnostic(self, outcome: DiagnosticOutcome, scope: ExecutionScope) -> MasteryUpdate:
         profile = self.get_or_create(outcome.learner_id)
         request = outcome.request
         framework = self._frameworks.get(request.framework_id)
@@ -300,6 +355,9 @@ class LearnerMemoryService:
 
         The diagnostic's evidence is recorded here unless `record_diagnostic` already did; being taught a concept
         counts as an exposure (a review is scheduled) but never as evidence of mastery."""
+        return self._changing(lambda: self._record_lesson(outcome, scope))
+
+    def _record_lesson(self, outcome: LessonOutcome, scope: ExecutionScope) -> MasteryUpdate:
         profile = self.get_or_create(outcome.learner_id)
         request = outcome.request
         previous = next((lesson for lesson in profile.lessons if lesson.task_id == outcome.task_id), None)
@@ -345,6 +403,9 @@ class LearnerMemoryService:
 
     def record_evaluation(self, outcome: EvaluationOutcome, scope: ExecutionScope) -> MasteryUpdate:
         """Apply post-lesson assessment evidence. Idempotent per task, like `record_lesson`."""
+        return self._changing(lambda: self._record_evaluation(outcome, scope))
+
+    def _record_evaluation(self, outcome: EvaluationOutcome, scope: ExecutionScope) -> MasteryUpdate:
         profile = self.get_or_create(outcome.learner_id)
         state = profile.subjects.get(outcome.subject)
         level = state.estimated_level if state else None

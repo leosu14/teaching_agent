@@ -14,7 +14,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from app.schemas.common import Schema
 from app.schemas.learner import GoalStatus, LearningGoal, stable_id
@@ -372,6 +372,8 @@ class CurriculumRecord(Schema):
     status: CurriculumStatus = CurriculumStatus.ACTIVE
     created_at: datetime
     updated_at: datetime
+    # The stored row's version this record was read at (None: never stored); checked on save, like a profile's.
+    _row_version: int | None = PrivateAttr(default=None)
 
 
 # --- Progress, review and next action -------------------------------------------------------------------------------
@@ -526,6 +528,10 @@ class ProgressRefresh(Schema):
 
 class VersionConflict(ValueError):
     """A curriculum version id is already stored with different content: history is never rewritten."""
+
+
+class RecordConflict(RuntimeError):
+    """A curriculum's pointer was saved from a stale read: another writer moved it since. Nothing was written."""
 
 
 

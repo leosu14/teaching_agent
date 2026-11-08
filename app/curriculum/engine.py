@@ -28,6 +28,7 @@ from app.schemas.curriculum import (
     CurriculumPlan,
     CurriculumProgress,
     CurriculumRecord,
+    RecordConflict,
     CurriculumStatus,
     CurriculumVersion,
     ObjectiveStatus,
@@ -42,6 +43,9 @@ from app.schemas.pedagogy import LearnerModel
 
 # Stores a replanned version's artifacts (plan, previous version) and returns their ids by key.
 ArtifactWriter = Callable[[CurriculumPlan, CurriculumVersion], dict[str, str]]
+
+
+STATUS_ATTEMPTS = 8  # a status change is made again on a fresh read when another writer moved the pointer first
 
 
 class CurriculumConflict(ValueError):
@@ -102,11 +106,15 @@ class CurriculumEngine:
         created = self.repository.add_version(version)
         stored = self.repository.version(version.version_id)
         assert stored is not None
-        self.repository.save_record(CurriculumRecord(
-            curriculum_id=plan.curriculum_id, learner_id=plan.learner_id, goal_id=plan.goal_id, title=plan.title,
-            domain=domain, current_version=stored.version, current_version_id=stored.version_id,
-            status=record.status if record is not None else CurriculumStatus.ACTIVE,
-            created_at=record.created_at if record is not None else now, updated_at=now))
+        pointer = dict(title=plan.title, domain=domain, current_version=stored.version,
+                       current_version_id=stored.version_id, updated_at=now)
+        try:  # moves the pointer only from the version this plan was made on (another commit may have won meanwhile)
+            self.repository.save_record(record.model_copy(update=pointer) if record is not None else CurriculumRecord(
+                curriculum_id=plan.curriculum_id, learner_id=plan.learner_id, goal_id=plan.goal_id,
+                status=CurriculumStatus.ACTIVE, created_at=now, **pointer))
+        except RecordConflict as exc:
+            raise CurriculumConflict(f"curriculum {plan.curriculum_id} moved on while the plan was being made "
+                                     f"on version {plan.base_version}; rebuild it") from exc
         if created and scope is not None:
             event = EventType.CURRICULUM_CREATED if plan.base_version is None else EventType.CURRICULUM_REPLANNED
             scope.emit(event, goal_id=plan.goal_id, curriculum_id=plan.curriculum_id, version=stored.version,
@@ -115,9 +123,16 @@ class CurriculumEngine:
         return stored, created
 
     def set_status(self, curriculum_id: str, status: CurriculumStatus) -> None:
-        record = self.repository.record(curriculum_id)
-        if record is not None and record.status != status:
-            self.repository.save_record(record.model_copy(update={"status": status, "updated_at": self._clock()}))
+        for attempt in range(1, STATUS_ATTEMPTS + 1):
+            record = self.repository.record(curriculum_id)
+            if record is None or record.status == status:
+                return
+            try:  # never from a stale read: that would move the pointer back to an older version
+                self.repository.save_record(record.model_copy(update={"status": status, "updated_at": self._clock()}))
+                return
+            except RecordConflict:
+                if attempt == STATUS_ATTEMPTS:
+                    raise
 
     def refresh(self, goal: LearningGoal, model: LearnerModel, as_of: datetime, *,
                 review_counts: Mapping[str, int] | None = None, graph: ConceptGraph | None = None,

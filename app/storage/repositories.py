@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -24,10 +24,16 @@ from app.schemas.assessment import (
     AttemptOutcome,
     ItemConflict,
 )
-from app.schemas.curriculum import CurriculumProgress, CurriculumRecord, CurriculumVersion, VersionConflict
+from app.schemas.curriculum import (
+    CurriculumProgress,
+    CurriculumRecord,
+    CurriculumVersion,
+    RecordConflict,
+    VersionConflict,
+)
 from app.schemas.common import utcnow
 from app.schemas.events import Event
-from app.schemas.lease import Lease, LeaseLost, WriteConflict
+from app.schemas.lease import Lease, LeaseLost, WriteConflict, write_fence
 from app.schemas.learning_cycle import (
     TERMINAL_CYCLE_STATUSES,
     CycleConflict,
@@ -35,7 +41,14 @@ from app.schemas.learning_cycle import (
     CycleRequestRecord,
     LearningCycle,
 )
-from app.schemas.learner import EvidenceConflict, LearnerProfile, LearningEvent, LearningEvidence, LearningGoal
+from app.schemas.learner import (
+    EvidenceConflict,
+    LearnerProfile,
+    LearningEvent,
+    LearningEvidence,
+    LearningGoal,
+    ProfileConflict,
+)
 from app.schemas.spend import (
     CounterTotals,
     ReservationRefused,
@@ -108,6 +121,33 @@ def _require_fence(s: Session, lease: Lease, now: datetime) -> None:
         TaskRow.lease_expires_ms > _ms(now)).values(lease_fence=TaskRow.lease_fence))
     if checked.rowcount != 1:
         raise LeaseLost(lease)
+
+
+def _fence_current(s: Session, clock: Clock) -> None:
+    """Inside a learner-memory or curriculum write's transaction: when the write is made under a task's execution
+    (`fenced_writes`), refuse it unless that lease is still current and unexpired (see `_require_fence`)."""
+    lease = write_fence()
+    if lease is not None:
+        _require_fence(s, lease, clock())
+
+
+def _versioned_save(s: Session, row_type, key_column, key: str, stored: int | None, values: dict, conflict) -> int:
+    """Insert (`stored` None) or update the row only at version `stored`, raising its version by one. Raises
+    `conflict` (nothing written) when the row exists already, or moved past `stored`. Returns the new version."""
+    if stored is None:
+        if s.get(row_type, key) is not None:
+            raise conflict
+        s.add(row_type(**{key_column.key: key}, version=1, **values))
+        try:
+            s.flush()
+        except IntegrityError as exc:  # a concurrent insert of the same key won
+            raise conflict from exc
+        return 1
+    done = s.execute(update(row_type).where(key_column == key, row_type.version == stored)
+                     .values(version=stored + 1, **values))
+    if done.rowcount != 1:
+        raise conflict
+    return stored + 1
 
 
 class SqlTaskRepository:
@@ -236,6 +276,20 @@ class SqlTaskRepository:
             until = datetime.fromtimestamp(row.lease_expires_ms / 1000, tz=self._clock().tzinfo)
             return Lease(resource_id=task_id, owner=row.lease_owner, fence=row.lease_fence, until=until)
 
+    def stranded(self, statuses: Iterable[TaskStatus], *, idle_before: datetime, limit: int = 100) -> list[str]:
+        """Tasks in one of `statuses` that nobody is executing and nothing will continue: their worker's lease ran
+        out (it died or hung), or no lease is held and the task has not changed since `idle_before`, and they have no
+        active (queued or running) job. Oldest first."""
+        now_ms = _ms(self._clock())
+        active_job = select(TaskJobRow.job_id).where(TaskJobRow.task_id == TaskRow.task_id,
+                                                     TaskJobRow.status.in_(_ACTIVE)).exists()
+        with self._sessions() as s:
+            return list(s.scalars(select(TaskRow.task_id).where(
+                TaskRow.status.in_([st.value for st in statuses]),
+                or_(TaskRow.lease_expires_ms <= now_ms,
+                    and_(TaskRow.lease_owner.is_(None), TaskRow.updated_at <= idle_before)),
+                ~active_job).order_by(TaskRow.updated_at, TaskRow.task_id).limit(limit)))
+
     # --- pause and cancel requests from other callers -------------------------------------------------------------
 
     def control(self, task_id: str) -> TaskControl:
@@ -342,28 +396,42 @@ class SqlArtifactRepository:
 
 
 class SqlLearnerRepository:
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    """Learner profiles. A profile is one JSON document rewritten by every change, so each save is version-checked
+    against the read it was made from (`ProfileConflict` instead of a lost update) and, under a task's execution,
+    fenced by the task's lease."""
+
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
+        self._clock = clock
 
     def get(self, learner_id: str) -> LearnerProfile | None:
         with self._sessions() as s:
             row = s.get(LearnerRow, learner_id)
-            return LearnerProfile.model_validate_json(row.body) if row else None
+            if row is None:
+                return None
+            profile = LearnerProfile.model_validate_json(row.body)
+            profile._row_version = row.version
+            return profile
 
     def save(self, profile: LearnerProfile) -> None:
+        conflict = ProfileConflict(f"learner {profile.learner_id} changed since it was read")
         with self._sessions.begin() as s:
-            s.merge(LearnerRow(learner_id=profile.learner_id, updated_at=profile.updated_at,
-                               body=profile.model_dump_json()))
+            _fence_current(s, self._clock)
+            version = _versioned_save(s, LearnerRow, LearnerRow.learner_id, profile.learner_id, profile._row_version,
+                                      {"updated_at": profile.updated_at, "body": profile.model_dump_json()}, conflict)
+        profile._row_version = version
 
 
 class SqlEvidenceRepository:
     """Append-only evidence store: rows are inserted, never updated."""
 
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
+        self._clock = clock
 
     def add(self, evidence: LearningEvidence) -> bool:
         with self._sessions.begin() as s:
+            _fence_current(s, self._clock)
             row = s.scalars(select(LearningEvidenceRow).where(
                 LearningEvidenceRow.evidence_id == evidence.evidence_id)).first()
             if row is not None:
@@ -386,11 +454,13 @@ class SqlEvidenceRepository:
 
 
 class SqlLearningEventRepository:
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
+        self._clock = clock
 
     def add(self, event: LearningEvent) -> bool:
         with self._sessions.begin() as s:
+            _fence_current(s, self._clock)
             if s.scalars(select(LearningEventRow.seq).where(LearningEventRow.event_id == event.event_id)).first():
                 return False
             s.add(LearningEventRow(event_id=event.event_id, learner_id=event.learner_id, type=event.type,
@@ -405,11 +475,13 @@ class SqlLearningEventRepository:
 
 
 class SqlGoalRepository:
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
+        self._clock = clock
 
     def save(self, goal: LearningGoal) -> None:
         with self._sessions.begin() as s:
+            _fence_current(s, self._clock)
             s.merge(LearningGoalRow(goal_id=goal.goal_id, learner_id=goal.learner_id, domain=goal.domain,
                                     status=goal.status.value, body=goal.model_dump_json()))
 
@@ -426,29 +498,44 @@ class SqlGoalRepository:
 
 
 class SqlCurriculumRepository:
-    """Curricula: current pointers, append-only immutable versions and the last progress snapshot."""
+    """Curricula: current pointers, append-only immutable versions and the last progress snapshot. A pointer save is
+    version-checked against the read it was made from (`RecordConflict`); under a task's execution every write is
+    fenced by the task's lease."""
 
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
+        self._clock = clock
 
     def save_record(self, record: CurriculumRecord) -> None:
+        conflict = RecordConflict(f"curriculum {record.curriculum_id} changed since it was read")
         with self._sessions.begin() as s:
-            s.merge(CurriculumRow(curriculum_id=record.curriculum_id, learner_id=record.learner_id,
-                                  goal_id=record.goal_id, body=record.model_dump_json()))
+            _fence_current(s, self._clock)
+            version = _versioned_save(s, CurriculumRow, CurriculumRow.curriculum_id, record.curriculum_id,
+                                      record._row_version, {"learner_id": record.learner_id,
+                                                            "goal_id": record.goal_id,
+                                                            "body": record.model_dump_json()}, conflict)
+        record._row_version = version
 
     def record(self, curriculum_id: str) -> CurriculumRecord | None:
         with self._sessions() as s:
             row = s.get(CurriculumRow, curriculum_id)
-            return CurriculumRecord.model_validate_json(row.body) if row else None
+            return self._record(row) if row else None
 
     def records_for_learner(self, learner_id: str) -> list[CurriculumRecord]:
         with self._sessions() as s:
             rows = s.scalars(select(CurriculumRow).where(CurriculumRow.learner_id == learner_id)
                              .order_by(CurriculumRow.curriculum_id))
-            return [CurriculumRecord.model_validate_json(r.body) for r in rows]
+            return [self._record(r) for r in rows]
+
+    @staticmethod
+    def _record(row: CurriculumRow) -> CurriculumRecord:
+        record = CurriculumRecord.model_validate_json(row.body)
+        record._row_version = row.version
+        return record
 
     def add_version(self, version: CurriculumVersion) -> bool:
         with self._sessions.begin() as s:
+            _fence_current(s, self._clock)
             row = s.get(CurriculumVersionRow, version.version_id)
             if row is not None:
                 existing = CurriculumVersion.model_validate_json(row.body)
@@ -473,6 +560,7 @@ class SqlCurriculumRepository:
 
     def save_progress(self, progress: CurriculumProgress) -> None:
         with self._sessions.begin() as s:
+            _fence_current(s, self._clock)
             s.merge(CurriculumProgressRow(curriculum_id=progress.curriculum_id, body=progress.model_dump_json()))
 
     def progress(self, curriculum_id: str) -> CurriculumProgress | None:

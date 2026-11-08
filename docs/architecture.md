@@ -54,8 +54,8 @@ template by required capabilities. The orchestrator itself holds no educational 
 ## Execution leases, fencing and versioned writes
 
 One worker at a time executes a task, and a worker that lost the right to do so cannot commit task state, events,
-artifacts, results or grades (`app/schemas/lease.py`, `SqlTaskRepository`, `Orchestrator._held`). Learner-memory and
-curriculum writes are only pre-checked (below).
+artifacts, results, grades, learner memory or curricula (`app/schemas/lease.py`, `SqlTaskRepository`,
+`Orchestrator._held`).
 
 - **Lease.** `run`, `resume`, `submit_input`, `invalidate` and the cancel-time `release` each claim the task's lease
   first: one conditional `UPDATE` that succeeds only when no live lease exists and raises the task's fencing
@@ -72,15 +72,19 @@ curriculum writes are only pre-checked (below).
   worker; reclaiming makes every earlier holder stale. A refused write raises `LeaseLost` (fixed text, 409 at the
   API): the stale worker stops, and its result and its success event are never published. Learning-cycle driver
   commits are fenced by the cycle's own lease (below).
+- **Learner-memory and curriculum writes** (`learner.record_*`, `curriculum.save`, `curriculum.track`, the implicit
+  goal a lesson stores, a goal the completion rule completes) are made by services several layers below the task, so
+  they do not take the lease as an argument. `Orchestrator._held` names it for everything that runs under it
+  (`fenced_writes`, a context variable copied into the tasks and threads the work starts), and the learner, evidence,
+  learning-event, goal and curriculum repositories run the same `_require_fence` check as the first statement of each
+  write's transaction (`write_fence()`). Outside a task's execution (API requests, teaching sessions) nothing is
+  fenced. The tool manager still checks the lease before a `:write` tool runs, as an early exit only. Each of these
+  writes commits on its own, so a worker that loses its lease mid-tool can leave the writes before the loss (evidence,
+  learning events, a progress snapshot), never the ones after; all of them are idempotent per task or evidence id,
+  and the profile's lesson or assessment record, the change's idempotency marker, is saved last, so the next holder
+  completes the change exactly once.
 
   Not fenced at commit:
-  - **Learner-memory and curriculum writes** (`learner.record_*`, `curriculum.save`, `curriculum.track`). The tool
-    manager checks the lease before running a tool with a `:write` permission (a separate read). The tool bodies are
-    synchronous, but the manager runs them through `asyncio.wait_for(tool.run(...))`, which schedules a task, so the
-    event loop can run other coroutines between the check and the write (observed on Python 3.11). A worker whose
-    lease is lost in that window still writes; the writes are idempotent per task, so they repeat what the new
-    holder writes. Fencing them in the write's transaction is a required follow-up before workers run in more than
-    one process; until then they are not multi-process safe.
   - **Assessment items and rubrics** (`save_item`, `save_rubric`): immutable and idempotent by content hash, so a
     stale copy is the same row.
   - **Object-store bytes** of an artifact are written (create-if-absent) before its fenced row; a refused worker
@@ -94,6 +98,16 @@ curriculum writes are only pre-checked (below).
   a production run updating a budget) applies only to the version it read and only while no worker holds a live
   lease, else `WriteConflict` (409); callers reload and retry where that is safe. Pause and cancel requests are
   their own columns, set in one statement, so the executing worker's checkpoints never overwrite them.
+- **Versioned learner profiles and curriculum pointers.** A learner profile is one JSON document that a lesson in
+  the worker, a teaching session and a profile edit in the API all rewrite, and a curriculum's current-version
+  pointer is rewritten by a replan and by a status change. Both rows carry a `version`: the repository remembers the
+  version a profile or record was read at and saves only at that version (`ProfileConflict`, `RecordConflict`), so a
+  write made from a stale read is refused instead of silently dropping the other writer's change. Learner memory then
+  redoes the whole change on a fresh read (`LearnerMemoryService._changing`; every change is idempotent, so redoing
+  is safe); a curriculum status change is redone the same way, and a commit whose base version moved meanwhile is a
+  `CurriculumConflict` (rebuild the plan), as when the base had already moved at planning time. Goals and the
+  curriculum progress snapshot stay last-write-wins: a goal's only automatic change is its completion, and the
+  snapshot only decides which transitions are reported.
 - **Shared planning tasks.** `build_curriculum` derives the planning task's id from its build key, so concurrent
   callers share one task and its lease lets one of them run it; a caller that finds it finished uses the result.
 - **Learning cycles** keep their own drive lease in the cycle record (below), with the same rules: each claim raises
@@ -145,9 +159,19 @@ fencing and checkpoints above still apply unchanged.
   moved on, was cancelled, or refuses the answers under its lease) ends at once. Any other exception, `LeaseLost`
   included, is retried with exponential backoff (`TA_JOB_RETRY_BACKOFF_SECONDS`, doubled, capped) up to
   `TA_JOB_MAX_ATTEMPTS`, then FAILED; the redacted exception text stays in the job row for operators.
-- **Scope.** This is the single-worker pilot setup: one API replica and one worker. Learning cycles still run their
-  child tasks inline in the request, and learner-memory writes are still only pre-checked (above), so more than one
-  worker process waits for the multi-process reliability item.
+- **Sweeper** (`app/services/sweeper.py`; every `TA_WORKER_SWEEP_SECONDS` in a serving worker, or
+  `python -m app.services.worker --sweep` from cron). A task run in-process (a learning cycle's child task, a CLI
+  demo) by a process that was killed has no job to reclaim: it stays PLANNING, RUNNING or REVIEWING and looks stuck.
+  The sweeper finds such tasks (lease expired, or no lease and unchanged for a lease's length, and no active job) and
+  queues a RECOVER job, which resumes the task from its checkpoint if it is still stranded when a worker claims it.
+  A task with a live lease is never touched, so the sweeper cannot start a second execution; a task whose latest job
+  FAILED is left for a manual resume; one active job per task makes concurrent sweepers harmless. Each pass also fails
+  exhausted jobs whose worker died. Recovery still waits for the killed worker's lease to run out (up to
+  `TASK_LEASE`): telling a dead worker from a slow one sooner needs worker liveness, a later item.
+- **Scope.** This is the pilot setup: one API replica and one worker. Learner-memory and curriculum writes are fenced
+  and versioned (above), so the worker and the API can write the same learner safely, and more worker processes on
+  one database are correct; learning cycles still run their child tasks inline in the request, and clocks and rate
+  limits are per process (the multi-replica items).
 
 ## Workflow engine
 

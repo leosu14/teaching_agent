@@ -104,6 +104,7 @@ from app.services.artifact_content import ArtifactContentService
 from app.services.ownership import OwnershipService
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
+from app.services.sweeper import TaskSweeper
 from app.services.worker import TaskWorker
 from app.services.assessment import AssessmentService
 from app.services.learning_cycles import LearningCycleService
@@ -445,12 +446,13 @@ def build_container(
     pedagogy = settings.pedagogy_config()
     assessment_config = settings.assessment_config()
     strategies = StrategyRegistry()
-    memory = LearnerMemoryService(SqlLearnerRepository(sessions), frameworks,
-                                  evidence=SqlEvidenceRepository(sessions), events=SqlLearningEventRepository(sessions),
-                                  goals=SqlGoalRepository(sessions), config=pedagogy)
+    memory = LearnerMemoryService(SqlLearnerRepository(sessions, clock), frameworks,
+                                  evidence=SqlEvidenceRepository(sessions, clock),
+                                  events=SqlLearningEventRepository(sessions, clock),
+                                  goals=SqlGoalRepository(sessions, clock), config=pedagogy)
     artifacts = ArtifactService(SqlArtifactRepository(sessions, clock),
                                 FilesystemObjectStore(settings.resolved_object_store_dir))
-    curriculum = CurriculumEngine(SqlCurriculumRepository(sessions), settings.curriculum_config())
+    curriculum = CurriculumEngine(SqlCurriculumRepository(sessions, clock), settings.curriculum_config())
 
     retriever = retriever or LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json")
     search = providers.search
@@ -567,7 +569,9 @@ def build_container(
     task_worker = TaskWorker(jobs, task_service, poll_seconds=settings.worker_poll_seconds,
                              retry_backoff_seconds=settings.job_retry_backoff_seconds,
                              retry_max_backoff_seconds=settings.job_retry_max_backoff_seconds,
-                             busy_retry_seconds=settings.job_busy_retry_seconds, clock=clock)
+                             busy_retry_seconds=settings.job_busy_retry_seconds, clock=clock,
+                             sweeper=TaskSweeper(task_repo, jobs, task_service, clock=clock),
+                             sweep_seconds=settings.worker_sweep_seconds)
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
     curriculum_service = CurriculumService(memory, RetrieverKnowledgeBase(retriever), curriculum, task_service, events)
     assessment_service = AssessmentService(
