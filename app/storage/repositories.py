@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
 
@@ -97,6 +98,8 @@ from app.storage.orm import (
     TeachingSessionRow,
     TeachingTurnRow,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class NotFound(KeyError):
@@ -1005,9 +1008,13 @@ class SqlSpendRepository:
                 .order_by(SpendEntryRow.reserved_until_ms).limit(100)).all()
             entries = [self._entry(r) for r in rows]
         swept = []
-        for entry in entries:
-            if self.settle(entry.entry_id, abandoned(entry), now=now).outcome == "applied":
-                swept.append(entry.entry_id)
+        for entry in entries:  # one transaction each: an entry that cannot be settled does not stop the others
+            try:
+                if self.settle(entry.entry_id, abandoned(entry), now=now).outcome == "applied":
+                    swept.append(entry.entry_id)
+            except Exception:  # noqa: BLE001 - best-effort: the entry stays reserved for the next sweep
+                logger.warning("abandoned spend entry %s could not be settled; the next sweep retries it",
+                               entry.entry_id, exc_info=True)
         return swept
 
     def entries(self, *, task_id: str | None = None, session_id: str | None = None,

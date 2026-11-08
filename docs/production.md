@@ -173,7 +173,10 @@ Abandoned`, `usage_source: estimate`) and emits `spend.abandoned`. This is delib
 have been billed is charged its upper-bound estimate rather than nothing. If the original process does record the real
 outcome later, the reported usage replaces the estimate once (`unknown` to `settled`); a late failure or release
 cannot undo the charge. A storage error while settling is retried a bounded number of times; if it persists the entry
-stays reserved and the sweep charges it.
+stays reserved and the sweep charges it. The sweep itself is best-effort: each expired entry is settled in its own
+transaction, so one that cannot be settled stays reserved for the next sweep without stopping the others, and a sweep
+that fails is logged (`the abandoned-reservation sweep failed`) while the new reservation goes ahead. Only the
+reservation's own transaction decides whether a paid call may be sent.
 
 **Tested with.** The atomicity, idempotency and fencing guarantees are tested on SQLite (threads and separate
 processes on one database file; SQLite's single writer serializes the transactions). `tests/postgres` runs the same
