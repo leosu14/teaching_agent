@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Header, Response
 from pydantic import Field
 
 from app.api.auth import Principal
-from app.api.authorization import authorize, owned_task, principal
+from app.api.authorization import Access, access, owned_task, principal
 from app.api.deps import container
 from app.schemas.artifact import ArtifactView
 from app.schemas.common import Schema
@@ -39,11 +39,11 @@ def accepted(response: Response, queued: tuple[Task, TaskJob]) -> TaskView:
 
 @router.post("", response_model=TaskView, status_code=202)
 def create_task(body: CreateTask, response: Response, p: Principal = Depends(principal),
-                c: Container = Depends(container),
+                a: Access = Depends(access), c: Container = Depends(container),
                 idempotency_key: str | None = Header(default=None, min_length=1, max_length=128)) -> TaskView:
     """Create a lesson task and queue it. With an `Idempotency-Key` header, a retried request returns the same task
     instead of creating another (409 when the key was already used for a different request)."""
-    authorize(p, body.learner_id)
+    a.check(body.learner_id)
     return accepted(response, c.task_service.enqueue_task(request=body.request, learner_id=body.learner_id,
                                                           user_id=p.user_id, idempotency_key=idempotency_key))
 

@@ -13,7 +13,17 @@ from fastapi.responses import JSONResponse
 
 from app.api.auth import AuthenticationFailed, Authenticator, authenticator_from_settings
 from app.api.authorization import Forbidden, ResourceNotFound, principal
-from app.api.routes import artifacts, assessment, curriculum, learners, learning_cycles, system, tasks, teaching
+from app.api.routes import (
+    artifacts,
+    assessment,
+    classes,
+    curriculum,
+    learners,
+    learning_cycles,
+    system,
+    tasks,
+    teaching,
+)
 from app.config.routing import ConfigError
 from app.config.settings import Settings
 from app.learner.frameworks import UnknownFramework
@@ -30,6 +40,7 @@ from app.services.assessment import (
     ItemConflict,
 )
 from app.services.budgets import BudgetExhausted
+from app.services.classes import ClassNotFound
 from app.services.container import Container, build_container
 from app.services.curriculum import InvalidGoal
 from app.services.tasks import JobConflict
@@ -83,10 +94,11 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
     app.add_exception_handler(Forbidden, _handler(403))
     app.add_exception_handler(ResourceNotFound, _handler(404, error="NotFound"))
     app.add_exception_handler(ArtifactContentNotFound, _handler(404, error="NotFound"))
+    app.add_exception_handler(ClassNotFound, _handler(404, error="NotFound"))
     app.add_exception_handler(ArtifactContentUnavailable, _handler(500, error="ContentUnavailable"))
 
     app.include_router(system.public)
-    for module in (system, tasks, artifacts, learners, curriculum, teaching, assessment, learning_cycles):
+    for module in (system, tasks, artifacts, learners, curriculum, teaching, assessment, learning_cycles, classes):
         app.include_router(module.router, dependencies=[Depends(principal)])
     return app
 

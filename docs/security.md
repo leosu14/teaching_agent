@@ -20,9 +20,9 @@ Every protected route receives a `Principal` (`app/api/auth.py`):
 | Field | Meaning |
 |---|---|
 | `user_id` | Who is calling. Recorded as the `user_id` of the tasks, curricula and learning cycles they start. Request bodies can no longer choose it (`user_id` in a body is accepted for compatibility and ignored). |
-| `learner_ids` | The learner scope: the learners whose data this caller may read and change. A learner has their own id; a teacher or guardian may have several. |
-| `roles` | Capabilities beyond the scope. `author`: may register assessment items (with their answer keys and rubrics) on lessons in scope. |
-| `tenant_id` | Carried for the future tenant model; not enforced yet (see Deferred). |
+| `learner_ids` | The learner scope: the learners whose data this caller may read and change. A learner has their own id; a guardian may have several. A teacher does not need their class's learners here: rosters give read access (see Teachers, classes and rosters). |
+| `roles` | Capabilities beyond the scope. `author`: may register assessment items (with their answer keys and rubrics) on lessons in scope. `teacher`: may create classes and read (never change) the data of the learners on their rosters. |
+| `tenant_id` | Scopes classes: a class belongs to its creator's tenant, and rosters and join codes are matched within the caller's tenant only (no tenant matches only classes without one). Other data is not tenant-scoped yet. |
 
 ## Authentication
 
@@ -53,7 +53,7 @@ learner scope, and forwards it on every request in these headers:
 |---|---|
 | `X-Auth-Subject` | The user id (e.g. the OIDC `sub`) |
 | `X-Auth-Learners` | Comma-separated learner ids the user may act for |
-| `X-Auth-Roles` | Comma-separated roles (`author`), or empty |
+| `X-Auth-Roles` | Comma-separated roles (`author`, `teacher`), or empty |
 | `X-Auth-Tenant` | Optional tenant id |
 | `X-Auth-Timestamp` | Unix seconds when the gateway signed the request |
 | `X-Auth-Signature` | Hex HMAC-SHA256 with the shared secret over `v1\nMETHOD\nPATH\nTIMESTAMP\nSUBJECT\nTENANT\nLEARNERS\nROLES` |
@@ -66,7 +66,9 @@ API, and signs the path as the API receives it (after any prefix the gateway rem
 How the gateway maps identity to learner scope is a deployment decision; typical mappings:
 
 - a learner signs in: `X-Auth-Learners` is their own learner id (e.g. a claim, or a lookup of `sub` -> learner id);
-- a guardian or teacher: the learner ids they are linked to in the organisation's roster;
+- a guardian: the learner ids they are linked to;
+- a teacher: the `teacher` role, usually with no learner ids: their classes' rosters, stored by the API, give them
+  read access to their learners (below);
 - an author (teacher creating assessments): the `author` role plus the learners whose lessons they write for.
 
 Replacing the gateway with direct token verification (e.g. a JWT authenticator) means adding one `Authenticator`
@@ -116,6 +118,51 @@ to the attempt's learner, a cycle's children belong to its learner) remain as a 
 A resource outside the principal's scope gets the same response as one that does not exist: `404` with
 `{"error": "NotFound", "detail": "not found"}`, so ids cannot be probed. A missing role is `403`. `/agents`, `/tools`
 and `/providers` describe the system, not anyone's data: any authenticated principal may read them.
+
+## Teachers, classes and rosters
+
+MVP item 4. A principal with the `teacher` role creates classes; a learner joins one with its join code; the teacher
+then **reads, never changes,** the data of every learner on their rosters, through the same learner routes and the
+same learner-safe views the learner gets (no answer keys, no internal state).
+
+| Route | Who | What |
+|---|---|---|
+| `POST /classes` | teacher | A new class of the caller (in the caller's tenant), with its join code. `201` |
+| `GET /classes` | teacher | The caller's classes and rosters |
+| `GET /classes/{class_id}` | the class's teacher | The class and its roster |
+| `POST /classes/{class_id}/join-code` | the class's teacher | A new join code; the old one stops working at once, the roster stays |
+| `DELETE /classes/{class_id}/learners/{learner_id}` | the class's teacher, or the learner (their own scope) | Ends the membership and the teacher's access through it. `204` |
+| `POST /learners/{learner_id}/classes` | the learner (their own scope) | Join with `{"join_code": ...}`: `201`, or `200` with the same enrollment when already in |
+| `GET /learners/{learner_id}/classes` | the learner (their own scope) | The classes they are in: class id and name, not the roster or the teacher |
+
+The rule (`Access.check` in `app/api/authorization.py`), for the learner that owns a resource:
+
+1. In the principal's own scope (`X-Auth-Learners`): read and change, as before.
+2. Otherwise, when the principal has the `teacher` role and the learner is on the roster of a class whose
+   `teacher_id` is the principal's user id and whose tenant is the principal's: a **read** (`GET` or `HEAD`) is
+   allowed; anything else is `403 Forbidden`. The rule is by HTTP method, so a new non-GET route is closed to
+   teachers by default. Inline checks of ids in request bodies (`POST /tasks`, attempts, `POST /assessment-items`)
+   use the same rule, so they are changes too; the `author` role does not widen it.
+3. Otherwise the uniform `404`. A class of another teacher or tenant, a wrong or retired join code, and a learner
+   who left all get the same `404` as something that does not exist.
+
+The rosters are looked up only for a learner outside the principal's own scope and only for a teacher, on every
+request, so removing a learner, a learner leaving, or the gateway dropping the `teacher` role ends access at once.
+A teacher's `403` discloses nothing, because they can already read the resource.
+
+**Consent.** A learner joins with the code; a teacher cannot add a learner. That is why the join route is a change
+in the learner's own scope and not a teacher route.
+
+**Join codes** are 16 URL-safe characters (96 random bits from `secrets`), shown only in the `POST /classes` and
+rotation responses, and stored only as a SHA-256 hash (`classes.join_code_hash`, unique), so neither the database
+nor `GET /classes` reveals a usable code. A join takes the class row by its code hash under a row lock and inserts
+the membership in the same transaction, so a join cannot land after the rotation that retired its code; the roster's
+primary key makes a join idempotent under races (`tests/postgres/test_classes_postgres.py`).
+
+**Residual points.** GET routes that reconcile state (`GET /learning-cycles/{id}`, next action, the teaching
+session view: PR17 M1) do so for a teacher's read too; they never drive a child or call a model. Join codes are
+bearer secrets: anyone with a learner's credentials and the code can join that learner, and a leaked code should
+be rotated. There is no rate limit on joins at the API (gateway limits apply).
 
 ## Learner-facing responses
 

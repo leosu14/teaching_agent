@@ -346,6 +346,9 @@ ALTER TABLE learners ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1
 ALTER TABLE curricula ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
 ```
 
+New tables, such as the `classes` and `class_members` tables of MVP item 4, are created on startup on both SQLite
+and PostgreSQL and need no manual step.
+
 ## Known limitations
 
 - Image search has no real adapter yet: searched images come from the local catalog, so production plans use
