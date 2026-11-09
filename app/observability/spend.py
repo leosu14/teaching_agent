@@ -74,7 +74,9 @@ class SpendStore(Protocol):
 
     def expire_abandoned(self, now: datetime) -> list[str]:
         """Settle as `unknown` (charging their estimate) the reserved entries whose `reserved_until` has passed: their
-        process died or could not record the outcome. Returns their ids."""
+        process died or could not record the outcome. Returns the ids it settled. Best-effort: an entry that cannot be
+        settled is left reserved for the next sweep, and the others are still settled. Callers must not let a failing
+        sweep stop other work (`SpendAccount.reserve` logs it and reserves anyway)."""
 
     def entries(self, *, task_id: str | None = None, session_id: str | None = None,
                 attempt_ref: str | None = None) -> list[SpendEntry]: ...
@@ -202,7 +204,7 @@ class SpendAccount:
         scopes = self.scopes_at(now)
         charges = [Charge(scope_key=s.key, metric=m, amount=a, check=check_amount(m, a), limit=limit_for(s.budget, m))
                    for s in scopes for m, a in amounts.items()]
-        self.swept = self.store.expire_abandoned(now)
+        self.swept = self._sweep(now)
         reservation = SpendReservation(
             entry_id=entry_id, operation_id=operation_id, attempt=attempt, idempotency_key=idempotency_key,
             capability=capability.value, operation=operation, provider=provider, model=model, task_id=self.task_id,
@@ -222,6 +224,17 @@ class SpendAccount:
                             "request", scope=scope_kind(c.scope_key)) from None
         return Reservation(entry_id=entry_id, capability=capability, operation=operation, amounts=amounts,
                            estimate=estimate, scopes=scopes)
+
+    def _sweep(self, now: datetime) -> list[str]:
+        """Charge abandoned reservations before this one, best-effort: the sweep only tidies up other attempts, so a
+        storage error in it is logged and the new reservation goes ahead (the next reservation sweeps again). Only
+        the reservation's own transaction decides whether the call may be sent."""
+        try:
+            return self.store.expire_abandoned(now)
+        except Exception:  # noqa: BLE001 - a failing sweep must not block an unrelated paid call (F7)
+            logger.warning("the abandoned-reservation sweep failed; reserving anyway (the next reservation sweeps "
+                           "again)", exc_info=True)
+            return []
 
     def settle(self, reservation: Reservation, record: ProviderRequestRecord | None,
                state: SpendState) -> SettleResult | None:
