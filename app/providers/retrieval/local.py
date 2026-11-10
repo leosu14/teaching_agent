@@ -18,8 +18,12 @@ def tokenize(text: str) -> list[str]:
 class LocalKnowledgeBase(Retriever):
     name = "local"
 
-    def __init__(self, path: Path, k1: float = 1.5, b: float = 0.75) -> None:
-        self._docs = json.loads(path.read_text(encoding="utf-8"))
+    def __init__(self, path: Path | None = None, k1: float = 1.5, b: float = 0.75, *,
+                 documents: list[dict] | None = None) -> None:
+        """Index the documents of a knowledge-base JSON file, or `documents` already loaded (compiled courses)."""
+        if (path is None) == (documents is None):
+            raise ValueError("give a knowledge-base path or documents, not both")
+        self._docs = list(documents) if documents is not None else json.loads(path.read_text(encoding="utf-8"))
         self._tokens = [tokenize(f"{d['title']} {d['text']}") for d in self._docs]
         self._avg_len = sum(map(len, self._tokens)) / max(1, len(self._tokens))
         df: Counter[str] = Counter()

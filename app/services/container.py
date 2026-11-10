@@ -29,6 +29,7 @@ from app.artifacts.service import ArtifactService
 from app.config.providers import ProviderSettings, apply_llm_overrides
 from app.config.routing import ConfigError, RoutingConfig, load_routing
 from app.config.settings import Settings
+from app.content.course import CourseError, load_courses
 from app.curriculum.engine import CurriculumEngine
 from app.curriculum.tracker import CurriculumTracker
 from app.learner.frameworks import FrameworkRegistry, default_frameworks
@@ -427,6 +428,12 @@ def build_container(
     """`clock` judges lease expiry (task leases and the learning cycle's drive lease); tests move it."""
     settings = settings or Settings()
     settings.validate_runtime()
+    knowledge_documents = None
+    if retriever is None and settings.course_paths():
+        try:  # an invalid course stops startup, with every problem of every course
+            knowledge_documents = load_courses(settings.course_paths(), default_frameworks()).documents
+        except CourseError as exc:
+            raise ConfigError(f"TA_COURSES: {exc}") from None
 
     sessions = create_db(settings.resolved_database_url)
     task_repo = SqlTaskRepository(sessions, clock)
@@ -457,7 +464,9 @@ def build_container(
                                 FilesystemObjectStore(settings.resolved_object_store_dir))
     curriculum = CurriculumEngine(SqlCurriculumRepository(sessions, clock), settings.curriculum_config())
 
-    retriever = retriever or LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json")
+    if retriever is None:
+        retriever = (LocalKnowledgeBase(documents=knowledge_documents) if knowledge_documents is not None
+                     else LocalKnowledgeBase(settings.corpus_dir / "knowledge_base.json"))
     search = providers.search
     image_search = providers.image_search
     image_generation = providers.image_generation

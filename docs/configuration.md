@@ -23,6 +23,7 @@ They are validated when the container is built; errors say what to fix.
 | `TA_RETRIEVAL_PROVIDER` | `local` | Knowledge-base retrieval |
 | `TA_VIDEO_COMPOSER` | `ffmpeg` | `ffmpeg` composes a real MP4 (needs `ffmpeg` and `ffprobe`); `mock` writes a manifest-only file for tests |
 | `TA_CORPUS_DIR` | `fixtures/demo` | Corpus for the mock search, mock image search (`image_catalog.json`) and local knowledge base |
+| `TA_COURSES` | unset | Authored courses that form the knowledge base instead of `TA_CORPUS_DIR/knowledge_base.json`: comma-separated bundled names (`spanish-a1-b1`) or course files; validated at startup (see [courses](../courses/README.md)) |
 | `TA_MAX_REVISIONS` | `2` | Revision budget of the review loop |
 | `TA_REVISION_EXHAUSTED_POLICY` | `fail` | `fail` or `accept_with_warnings` when the budget is used |
 | `TA_DIAGNOSTIC_MAX_ROUNDS` | `2` | Adaptive diagnostic question rounds |

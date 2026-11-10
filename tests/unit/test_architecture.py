@@ -19,6 +19,8 @@ ALLOWED: dict[str, set[str]] = {
     "pedagogy": FOUNDATION | {"pedagogy"},
     # The curriculum engine reads the learner model and the concept graph; never providers, tools or storage.
     "curriculum": FOUNDATION | {"curriculum", "pedagogy", "learner"},
+    # Authored courses: parsed, validated against the level frameworks and the concept graph, compiled to documents.
+    "content": FOUNDATION | {"content", "pedagogy", "learner"},
     "artifacts": FOUNDATION | {"artifacts"},
     # The interactive-teaching engine is pure: session state, policy, grading and transitions over schemas only.
     "teaching": FOUNDATION | {"teaching", "assessment"},
@@ -29,7 +31,7 @@ ALLOWED: dict[str, set[str]] = {
     "agents": FOUNDATION | {"agents", "tools", "providers", "assessment"},
     "runtime": FOUNDATION | {"runtime", "agents", "tools", "providers"},
     "services": FOUNDATION | {"services", "runtime", "agents", "tools", "providers", "learner", "pedagogy",
-                              "curriculum", "artifacts", "storage", "teaching", "assessment"},
+                              "curriculum", "artifacts", "storage", "teaching", "assessment", "content"},
     "api": FOUNDATION | {"api", "services"},
 }
 # Finer rules on top of the layer order.

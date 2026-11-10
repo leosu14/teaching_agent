@@ -1,0 +1,1908 @@
+{
+ "schema_version": 1,
+ "course_id": "spanish-a1-b1",
+ "title": "Spanish A1 to B1",
+ "subject": "spanish",
+ "framework": "cefr",
+ "levels": [
+  "A1",
+  "A2",
+  "B1"
+ ],
+ "language": "en",
+ "publisher": "Course knowledge base",
+ "description": "A pilot Spanish course for English speakers, from first words (A1) to telling stories and giving opinions (B1). Each unit is one lesson topic; each concept has its explanation, examples, a practice item and diagnostic probes.",
+ "units": [
+  {
+   "unit_id": "a1-greetings",
+   "title": "Greetings and introductions",
+   "topic": "greetings and introductions",
+   "level": "A1",
+   "summary": "Say hello and goodbye, use subject pronouns, and introduce yourself with ser.",
+   "concepts": [
+    {
+     "concept_id": "es.a1.greetings",
+     "name": "Greetings and goodbyes",
+     "prerequisites": [],
+     "description": "Everyday greetings and farewells for different times of day.",
+     "explanation": "Spanish greetings change with the time of day: buenos días until lunch, buenas tardes in the afternoon and buenas noches in the evening and at night. Hola works at any time; adiós and hasta luego say goodbye.",
+     "examples": [
+      "¡Hola! Buenos días, señor García.",
+      "Adiós, hasta luego."
+     ],
+     "practice": {
+      "prompt": "Complete: ___ noches, mamá. (good)",
+      "answer": "Buenas"
+     },
+     "probes": [
+      {
+       "prompt": "How do you say 'good morning' in Spanish?",
+       "answer": "buenos días",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Which greeting do you use late in the evening: buenas noches or buenos días?",
+       "answer": "buenas noches",
+       "accepted": [],
+       "difficulty": 0.25
+      },
+      {
+       "prompt": "How do you say 'see you later' in Spanish?",
+       "answer": "hasta luego",
+       "accepted": [],
+       "difficulty": 0.65
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.subject_pronouns",
+     "name": "Subject pronouns",
+     "prerequisites": [],
+     "description": "The pronouns for I, you, he, she, we and they, formal and informal.",
+     "explanation": "Subject pronouns are yo, tú, él, ella, usted, nosotros, nosotras, vosotros, vosotras, ellos, ellas and ustedes. Tú is informal you and usted is formal you; ellas is a group of women. Spanish often drops the pronoun because the verb ending shows the person.",
+     "examples": [
+      "Yo soy Ana y ella es Marta.",
+      "¿Usted es el profesor?"
+     ],
+     "practice": {
+      "prompt": "Which pronoun replaces 'Ana y yo'?",
+      "answer": "nosotras"
+     },
+     "probes": [
+      {
+       "prompt": "What is the Spanish pronoun for 'we' (a mixed group)?",
+       "answer": "nosotros",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Which pronoun is the formal singular 'you': usted or tú?",
+       "answer": "usted",
+       "accepted": [],
+       "difficulty": 0.25
+      },
+      {
+       "prompt": "What is the Spanish pronoun for 'they' (a group of women)?",
+       "answer": "ellas",
+       "accepted": [],
+       "difficulty": 0.6
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.ser_identity",
+     "name": "Ser for name, origin and profession",
+     "prerequisites": [
+      "es.a1.subject_pronouns"
+     ],
+     "description": "The present tense of ser to say who you are, where you are from and what you do.",
+     "explanation": "The verb ser is irregular in the present: soy, eres, es, somos, sois, son. Use ser for identity, nationality, origin with de, and profession, without an article before the profession.",
+     "examples": [
+      "Soy Carlos. Soy de México.",
+      "Ellas son estudiantes."
+     ],
+     "practice": {
+      "prompt": "Complete: Nosotros ___ de Chile. (ser)",
+      "answer": "somos"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Yo ___ de Colombia. (ser)",
+       "answer": "soy",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Ellos ___ médicos. (ser)",
+       "answer": "son",
+       "accepted": [],
+       "difficulty": 0.6
+      },
+      {
+       "prompt": "Which form of ser goes with tú: eres or es?",
+       "answer": "eres",
+       "accepted": [],
+       "difficulty": 0.25
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a1-nouns",
+   "title": "Nouns and articles",
+   "topic": "nouns and articles",
+   "level": "A1",
+   "summary": "Gender and number of nouns, definite and indefinite articles, and hay.",
+   "concepts": [
+    {
+     "concept_id": "es.a1.gender_articles",
+     "name": "Noun gender and definite articles",
+     "prerequisites": [],
+     "description": "Masculine and feminine nouns with el, la, los and las.",
+     "explanation": "Every Spanish noun is masculine or feminine. Most nouns ending in -o are masculine and most ending in -a are feminine. The definite article agrees with the noun: el and los for masculine, la and las for feminine.",
+     "examples": [
+      "el libro, los libros",
+      "la mesa, las mesas"
+     ],
+     "practice": {
+      "prompt": "Write the definite article: ___ ventana",
+      "answer": "la"
+     },
+     "probes": [
+      {
+       "prompt": "Write the definite article: ___ casa",
+       "answer": "la",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Write the definite article: ___ cuadernos",
+       "answer": "los",
+       "accepted": [],
+       "difficulty": 0.6
+      },
+      {
+       "prompt": "Is 'el libro' masculine or feminine?",
+       "answer": "masculine",
+       "accepted": [
+        "masculino"
+       ],
+       "difficulty": 0.25
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.indefinite_plural",
+     "name": "Indefinite articles and plurals",
+     "prerequisites": [
+      "es.a1.gender_articles"
+     ],
+     "description": "Un, una, unos and unas, and making nouns plural.",
+     "explanation": "The indefinite articles are un and una in the singular and unos and unas in the plural. Nouns ending in a vowel add -s; nouns ending in a consonant add -es, and a final -z becomes -ces.",
+     "examples": [
+      "un perro, unos perros",
+      "una flor, unas flores",
+      "un lápiz, unos lápices"
+     ],
+     "practice": {
+      "prompt": "Make plural: una ciudad",
+      "answer": "unas ciudades"
+     },
+     "probes": [
+      {
+       "prompt": "Write the indefinite article: ___ mesa",
+       "answer": "una",
+       "accepted": [],
+       "difficulty": 0.35
+      },
+      {
+       "prompt": "Make plural: el profesor",
+       "answer": "los profesores",
+       "accepted": [],
+       "difficulty": 0.6
+      },
+      {
+       "prompt": "Make plural: un lápiz",
+       "answer": "unos lápices",
+       "accepted": [],
+       "difficulty": 0.75
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.hay",
+     "name": "Hay for there is and there are",
+     "prerequisites": [
+      "es.a1.indefinite_plural"
+     ],
+     "description": "Hay to say what exists somewhere, with singular and plural nouns.",
+     "explanation": "Hay means both there is and there are and never changes form. It is used with indefinite articles, numbers or no article, not with el or la.",
+     "examples": [
+      "Hay un banco en la plaza.",
+      "Hay dos sillas en la cocina."
+     ],
+     "practice": {
+      "prompt": "Translate: 'There are three books.'",
+      "answer": "hay tres libros"
+     },
+     "probes": [
+      {
+       "prompt": "Translate: 'There is a bank.'",
+       "answer": "hay un banco",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: ___ dos sillas en la cocina. (there are)",
+       "answer": "hay",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Translate: 'Is there a pharmacy?'",
+       "answer": "¿hay una farmacia?",
+       "accepted": [],
+       "difficulty": 0.65
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a1-present",
+   "title": "The present tense of regular verbs",
+   "topic": "present tense regular verbs",
+   "level": "A1",
+   "summary": "Regular -ar, -er and -ir verbs in the present, and asking questions.",
+   "concepts": [
+    {
+     "concept_id": "es.a1.present_ar",
+     "name": "Regular -ar verbs in the present",
+     "prerequisites": [
+      "es.a1.subject_pronouns"
+     ],
+     "description": "Present tense endings of regular -ar verbs such as hablar.",
+     "explanation": "Regular -ar verbs drop -ar and add -o, -as, -a, -amos, -áis, -an. Hablar becomes hablo, hablas, habla, hablamos, habláis, hablan.",
+     "examples": [
+      "Yo hablo español.",
+      "Nosotros trabajamos en una oficina."
+     ],
+     "practice": {
+      "prompt": "Complete: Ellos ___ música. (escuchar)",
+      "answer": "escuchan"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Yo ___ inglés. (hablar)",
+       "answer": "hablo",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: Nosotros ___ en un hospital. (trabajar)",
+       "answer": "trabajamos",
+       "accepted": [],
+       "difficulty": 0.6
+      },
+      {
+       "prompt": "Complete: Tú ___ mucho. (estudiar)",
+       "answer": "estudias",
+       "accepted": [],
+       "difficulty": 0.5
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.present_er_ir",
+     "name": "Regular -er and -ir verbs in the present",
+     "prerequisites": [
+      "es.a1.present_ar"
+     ],
+     "description": "Present tense endings of regular -er and -ir verbs such as comer and vivir.",
+     "explanation": "Regular -er verbs add -o, -es, -e, -emos, -éis, -en; regular -ir verbs add -o, -es, -e, -imos, -ís, -en. Comer becomes como, comes, come; vivir becomes vivo, vives, vive, vivimos.",
+     "examples": [
+      "Ella vive en Madrid.",
+      "Nosotros comemos a las dos."
+     ],
+     "practice": {
+      "prompt": "Complete: Tú ___ el periódico. (leer)",
+      "answer": "lees"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Ella ___ en Sevilla. (vivir)",
+       "answer": "vive",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: Nosotros ___ pescado. (comer)",
+       "answer": "comemos",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Vosotros ___ cartas. (escribir)",
+       "answer": "escribís",
+       "accepted": [],
+       "difficulty": 0.75
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.questions",
+     "name": "Question words",
+     "prerequisites": [
+      "es.a1.present_ar"
+     ],
+     "description": "Qué, quién, dónde, cuándo, cómo, cuánto and por qué.",
+     "explanation": "Spanish question words carry a written accent: qué, quién, dónde, cuándo, cómo, cuánto and por qué. Questions open with ¿ and close with ?, and the verb usually comes before the subject.",
+     "examples": [
+      "¿Dónde vives?",
+      "¿Cómo te llamas?"
+     ],
+     "practice": {
+      "prompt": "Complete: ¿___ es tu cumpleaños? (when)",
+      "answer": "Cuándo"
+     },
+     "probes": [
+      {
+       "prompt": "Which question word means 'where'?",
+       "answer": "dónde",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: ¿___ te llamas? (how)",
+       "answer": "cómo",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Which question word means 'why'?",
+       "answer": "por qué",
+       "accepted": [],
+       "difficulty": 0.6
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a1-family",
+   "title": "Family and possession",
+   "topic": "family and possession",
+   "level": "A1",
+   "summary": "Talk about your family, possession and age with tener and possessive adjectives.",
+   "concepts": [
+    {
+     "concept_id": "es.a1.family",
+     "name": "Family vocabulary",
+     "prerequisites": [],
+     "description": "Words for close family members.",
+     "explanation": "Family words have a masculine and a feminine form: el padre and la madre, el hermano and la hermana, el abuelo and la abuela, el hijo and la hija, el tío and la tía, el primo and la prima. The masculine plural can mean a mixed group: los padres are the parents.",
+     "examples": [
+      "Mi abuela se llama Carmen.",
+      "Tengo dos primos."
+     ],
+     "practice": {
+      "prompt": "How do you say 'the uncle' in Spanish?",
+      "answer": "el tío"
+     },
+     "probes": [
+      {
+       "prompt": "How do you say 'the grandmother' in Spanish?",
+       "answer": "la abuela",
+       "accepted": [
+        "abuela"
+       ],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "What does 'el hermano' mean in English?",
+       "answer": "the brother",
+       "accepted": [
+        "brother"
+       ],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "How do you say 'the cousin' (a woman) in Spanish?",
+       "answer": "la prima",
+       "accepted": [
+        "prima"
+       ],
+       "difficulty": 0.6
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.tener_age",
+     "name": "Tener for possession and age",
+     "prerequisites": [
+      "es.a1.ser_identity",
+      "es.a1.family"
+     ],
+     "description": "The present tense of tener, and tener ... años for age.",
+     "explanation": "Tener is irregular: tengo, tienes, tiene, tenemos, tenéis, tienen. It expresses possession and, with años, age: Spanish says I have twenty years, not I am twenty.",
+     "examples": [
+      "Tengo dos hermanos.",
+      "Mi padre tiene cincuenta años."
+     ],
+     "practice": {
+      "prompt": "Complete: Nosotros ___ un gato. (tener)",
+      "answer": "tenemos"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Yo ___ tres primos. (tener)",
+       "answer": "tengo",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: ¿Cuántos años ___ tú? (tener)",
+       "answer": "tienes",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Translate: 'She is ten years old.'",
+       "answer": "tiene diez años",
+       "accepted": [
+        "ella tiene diez años"
+       ],
+       "difficulty": 0.7
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.possessives",
+     "name": "Possessive adjectives",
+     "prerequisites": [
+      "es.a1.family",
+      "es.a1.gender_articles"
+     ],
+     "description": "Mi, tu, su, nuestro and vuestro before a noun.",
+     "explanation": "Possessive adjectives come before the noun and agree with the thing owned: mi and mis, tu and tus, su and sus, nuestro, nuestra, nuestros and nuestras, vuestro and vuestra. Su can mean his, her, its, their or your (usted).",
+     "examples": [
+      "Mis hermanos son altos.",
+      "Nuestra casa es pequeña."
+     ],
+     "practice": {
+      "prompt": "Complete: ___ padres son de Perú. (her)",
+      "answer": "Sus"
+     },
+     "probes": [
+      {
+       "prompt": "Translate: 'my mother'",
+       "answer": "mi madre",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: ___ hermanos viven en Lima. (my)",
+       "answer": "mis",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: ___ casa es grande. (our)",
+       "answer": "nuestra",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a1-describing",
+   "title": "Describing people and places",
+   "topic": "describing people and places",
+   "level": "A1",
+   "summary": "Describe with adjectives that agree, and say where things are and how people feel with estar.",
+   "concepts": [
+    {
+     "concept_id": "es.a1.adjective_agreement",
+     "name": "Adjective agreement",
+     "prerequisites": [
+      "es.a1.gender_articles"
+     ],
+     "description": "Adjectives that agree in gender and number with the noun, usually after it.",
+     "explanation": "Adjectives agree with the noun in gender and number and usually follow it. Adjectives in -o have four forms (alto, alta, altos, altas); adjectives in -e or a consonant have two (grande, grandes; azul, azules).",
+     "examples": [
+      "La casa es blanca.",
+      "Los coches rojos son rápidos."
+     ],
+     "practice": {
+      "prompt": "Complete: Las chicas son ___. (simpático)",
+      "answer": "simpáticas"
+     },
+     "probes": [
+      {
+       "prompt": "Which is correct: 'el perro pequeño' or 'el perro pequeña'?",
+       "answer": "el perro pequeño",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: La puerta es ___. (blanco)",
+       "answer": "blanca",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Los coches son ___. (rojo)",
+       "answer": "rojos",
+       "accepted": [],
+       "difficulty": 0.6
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.estar_location_states",
+     "name": "Estar for location and states",
+     "prerequisites": [
+      "es.a1.subject_pronouns"
+     ],
+     "description": "The present tense of estar for where something is and how someone feels.",
+     "explanation": "Estar is irregular: estoy, estás, está, estamos, estáis, están. Use it for the location of people and things and for temporary states such as cansado, contento or enfermo.",
+     "examples": [
+      "Madrid está en España.",
+      "Estoy cansado hoy."
+     ],
+     "practice": {
+      "prompt": "Complete: ¿Dónde ___ mis llaves? (estar)",
+      "answer": "están"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Yo ___ bien, gracias. (estar)",
+       "answer": "estoy",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: Lima ___ en Perú. (estar)",
+       "answer": "está",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Nosotros ___ cansados. (estar)",
+       "answer": "estamos",
+       "accepted": [],
+       "difficulty": 0.6
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a1-numbers-time",
+   "title": "Numbers, dates and time",
+   "topic": "numbers dates and time",
+   "level": "A1",
+   "summary": "Count to one hundred, name days and months, and tell the time.",
+   "concepts": [
+    {
+     "concept_id": "es.a1.numbers",
+     "name": "Numbers from 0 to 100",
+     "prerequisites": [],
+     "description": "Cardinal numbers up to one hundred.",
+     "explanation": "Numbers from 0 to 15 are single words (cero, uno, dos ... quince), 16 to 29 are written as one word (dieciséis, veintiuno), and from 31 tens and units join with y: treinta y uno, cuarenta y dos. One hundred is cien.",
+     "examples": [
+      "Tengo veinte euros.",
+      "Hay treinta y cinco alumnos."
+     ],
+     "practice": {
+      "prompt": "Write in Spanish: 23",
+      "answer": "veintitrés"
+     },
+     "probes": [
+      {
+       "prompt": "Write in Spanish: 7",
+       "answer": "siete",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Write in Spanish: 15",
+       "answer": "quince",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Write in Spanish: 42",
+       "answer": "cuarenta y dos",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.days_months",
+     "name": "Days of the week and months",
+     "prerequisites": [],
+     "description": "The names of the days and months, written in lowercase.",
+     "explanation": "Days and months are written in lowercase: lunes, martes, miércoles, jueves, viernes, sábado, domingo; enero, febrero, marzo ... diciembre. Use el with a day: el lunes means on Monday.",
+     "examples": [
+      "El lunes tengo clase.",
+      "Mi cumpleaños es en agosto."
+     ],
+     "practice": {
+      "prompt": "Which day comes after jueves?",
+      "answer": "viernes"
+     },
+     "probes": [
+      {
+       "prompt": "What does 'diciembre' mean in English?",
+       "answer": "December",
+       "accepted": [],
+       "difficulty": 0.25
+      },
+      {
+       "prompt": "Which day comes after lunes?",
+       "answer": "martes",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "How do you say 'August' in Spanish?",
+       "answer": "agosto",
+       "accepted": [],
+       "difficulty": 0.55
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.telling_time",
+     "name": "Telling the time",
+     "prerequisites": [
+      "es.a1.numbers",
+      "es.a1.ser_identity"
+     ],
+     "description": "Es la una, son las dos, y cuarto, y media, menos cuarto.",
+     "explanation": "To tell the time use es la una for one o'clock and son las with every other hour. Add y cuarto, y media or menos cuarto, and a la una or a las tres for at what time.",
+     "examples": [
+      "Son las tres y media.",
+      "La clase es a las nueve."
+     ],
+     "practice": {
+      "prompt": "Translate: 'It is a quarter past two.'",
+      "answer": "son las dos y cuarto"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: ___ las dos. (it is)",
+       "answer": "son",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Translate: 'It is three o'clock.'",
+       "answer": "son las tres",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Translate: 'It is one o'clock.'",
+       "answer": "es la una",
+       "accepted": [],
+       "difficulty": 0.65
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a1-likes-plans",
+   "title": "Likes and plans",
+   "topic": "likes and plans",
+   "level": "A1",
+   "summary": "Say what you like with gustar and talk about plans with ir a plus an infinitive.",
+   "concepts": [
+    {
+     "concept_id": "es.a1.gustar",
+     "name": "Gustar with nouns and infinitives",
+     "prerequisites": [
+      "es.a1.subject_pronouns"
+     ],
+     "description": "Me gusta and me gustan to say what you like.",
+     "explanation": "Gustar agrees with the thing that is liked, not the person: me gusta with a singular noun or an infinitive, me gustan with a plural noun. The person is shown by me, te, le, nos, os or les.",
+     "examples": [
+      "Me gusta el café.",
+      "Me gustan los perros.",
+      "Nos gusta bailar."
+     ],
+     "practice": {
+      "prompt": "Complete: ¿Te ___ las películas de terror? (gustar)",
+      "answer": "gustan"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Me ___ bailar. (gustar)",
+       "answer": "gusta",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: Me ___ los gatos. (gustar)",
+       "answer": "gustan",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Translate: 'We like music.'",
+       "answer": "nos gusta la música",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a1.ir_a_infinitive",
+     "name": "Ir a plus infinitive for plans",
+     "prerequisites": [
+      "es.a1.present_ar"
+     ],
+     "description": "The near future with the present of ir, a and an infinitive.",
+     "explanation": "To talk about plans use the present of ir (voy, vas, va, vamos, vais, van), then a, then an infinitive. Voy a estudiar means I am going to study.",
+     "examples": [
+      "Mañana voy a estudiar.",
+      "Ellos van a comer en casa."
+     ],
+     "practice": {
+      "prompt": "Complete: ¿Qué ___ a hacer tú el sábado? (ir)",
+      "answer": "vas"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Nosotros vamos ___ bailar.",
+       "answer": "a",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: Mañana yo ___ a trabajar. (ir)",
+       "answer": "voy",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Translate: 'They are going to eat.'",
+       "answer": "van a comer",
+       "accepted": [
+        "ellos van a comer"
+       ],
+       "difficulty": 0.7
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a2-routine",
+   "title": "Daily routine",
+   "topic": "daily routine",
+   "level": "A2",
+   "summary": "Describe a typical day with reflexive and stem-changing verbs and frequency words.",
+   "concepts": [
+    {
+     "concept_id": "es.a2.reflexive_verbs",
+     "name": "Reflexive verbs",
+     "prerequisites": [
+      "es.a1.present_ar"
+     ],
+     "description": "Verbs like levantarse and ducharse with me, te, se, nos, os, se.",
+     "explanation": "Reflexive verbs carry a pronoun that matches the subject: me levanto, te levantas, se levanta, nos levantamos, os levantáis, se levantan. The pronoun comes before a conjugated verb.",
+     "examples": [
+      "Me levanto a las siete.",
+      "Ella se ducha por la noche."
+     ],
+     "practice": {
+      "prompt": "Complete: Nosotros ___ temprano. (acostarse)",
+      "answer": "nos acostamos"
+     },
+     "probes": [
+      {
+       "prompt": "Which pronoun goes with nosotros: nos or se?",
+       "answer": "nos",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: Yo ___ a las siete. (levantarse)",
+       "answer": "me levanto",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Ella ___ por la noche. (ducharse)",
+       "answer": "se ducha",
+       "accepted": [],
+       "difficulty": 0.6
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a2.stem_changing",
+     "name": "Stem-changing verbs in the present",
+     "prerequisites": [
+      "es.a1.present_er_ir"
+     ],
+     "description": "Verbs whose stem vowel changes: e to ie, o to ue, e to i.",
+     "explanation": "In stem-changing verbs the stressed vowel changes in every form except nosotros and vosotros: querer becomes quiero, poder becomes puedo, pedir becomes pido. Nosotros keeps the original vowel: queremos, podemos, pedimos.",
+     "examples": [
+      "Quiero un café.",
+      "¿Puedes venir mañana?"
+     ],
+     "practice": {
+      "prompt": "Complete: Ellos ___ ocho horas. (dormir)",
+      "answer": "duermen"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Yo ___ un café. (querer)",
+       "answer": "quiero",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: ¿___ tú venir mañana? (poder)",
+       "answer": "puedes",
+       "accepted": [],
+       "difficulty": 0.55
+      },
+      {
+       "prompt": "Complete: Nosotros ___ la cena. (pedir)",
+       "answer": "pedimos",
+       "accepted": [],
+       "difficulty": 0.75
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a2.frequency",
+     "name": "Frequency expressions",
+     "prerequisites": [
+      "es.a1.present_ar"
+     ],
+     "description": "Siempre, a menudo, a veces, casi nunca, nunca and todos los días.",
+     "explanation": "Frequency expressions say how often something happens: siempre, todos los días, a menudo, a veces, casi nunca and nunca. Nunca can come before the verb, or after it with no: nunca como carne or no como carne nunca.",
+     "examples": [
+      "Siempre desayuno a las ocho.",
+      "A veces voy al gimnasio."
+     ],
+     "practice": {
+      "prompt": "How do you say 'often' in Spanish?",
+      "answer": "a menudo"
+     },
+     "probes": [
+      {
+       "prompt": "How do you say 'never' in Spanish?",
+       "answer": "nunca",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "How do you say 'sometimes' in Spanish?",
+       "answer": "a veces",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Translate: 'every day'",
+       "answer": "todos los días",
+       "accepted": [],
+       "difficulty": 0.6
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a2-ser-estar",
+   "title": "Ser and estar",
+   "topic": "ser and estar",
+   "level": "A2",
+   "summary": "Choose between ser and estar, and say what is happening now with estar and a gerund.",
+   "concepts": [
+    {
+     "concept_id": "es.a2.ser_estar_contrast",
+     "name": "Ser versus estar",
+     "prerequisites": [
+      "es.a1.ser_identity",
+      "es.a1.estar_location_states"
+     ],
+     "description": "When to use ser and when to use estar.",
+     "explanation": "Ser describes what something is: identity, profession, origin, characteristics, time and where an event takes place. Estar describes where something is and how it is right now. Some adjectives change meaning: es aburrido (boring) and está aburrido (bored).",
+     "examples": [
+      "Mi hermana es médica.",
+      "La sopa está fría.",
+      "La fiesta es en mi casa."
+     ],
+     "practice": {
+      "prompt": "Complete: Mi profesor ___ muy simpático. (ser/estar)",
+      "answer": "es"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Mi hermana ___ médica. (ser/estar)",
+       "answer": "es",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: Hoy la sopa ___ fría. (ser/estar)",
+       "answer": "está",
+       "accepted": [],
+       "difficulty": 0.55
+      },
+      {
+       "prompt": "Complete: El concierto ___ en el teatro. (ser/estar)",
+       "answer": "es",
+       "accepted": [],
+       "difficulty": 0.8
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a2.present_progressive",
+     "name": "Present progressive",
+     "prerequisites": [
+      "es.a1.estar_location_states",
+      "es.a1.present_er_ir"
+     ],
+     "description": "Estar plus a gerund for actions happening now.",
+     "explanation": "The present progressive is estar plus a gerund. Gerunds end in -ando for -ar verbs and -iendo for -er and -ir verbs; some are irregular, such as leyendo and durmiendo.",
+     "examples": [
+      "Estoy hablando por teléfono.",
+      "Los niños están durmiendo."
+     ],
+     "practice": {
+      "prompt": "Write the gerund of 'escribir'.",
+      "answer": "escribiendo"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Ahora yo ___ cocinando. (estar)",
+       "answer": "estoy",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Write the gerund of 'comer'.",
+       "answer": "comiendo",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Translate: 'She is reading.'",
+       "answer": "está leyendo",
+       "accepted": [
+        "ella está leyendo"
+       ],
+       "difficulty": 0.7
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a2-past-events",
+   "title": "Past events",
+   "topic": "past events",
+   "level": "A2",
+   "summary": "Tell what happened with the preterite of regular and common irregular verbs.",
+   "concepts": [
+    {
+     "concept_id": "es.a2.preterite_regular",
+     "name": "Regular preterite",
+     "prerequisites": [
+      "es.a1.present_er_ir"
+     ],
+     "description": "Preterite endings of regular -ar, -er and -ir verbs.",
+     "explanation": "The preterite tells completed actions. Regular -ar verbs take -é, -aste, -ó, -amos, -asteis, -aron; -er and -ir verbs take -í, -iste, -ió, -imos, -isteis, -ieron. The written accent matters: hablé is past, hable is not.",
+     "examples": [
+      "Ayer hablé con mi madre.",
+      "Ellos comieron en un restaurante."
+     ],
+     "practice": {
+      "prompt": "Complete: Anoche nosotros ___ en casa. (cenar)",
+      "answer": "cenamos"
+     },
+     "probes": [
+      {
+       "prompt": "Which form is past tense: 'come' or 'comió'?",
+       "answer": "comió",
+       "accepted": [],
+       "difficulty": 0.25
+      },
+      {
+       "prompt": "Complete: Ayer yo ___ con mi abuela. (hablar)",
+       "answer": "hablé",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Ellos ___ en un restaurante. (comer, preterite)",
+       "answer": "comieron",
+       "accepted": [],
+       "difficulty": 0.6
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a2.preterite_irregular",
+     "name": "Irregular preterite",
+     "prerequisites": [
+      "es.a2.preterite_regular"
+     ],
+     "description": "Fui, tuve, hice and estuve: the most frequent irregular preterites.",
+     "explanation": "Ser and ir share one irregular preterite: fui, fuiste, fue, fuimos, fuisteis, fueron. Tener, hacer and estar have irregular stems and no written accents: tuve, hice (hizo), estuve.",
+     "examples": [
+      "El verano pasado fui a México.",
+      "Ayer hice los deberes."
+     ],
+     "practice": {
+      "prompt": "Complete: Ayer nosotros ___ en la playa. (estar)",
+      "answer": "estuvimos"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Anoche yo ___ al cine. (ir)",
+       "answer": "fui",
+       "accepted": [],
+       "difficulty": 0.35
+      },
+      {
+       "prompt": "Complete: Ayer yo ___ la cena. (hacer)",
+       "answer": "hice",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Ella ___ un examen el lunes. (tener)",
+       "answer": "tuvo",
+       "accepted": [],
+       "difficulty": 0.75
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a2.past_time_markers",
+     "name": "Past time markers",
+     "prerequisites": [
+      "es.a2.preterite_regular"
+     ],
+     "description": "Ayer, anoche, la semana pasada, el año pasado and hace with time.",
+     "explanation": "Past time markers place a finished event: ayer, anoche, anteayer, la semana pasada, el mes pasado, el año pasado. Hace plus an amount of time means ago: hace dos días.",
+     "examples": [
+      "Anoche cené con amigos.",
+      "Hace tres años viví en Roma."
+     ],
+     "practice": {
+      "prompt": "Translate: 'last year'",
+      "answer": "el año pasado"
+     },
+     "probes": [
+      {
+       "prompt": "How do you say 'last night' in Spanish?",
+       "answer": "anoche",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Translate: 'last week'",
+       "answer": "la semana pasada",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Translate: 'two days ago'",
+       "answer": "hace dos días",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a2-childhood",
+   "title": "Childhood and comparisons",
+   "topic": "childhood and comparisons",
+   "level": "A2",
+   "summary": "Describe how things used to be with the imperfect, and compare people and things.",
+   "concepts": [
+    {
+     "concept_id": "es.a2.imperfect",
+     "name": "The imperfect tense",
+     "prerequisites": [
+      "es.a1.present_er_ir"
+     ],
+     "description": "The imperfect for habits and descriptions in the past.",
+     "explanation": "The imperfect describes how things were and what used to happen. Regular -ar verbs take -aba, -abas, -aba, -ábamos, -abais, -aban; -er and -ir verbs take -ía, -ías, -ía, -íamos, -íais, -ían. Only ser (era), ir (iba) and ver (veía) are irregular.",
+     "examples": [
+      "De niño vivía en el campo.",
+      "Íbamos a la playa cada verano."
+     ],
+     "practice": {
+      "prompt": "Complete: Mi abuelo ___ muy alto. (ser)",
+      "answer": "era"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: De pequeña, ella ___ al fútbol. (jugar)",
+       "answer": "jugaba",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: De niño, yo ___ en el campo. (vivir)",
+       "answer": "vivía",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Nosotros ___ al parque cada domingo. (ir)",
+       "answer": "íbamos",
+       "accepted": [],
+       "difficulty": 0.75
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a2.comparatives",
+     "name": "Comparatives and superlatives",
+     "prerequisites": [
+      "es.a1.adjective_agreement"
+     ],
+     "description": "Más que, menos que, tan como, mejor, peor and el más.",
+     "explanation": "Compare with más ... que, menos ... que and tan ... como. Bueno and malo have irregular comparatives, mejor and peor. The superlative is el, la, los or las plus más plus the adjective: la más alta.",
+     "examples": [
+      "Ana es más alta que Luis.",
+      "Este libro es tan interesante como ese."
+     ],
+     "practice": {
+      "prompt": "Complete: Mi hermano es ___ joven que yo. (less)",
+      "answer": "menos"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Ana es ___ alta que Luis. (more)",
+       "answer": "más",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: Este libro es ___ interesante como ese. (as)",
+       "answer": "tan",
+       "accepted": [],
+       "difficulty": 0.55
+      },
+      {
+       "prompt": "Translate: 'better than'",
+       "answer": "mejor que",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "a2-food-shopping",
+   "title": "Food and shopping",
+   "topic": "food and shopping",
+   "level": "A2",
+   "summary": "Order food, ask prices, and avoid repeating nouns with direct object pronouns.",
+   "concepts": [
+    {
+     "concept_id": "es.a2.direct_object_pronouns",
+     "name": "Direct object pronouns",
+     "prerequisites": [
+      "es.a1.gender_articles",
+      "es.a1.present_ar"
+     ],
+     "description": "Lo, la, los and las to replace a direct object.",
+     "explanation": "Direct object pronouns replace the thing or person that receives the action: lo, la, los, las (and me, te, nos, os). They agree with the noun they replace and go before a conjugated verb.",
+     "examples": [
+      "¿El pan? Lo compro yo.",
+      "Veo a María. La veo."
+     ],
+     "practice": {
+      "prompt": "Replace the noun: Bebo la leche. → ___ bebo.",
+      "answer": "la"
+     },
+     "probes": [
+      {
+       "prompt": "Replace the noun: Veo a María. → ___ veo.",
+       "answer": "la",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Replace the noun: Compro el pan. → ___ compro.",
+       "answer": "lo",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Replace the noun: Tengo las llaves. → ___ tengo.",
+       "answer": "las",
+       "accepted": [],
+       "difficulty": 0.6
+      }
+     ]
+    },
+    {
+     "concept_id": "es.a2.ordering_food",
+     "name": "Ordering food and asking prices",
+     "prerequisites": [
+      "es.a1.numbers",
+      "es.a2.stem_changing"
+     ],
+     "description": "Restaurant and shop phrases: quisiera, para mí, la cuenta, ¿cuánto cuesta?",
+     "explanation": "To order politely say quisiera or para mí plus the dish; ask ¿cuánto cuesta? for one thing and ¿cuánto cuestan? for several; ask for la cuenta at the end of a meal.",
+     "examples": [
+      "Quisiera un café con leche, por favor.",
+      "¿Cuánto cuestan las manzanas?"
+     ],
+     "practice": {
+      "prompt": "How do you ask how much several things cost?",
+      "answer": "¿cuánto cuestan?"
+     },
+     "probes": [
+      {
+       "prompt": "How do you ask for 'the bill' in a restaurant?",
+       "answer": "la cuenta",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "How do you ask 'How much does it cost?' in Spanish?",
+       "answer": "¿cuánto cuesta?",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete politely: ___ un café, por favor. (I would like)",
+       "answer": "quisiera",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "b1-stories",
+   "title": "Telling stories in the past",
+   "topic": "telling stories in the past",
+   "level": "B1",
+   "summary": "Combine the preterite and the imperfect in a story, and link the past to now with the present perfect.",
+   "concepts": [
+    {
+     "concept_id": "es.b1.preterite_imperfect",
+     "name": "Preterite versus imperfect",
+     "prerequisites": [
+      "es.a2.preterite_irregular",
+      "es.a2.imperfect"
+     ],
+     "description": "The imperfect sets the scene; the preterite tells the events.",
+     "explanation": "In a story the imperfect describes the background, what was going on and how things were, and the preterite tells the completed events that move the story on or interrupt the background.",
+     "examples": [
+      "Llovía cuando llegué a casa.",
+      "Cuando era niño, vivía en Lima."
+     ],
+     "practice": {
+      "prompt": "Complete: Mientras yo dormía, ___ el teléfono. (sonar)",
+      "answer": "sonó"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Ayer yo ___ a las ocho. (llegar)",
+       "answer": "llegué",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: Mientras yo ___, sonó el teléfono. (leer)",
+       "answer": "leía",
+       "accepted": [],
+       "difficulty": 0.55
+      },
+      {
+       "prompt": "Complete: Cuando ___ niño, vivía en Lima. (ser)",
+       "answer": "era",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    },
+    {
+     "concept_id": "es.b1.present_perfect",
+     "name": "The present perfect",
+     "prerequisites": [
+      "es.a2.preterite_regular"
+     ],
+     "description": "Haber plus a past participle for experiences and events of today.",
+     "explanation": "The present perfect is the present of haber (he, has, ha, hemos, habéis, han) plus a past participle ending in -ado or -ido. Common irregular participles are hecho, dicho, visto, escrito, puesto and vuelto.",
+     "examples": [
+      "Hoy he comido paella.",
+      "¿Has visto la película?"
+     ],
+     "practice": {
+      "prompt": "Write the past participle of 'escribir'.",
+      "answer": "escrito"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Hoy yo ___ comido paella. (haber)",
+       "answer": "he",
+       "accepted": [],
+       "difficulty": 0.35
+      },
+      {
+       "prompt": "Write the past participle of 'hacer'.",
+       "answer": "hecho",
+       "accepted": [],
+       "difficulty": 0.6
+      },
+      {
+       "prompt": "Translate: 'Have you seen the film?' (tú)",
+       "answer": "¿has visto la película?",
+       "accepted": [],
+       "difficulty": 0.75
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "b1-future",
+   "title": "Future and conditions",
+   "topic": "future and conditions",
+   "level": "B1",
+   "summary": "Talk about the future, make polite requests and hypotheses, and set real conditions with si.",
+   "concepts": [
+    {
+     "concept_id": "es.b1.future_simple",
+     "name": "The simple future",
+     "prerequisites": [
+      "es.a1.ir_a_infinitive"
+     ],
+     "description": "Future endings on the infinitive, and irregular stems such as tendr- and har-.",
+     "explanation": "The simple future adds -é, -ás, -á, -emos, -éis, -án to the whole infinitive: hablaré, comerás. Some verbs use an irregular stem: tendré, haré, podré, saldré, diré, vendré.",
+     "examples": [
+      "El año que viene viajaré a Chile.",
+      "Mañana hará sol."
+     ],
+     "practice": {
+      "prompt": "Complete: Ellos ___ mañana. (venir, future)",
+      "answer": "vendrán"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: El año que viene yo ___ a Chile. (viajar)",
+       "answer": "viajaré",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: Mañana ___ sol. (hacer, future)",
+       "answer": "hará",
+       "accepted": [],
+       "difficulty": 0.6
+      },
+      {
+       "prompt": "Complete: Nosotros ___ tiempo el lunes. (tener, future)",
+       "answer": "tendremos",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    },
+    {
+     "concept_id": "es.b1.conditional",
+     "name": "The conditional",
+     "prerequisites": [
+      "es.b1.future_simple"
+     ],
+     "description": "Would-forms for polite requests, advice and hypotheses.",
+     "explanation": "The conditional adds -ía, -ías, -ía, -íamos, -íais, -ían to the infinitive, with the same irregular stems as the future: tendría, haría, podría. It softens requests and expresses what would happen.",
+     "examples": [
+      "¿Podría ayudarme?",
+      "Yo compraría un coche nuevo."
+     ],
+     "practice": {
+      "prompt": "Complete: Yo en tu lugar ___ más. (estudiar, conditional)",
+      "answer": "estudiaría"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Con más dinero, ellos ___ más. (viajar, conditional)",
+       "answer": "viajarían",
+       "accepted": [],
+       "difficulty": 0.45
+      },
+      {
+       "prompt": "Complete: Yo ___ un coche nuevo. (comprar, conditional)",
+       "answer": "compraría",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: ¿___ usted ayudarme? (poder, conditional)",
+       "answer": "podría",
+       "accepted": [],
+       "difficulty": 0.65
+      }
+     ]
+    },
+    {
+     "concept_id": "es.b1.real_conditions",
+     "name": "Real conditions with si",
+     "prerequisites": [
+      "es.b1.future_simple"
+     ],
+     "description": "Si plus the present, then the future or a command.",
+     "explanation": "A real condition uses si plus the present tense, never the future, and then the future, the present or a command in the result: si tengo tiempo, iré.",
+     "examples": [
+      "Si llueve, nos quedaremos en casa.",
+      "Si tienes hambre, come algo."
+     ],
+     "practice": {
+      "prompt": "Complete: Si ___ mañana, iremos a la playa. (hacer sol, present)",
+      "answer": "hace sol"
+     },
+     "probes": [
+      {
+       "prompt": "Which tense follows 'si' in a real condition: present or future?",
+       "answer": "present",
+       "accepted": [
+        "presente",
+        "the present"
+       ],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: Si ___ tiempo, iré a la playa. (tener, yo)",
+       "answer": "tengo",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Si llueve, ___ en casa. (nosotros, quedarse, future)",
+       "answer": "nos quedaremos",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "b1-wishes",
+   "title": "Wishes, advice and opinions",
+   "topic": "wishes advice and opinions",
+   "level": "B1",
+   "summary": "Form the present subjunctive and use it after wishes, recommendations and doubt.",
+   "concepts": [
+    {
+     "concept_id": "es.b1.subjunctive_forms",
+     "name": "Present subjunctive forms",
+     "prerequisites": [
+      "es.a1.present_er_ir",
+      "es.a2.stem_changing"
+     ],
+     "description": "Forming the present subjunctive from the yo form, and its irregular verbs.",
+     "explanation": "The present subjunctive takes the yo form of the present, drops -o and adds the opposite vowel: -ar verbs take -e (hable), -er and -ir verbs take -a (coma, tenga). Irregular forms are sea, vaya, haya, sepa, esté and dé.",
+     "examples": [
+      "hablar → hable",
+      "tener → tenga",
+      "ir → vaya"
+     ],
+     "practice": {
+      "prompt": "Write the present subjunctive (yo) of 'hacer'.",
+      "answer": "haga"
+     },
+     "probes": [
+      {
+       "prompt": "Write the present subjunctive (yo) of 'hablar'.",
+       "answer": "hable",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Write the present subjunctive (él) of 'tener'.",
+       "answer": "tenga",
+       "accepted": [],
+       "difficulty": 0.55
+      },
+      {
+       "prompt": "Write the present subjunctive (nosotros) of 'ir'.",
+       "answer": "vayamos",
+       "accepted": [],
+       "difficulty": 0.75
+      }
+     ]
+    },
+    {
+     "concept_id": "es.b1.subjunctive_wishes",
+     "name": "Subjunctive after wishes and advice",
+     "prerequisites": [
+      "es.b1.subjunctive_forms"
+     ],
+     "description": "Quiero que, espero que and te recomiendo que with the subjunctive.",
+     "explanation": "When one person wants, hopes or recommends that another person does something, the second verb goes in the subjunctive after que: quiero que vengas, espero que estéis bien, te recomiendo que bebas agua. With one subject use the infinitive: quiero venir.",
+     "examples": [
+      "Quiero que vengas conmigo.",
+      "Te recomiendo que bebas agua."
+     ],
+     "practice": {
+      "prompt": "Complete: Espero que tú ___ bien. (dormir)",
+      "answer": "duermas"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Te recomiendo que ___ agua. (beber)",
+       "answer": "bebas",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: Quiero que tú ___ conmigo. (venir)",
+       "answer": "vengas",
+       "accepted": [],
+       "difficulty": 0.6
+      },
+      {
+       "prompt": "Complete: Espero que ustedes ___ bien. (estar)",
+       "answer": "estén",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    },
+    {
+     "concept_id": "es.b1.opinion_doubt",
+     "name": "Opinions and doubt",
+     "prerequisites": [
+      "es.b1.subjunctive_forms"
+     ],
+     "description": "Creo que with the indicative; no creo que and dudo que with the subjunctive.",
+     "explanation": "Creo que and pienso que state an opinion and take the indicative. When the opinion is negative or doubtful, no creo que, no pienso que and dudo que take the subjunctive.",
+     "examples": [
+      "Creo que tienes razón.",
+      "No creo que tengas razón."
+     ],
+     "practice": {
+      "prompt": "Complete: Dudo que ellos ___ hoy. (venir)",
+      "answer": "vengan"
+     },
+     "probes": [
+      {
+       "prompt": "Which mood follows 'dudo que': indicative or subjunctive?",
+       "answer": "subjunctive",
+       "accepted": [
+        "subjuntivo",
+        "the subjunctive"
+       ],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: Creo que ___ razón. (tú, tener)",
+       "answer": "tienes",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: No creo que ___ razón. (tú, tener)",
+       "answer": "tengas",
+       "accepted": [],
+       "difficulty": 0.65
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "b1-instructions",
+   "title": "Giving instructions",
+   "topic": "giving instructions",
+   "level": "B1",
+   "summary": "Tell someone what to do and what not to do with tú commands.",
+   "concepts": [
+    {
+     "concept_id": "es.b1.affirmative_commands",
+     "name": "Affirmative tú commands",
+     "prerequisites": [
+      "es.a1.present_er_ir"
+     ],
+     "description": "Tú commands: the él form of the present, and eight irregular commands.",
+     "explanation": "The affirmative tú command is usually the él form of the present: habla, come, escribe. Eight verbs are irregular: di, haz, ve, pon, sal, sé, ten, ven. Pronouns attach to the end: dímelo.",
+     "examples": [
+      "Habla más despacio.",
+      "Ven aquí, por favor."
+     ],
+     "practice": {
+      "prompt": "Give the tú command of 'poner'.",
+      "answer": "pon"
+     },
+     "probes": [
+      {
+       "prompt": "Give the tú command of 'hablar'.",
+       "answer": "habla",
+       "accepted": [],
+       "difficulty": 0.35
+      },
+      {
+       "prompt": "Give the tú command of 'venir'.",
+       "answer": "ven",
+       "accepted": [],
+       "difficulty": 0.55
+      },
+      {
+       "prompt": "Give the tú command of 'hacer'.",
+       "answer": "haz",
+       "accepted": [],
+       "difficulty": 0.65
+      }
+     ]
+    },
+    {
+     "concept_id": "es.b1.negative_commands",
+     "name": "Negative tú commands",
+     "prerequisites": [
+      "es.b1.affirmative_commands",
+      "es.b1.subjunctive_forms"
+     ],
+     "description": "No plus the present subjunctive to tell someone not to do something.",
+     "explanation": "A negative tú command is no plus the tú form of the present subjunctive: no hables, no comas, no vayas. Pronouns go before the verb: no lo digas.",
+     "examples": [
+      "No hables tan alto.",
+      "No vayas sola."
+     ],
+     "practice": {
+      "prompt": "Give the negative tú command of 'comer'.",
+      "answer": "no comas"
+     },
+     "probes": [
+      {
+       "prompt": "Give the negative tú command of 'hablar'.",
+       "answer": "no hables",
+       "accepted": [],
+       "difficulty": 0.35
+      },
+      {
+       "prompt": "Complete: No ___ eso. (tú, decir)",
+       "answer": "digas",
+       "accepted": [],
+       "difficulty": 0.55
+      },
+      {
+       "prompt": "Give the negative tú command of 'ir'.",
+       "answer": "no vayas",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "b1-pronouns",
+   "title": "Object pronouns",
+   "topic": "object pronouns",
+   "level": "B1",
+   "summary": "Use indirect object pronouns and combine them with direct object pronouns.",
+   "concepts": [
+    {
+     "concept_id": "es.b1.indirect_object_pronouns",
+     "name": "Indirect object pronouns",
+     "prerequisites": [
+      "es.a2.direct_object_pronouns"
+     ],
+     "description": "Me, te, le, nos, os and les for to whom or for whom.",
+     "explanation": "Indirect object pronouns say to or for whom something is done: me, te, le, nos, os, les. Le and les are often used together with the noun they refer to: le doy un regalo a mi madre.",
+     "examples": [
+      "Le doy un regalo a mi madre.",
+      "Les escribo a mis amigos."
+     ],
+     "practice": {
+      "prompt": "Complete: ___ explico la lección a los alumnos. (to them)",
+      "answer": "Les"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: ___ doy un regalo a mi madre. (to her)",
+       "answer": "le",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Complete: ___ escribo a mis amigos. (to them)",
+       "answer": "les",
+       "accepted": [],
+       "difficulty": 0.55
+      },
+      {
+       "prompt": "Translate: 'I tell you the truth.' (tú)",
+       "answer": "te digo la verdad",
+       "accepted": [
+        "yo te digo la verdad"
+       ],
+       "difficulty": 0.7
+      }
+     ]
+    },
+    {
+     "concept_id": "es.b1.double_object_pronouns",
+     "name": "Double object pronouns",
+     "prerequisites": [
+      "es.b1.indirect_object_pronouns"
+     ],
+     "description": "Indirect before direct, and le or les becoming se before lo, la, los, las.",
+     "explanation": "When both object pronouns appear, the indirect one comes first: te lo doy. Le and les become se before lo, la, los and las: se lo doy, never le lo doy.",
+     "examples": [
+      "¿El libro? Se lo doy a Juan.",
+      "Te las compro mañana."
+     ],
+     "practice": {
+      "prompt": "Replace both objects: Les mando la carta. → ___ ___ mando.",
+      "answer": "se la"
+     },
+     "probes": [
+      {
+       "prompt": "Which pronoun replaces 'le' before 'lo': se or le?",
+       "answer": "se",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "Replace both objects: Le doy el libro. → ___ ___ doy.",
+       "answer": "se lo",
+       "accepted": [],
+       "difficulty": 0.6
+      },
+      {
+       "prompt": "Replace both objects: Te compro las flores. → ___ ___ compro.",
+       "answer": "te las",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "unit_id": "b1-connecting",
+   "title": "Connecting ideas",
+   "topic": "connecting ideas",
+   "level": "B1",
+   "summary": "Choose between por and para, build relative clauses, and link sentences with connectors.",
+   "concepts": [
+    {
+     "concept_id": "es.b1.por_para",
+     "name": "Por versus para",
+     "prerequisites": [
+      "es.a1.present_ar"
+     ],
+     "description": "Para for purpose, destination and deadlines; por for cause, exchange, route and duration.",
+     "explanation": "Para points to a goal: purpose (para aprender), recipient (para ti), destination and deadline. Por points to a cause or a means: reason (gracias por), exchange (por diez euros), movement through a place and duration.",
+     "examples": [
+      "Este regalo es para ti.",
+      "Gracias por tu ayuda."
+     ],
+     "practice": {
+      "prompt": "Complete: Compré el libro ___ diez euros. (por/para)",
+      "answer": "por"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: Este regalo es ___ ti. (por/para)",
+       "answer": "para",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: Gracias ___ tu ayuda. (por/para)",
+       "answer": "por",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "Complete: Caminamos ___ el parque. (through: por/para)",
+       "answer": "por",
+       "accepted": [],
+       "difficulty": 0.7
+      }
+     ]
+    },
+    {
+     "concept_id": "es.b1.relative_clauses",
+     "name": "Relative clauses with que, donde and quien",
+     "prerequisites": [
+      "es.a1.present_er_ir"
+     ],
+     "description": "Joining sentences with que, donde and quien.",
+     "explanation": "Relative pronouns join two sentences: que refers to people or things, donde to places, and quien to people after a preposition: la chica con quien hablo.",
+     "examples": [
+      "El libro que leo es interesante.",
+      "Esta es la ciudad donde nací."
+     ],
+     "practice": {
+      "prompt": "Complete: El chico ___ vive aquí es mi primo.",
+      "answer": "que"
+     },
+     "probes": [
+      {
+       "prompt": "Complete: El libro ___ leo es interesante.",
+       "answer": "que",
+       "accepted": [],
+       "difficulty": 0.4
+      },
+      {
+       "prompt": "Complete: Esta es la ciudad ___ nací.",
+       "answer": "donde",
+       "accepted": [
+        "en la que",
+        "en que"
+       ],
+       "difficulty": 0.55
+      },
+      {
+       "prompt": "Complete: La chica con ___ hablo es mi prima. (who)",
+       "answer": "quien",
+       "accepted": [
+        "la que"
+       ],
+       "difficulty": 0.75
+      }
+     ]
+    },
+    {
+     "concept_id": "es.b1.connectors",
+     "name": "Discourse connectors",
+     "prerequisites": [],
+     "description": "Sin embargo, además, por eso, aunque and porque to link ideas.",
+     "explanation": "Connectors link ideas in speech and writing: además adds, sin embargo contrasts, aunque concedes, porque gives a reason and por eso gives a consequence.",
+     "examples": [
+      "Estaba cansado; sin embargo, fui a la fiesta.",
+      "Llovía, por eso me quedé en casa."
+     ],
+     "practice": {
+      "prompt": "How do you say 'also, in addition' at the start of a sentence?",
+      "answer": "además"
+     },
+     "probes": [
+      {
+       "prompt": "Which word means 'although': aunque or porque?",
+       "answer": "aunque",
+       "accepted": [],
+       "difficulty": 0.3
+      },
+      {
+       "prompt": "How do you say 'however' in Spanish?",
+       "answer": "sin embargo",
+       "accepted": [],
+       "difficulty": 0.5
+      },
+      {
+       "prompt": "How do you say 'that is why' in Spanish?",
+       "answer": "por eso",
+       "accepted": [],
+       "difficulty": 0.55
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -25,6 +25,16 @@ from app.schemas.usage import BudgetDefaults, TaskBudget
 from app.schemas.video import VideoConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+COURSES_DIR = REPO_ROOT / "courses"
+
+
+def course_path(entry: str) -> Path:
+    """A TA_COURSES entry: the name of a bundled course (`spanish-a1-b1` is courses/spanish-a1-b1.json), or a path
+    to a course file."""
+    entry = entry.strip()
+    if "/" not in entry and "\\" not in entry and not entry.endswith(".json"):
+        return COURSES_DIR / f"{entry}.json"
+    return Path(entry)
 
 
 class Settings(BaseSettings):
@@ -44,6 +54,10 @@ class Settings(BaseSettings):
     video_composer: Literal["ffmpeg", "mock"] = "ffmpeg"  # ffmpeg: real MP4; mock: a manifest, for tests
     presentation_renderer: Literal["pptx", "mock"] = "pptx"  # pptx: local python-pptx; mock: JSON for tests
     corpus_dir: Path = REPO_ROOT / "fixtures" / "demo"
+    # Authored courses (MVP item 5): comma-separated course names or files. When set, the courses ARE the knowledge
+    # base (TA_CORPUS_DIR/knowledge_base.json is not read); each is validated at startup and an invalid course stops
+    # the application. Unset: the fixture knowledge base in TA_CORPUS_DIR, as before.
+    courses: str = ""
 
     max_revisions: int = Field(default=2, ge=0, le=10)
     revision_exhausted_policy: Literal["fail", "accept_with_warnings"] = "fail"
@@ -292,11 +306,24 @@ class Settings(BaseSettings):
             required=self.generated_video_required, failure_policy=self.generated_video_failure_policy,
             strategy=self.generated_video_strategy, **{k: v for k, v in overrides.items() if v is not None})
 
+    def course_paths(self) -> list[Path]:
+        return [course_path(e) for e in self.courses.split(",") if e.strip()]
+
+    def knowledge_source(self) -> str:
+        """Where the knowledge base comes from, for messages."""
+        paths = self.course_paths()
+        if paths:
+            return "the courses " + ", ".join(str(p) for p in paths) + " (TA_COURSES)"
+        return str(self.corpus_dir / "knowledge_base.json")
+
     def validate_runtime(self) -> None:
         """Startup validation: provider configuration first (every problem at once, secrets never shown), then the
         local corpora the mock and local providers read."""
         self.providers.validate_startup()
-        needed = {"knowledge_base.json"} if self.retrieval_provider == "local" else set()
+        missing = [str(p) for p in self.course_paths() if not p.is_file()]
+        if missing:
+            raise ConfigError(f"TA_COURSES names course files that do not exist: {missing}")
+        needed = {"knowledge_base.json"} if self.retrieval_provider == "local" and not self.course_paths() else set()
         if self.providers.search_provider == "mock":
             needed.add("web_corpus.json")
         if self.providers.image_search_provider == "mock":

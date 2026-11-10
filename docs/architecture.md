@@ -30,6 +30,8 @@ teaching     interactive sessions: TeachingPolicy, DifficultyController, grading
 assessment   grading: normalisation, matching, rubrics (validation, aggregation), outcome classification, validation
              of a semantic grader's output, the grading pipeline (AssessmentEngine), the AssessmentRepository
              interface; pure, reaches a model only through the SemanticGrader interface its caller supplies
+content      authored courses: the course loader and validator, compiled to knowledge-base documents
+             (`python -m app.content validate`); reads level frameworks and the concept graph
 artifacts    ArtifactService: versioning, content-hash dedup, dependency graph, content-addressed media objects
 storage      SQLAlchemy/SQLite metadata repositories + filesystem object store (no business rules)
 schemas / config / observability / utils   shared foundation
@@ -664,6 +666,16 @@ What is decided by code and what by models:
   validated, graded answers. A failed model call, review or evaluation leaves mastery as it was (the evaluation
   can be resumed); nothing is invented to fill a gap.
 
+## Courses
+
+The knowledge base is authored as courses (`courses/*.json`, [format and rules](../courses/README.md)), selected
+with `TA_COURSES`. At startup the composition root loads every course with `app/content/course.py`: each is parsed,
+validated (levels against the framework, unique ids and topics, known and acyclic prerequisites never above the
+concept's level, enough probes with an easier follow-up) and compiled to `concept` and `reference` documents that
+the local retriever indexes. Every problem is reported at once with its field path, and an invalid course stops
+startup. The engine is unchanged: it still reads concepts through the `KnowledgeBase` interface and research reads
+the references through `rag.retrieve`.
+
 ## Goals and curricula
 
 ```
@@ -947,7 +959,7 @@ graph, per-node trace, usage). `scripts/run_production_demo.py` is a thin CLI ov
 
 ## Not in this release
 
-Learned mastery models (BKT / IRT) and FSRS-style scheduling (the updater and scheduler are replaceable), a
-curated multi-subject concept library, real image-search providers, video generation providers other than MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
+Learned mastery models (BKT / IRT) and FSRS-style scheduling (the updater and scheduler are replaceable), courses
+beyond the Spanish A1 to B1 pilot and a course authoring UI, real image-search providers, video generation providers other than MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
 design, animations, cloud rendering, coding exercises and VS Code integration, UI, deployment. The provider and
 tool interfaces they plug into already exist.
