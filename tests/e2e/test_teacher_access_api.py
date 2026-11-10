@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from app.api.auth import AUTHOR, TEACHER
+from app.curriculum.engine import curriculum_id_for
 from app.schemas.learner import LearnerProfileInput
 from tests.auth import client_for
 from tests.e2e import test_security_api
@@ -62,6 +63,33 @@ def test_a_teacher_reads_every_learner_route_as_the_learner_does(world) -> None:
                 if theirs.status_code == 200:
                     assert_no_internals(theirs)
 
+
+def test_a_teacher_cannot_choose_the_time_of_their_learners_next_action(world) -> None:
+    """Selecting the next action stores the curriculum's progress as of `as_of`. The teacher's read is as of now;
+    a teacher's `as_of` would write a snapshot at a time of their choosing, so it is a change (403) and stores
+    nothing. The learner's own scope still chooses the time."""
+    env, ids, auth = world
+    lid, goal = ids["learner"], ids["goal"]
+    stored = env.container.curriculum_service._engine.repository
+
+    def snapshot_of_progress():
+        found = stored.progress(curriculum_id_for(goal))
+        return found.model_dump(mode="json") if found is not None else None
+
+    with client_for(env.container, LEARNER, auth=auth) as a:
+        teacher = teacher_headers(auth)
+        assert a.get(f"/learners/{lid}/next-action", headers=teacher).status_code == 200
+        before = snapshot_of_progress()
+        for as_of in ("2099-01-01T00:00:00Z", "2000-01-01T00:00:00Z"):
+            r = a.get(f"/learners/{lid}/next-action", params={"as_of": as_of}, headers=teacher)
+            assert (r.status_code, r.json()) == (403, FORBIDDEN), r.text
+        assert snapshot_of_progress() == before
+        other = teacher_headers(auth, user_id="another-teacher")  # not their learner: still the uniform 404
+        r = a.get(f"/learners/{lid}/next-action", params={"as_of": "2099-01-01T00:00:00Z"}, headers=other)
+        assert (r.status_code, r.json()) == (404, NOT_FOUND)
+        mine = a.get(f"/learners/{lid}/next-action", params={"as_of": "2099-01-01T00:00:00Z"})
+        assert mine.status_code == 200, mine.text
+        assert snapshot_of_progress()["as_of"].startswith("2099-01-01")
 
 def test_a_teacher_changes_nothing_of_their_learner(world) -> None:
     env, ids, auth = world

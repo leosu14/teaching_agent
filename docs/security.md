@@ -160,7 +160,7 @@ the membership in the same transaction, so a join cannot land after the rotation
 primary key makes a join idempotent under races (`tests/postgres/test_classes_postgres.py`).
 
 **Residual points.** GET routes that reconcile state (`GET /learning-cycles/{id}`, next action, the teaching
-session view: PR17 M1) do so for a teacher's read too; they never drive a child or call a model. Join codes are
+session view: PR17 M1) do so for a teacher's read too; they never drive a child or call a model, and they store only what the learner's own next read would. `GET /learners/{id}/next-action` stores the curriculum's progress as of its `as_of` query parameter, so only the learner's own scope may pass it: from a teacher it is a `403`. Join codes are
 bearer secrets: anyone with a learner's credentials and the code can join that learner, and a leaked code should
 be rotated. There is no rate limit on joins at the API (gateway limits apply).
 
