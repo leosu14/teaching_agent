@@ -1,7 +1,8 @@
 """FastAPI application factory. Routes only validate input, call services, and shape responses.
 
-Every router except `system.public` (/health) is mounted behind the authentication dependency, so a new route is
-protected by default; routes that touch learner data also check ownership (app/api/authorization.py)."""
+Every router except `system.public` (/health) and `web` (the student app's static files, /app/) is mounted behind the
+authentication dependency, so a new route is protected by default; routes that touch learner data also check
+ownership (app/api/authorization.py)."""
 
 from __future__ import annotations
 
@@ -20,9 +21,11 @@ from app.api.routes import (
     curriculum,
     learners,
     learning_cycles,
+    lessons,
     system,
     tasks,
     teaching,
+    web,
 )
 from app.config.routing import ConfigError
 from app.config.settings import Settings
@@ -43,6 +46,7 @@ from app.services.budgets import BudgetExhausted
 from app.services.classes import ClassNotFound
 from app.services.container import Container, build_container
 from app.services.curriculum import InvalidGoal
+from app.services.lessons import LessonNotReady
 from app.services.tasks import JobConflict
 from app.services.learning_cycles import CycleConflict, CycleNotFound, InvalidCycleRequest, InvalidCycleTransition
 from app.services.teaching import (
@@ -88,7 +92,8 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
                              (AssessmentItemNotFound, 404), (AttemptNotFound, 404), (AttemptConflict, 409),
                              (ItemConflict, 409), (InvalidAssessmentRequest, 422),
                              (CycleNotFound, 404), (CycleConflict, 409), (InvalidCycleTransition, 409),
-                             (InvalidCycleRequest, 422), (LeaseLost, 409), (WriteConflict, 409), (JobConflict, 409)):
+                             (InvalidCycleRequest, 422), (LeaseLost, 409), (WriteConflict, 409), (JobConflict, 409),
+                             (LessonNotReady, 409)):
         app.add_exception_handler(exc_type, _handler(status))
     app.add_exception_handler(AuthenticationFailed, _unauthenticated)
     app.add_exception_handler(Forbidden, _handler(403))
@@ -98,7 +103,9 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
     app.add_exception_handler(ArtifactContentUnavailable, _handler(500, error="ContentUnavailable"))
 
     app.include_router(system.public)
-    for module in (system, tasks, artifacts, learners, curriculum, teaching, assessment, learning_cycles, classes):
+    app.include_router(web.router)
+    for module in (system, tasks, artifacts, learners, curriculum, teaching, lessons, assessment, learning_cycles,
+                   classes):
         app.include_router(module.router, dependencies=[Depends(principal)])
     return app
 

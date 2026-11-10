@@ -26,9 +26,9 @@ Every protected route receives a `Principal` (`app/api/auth.py`):
 
 ## Authentication
 
-Every route except `GET /health` requires an authenticated principal. The routers are mounted behind the
-authentication dependency in `create_app`, so a new route is protected unless it is deliberately added to the public
-router. There is **no anonymous mode**: a request without valid credentials gets `401` with
+Every route except `GET /health` and the student web app's static files (`GET /app/`, below) requires an
+authenticated principal. The routers are mounted behind the authentication dependency in `create_app`, so a new route
+is protected unless it is deliberately added to the public router. There is **no anonymous mode**: a request without valid credentials gets `401` with
 `{"error": "Unauthenticated", "detail": "authentication required"}` and `WWW-Authenticate: Bearer`, whatever the
 reason (the reason is not disclosed).
 
@@ -85,6 +85,27 @@ EOF
 TA_AUTH_MODE=static TA_AUTH_STATIC_TOKENS_FILE=~/.teaching-agent-tokens.json uvicorn app.api.main:app --reload
 curl -H "Authorization: Bearer <the token>" localhost:8000/learners/demo-learner
 ```
+
+### The student web app
+
+`/app/` serves the student web app (`app/api/web/`): an HTML page, a stylesheet and one script, with no data in them.
+They are public like `/health` (`app/api/routes/web.py` serves exactly the three listed files, never a path from the
+request), and everything the page shows comes from the authenticated JSON API, called from the page on the same
+origin. `tests/unit/test_student_app.py` checks that these are the only routes outside the OpenAPI schema, so the
+security matrix still covers every other route.
+
+- **Sign-in.** Behind the gateway, the browser's session is the gateway's business (a cookie, typically): the page
+  calls the API with `credentials: "same-origin"` and the gateway signs each request as for any other client. The
+  page starts with `GET /me` (the caller's user id, learner ids and roles) and acts for the one learner in scope (a
+  guardian picks one; an account without learners is told so). In `static` development mode the page asks for a
+  development token and keeps it in `sessionStorage` (this tab only); a `401` returns to that screen.
+- **Headers.** Every file is served with `Content-Security-Policy: default-src 'none'; script-src 'self';
+  style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; base-uri 'none';
+  form-action 'none'; frame-ancestors 'none'`, plus `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and
+  `Referrer-Policy: no-referrer`. No inline script or style, no third-party origin, no `eval`.
+- **Rendering.** Model-written text (teacher turns, lesson text, questions) is only ever set with `textContent`; the
+  script has no `innerHTML`-style sink (a unit test checks the source). Lesson images are fetched with the learner's
+  credentials from `GET /artifacts/{id}/content` and shown from a `blob:` URL.
 
 ### Tests
 
@@ -209,6 +230,32 @@ names; `tests/e2e/test_security_api.py` checks the actual responses of every rou
 events) for those names and for a sentinel answer key. `tests/e2e/test_learner_event_sanitization.py` injects a
 structured-output validation failure that quotes a canary answer key and checks that the canary reaches the internal
 log and task record but none of the task, cycle or event responses.
+
+## Lesson reading
+
+The lesson player of the student app reads `GET /lessons/{lesson_id}/reading` (`app/services/lesson_reading.py`), not
+the lesson: the LESSON artifact, the deck, narration and video all stay blocked (above and below). The reading is
+built by code, field by field, from the stored lesson: title, level, objective descriptions, introduction, each
+section's heading, explanation, examples and analogy, the summary, answer-isolated images (only those the content
+policy would serve) and references (http(s) links only). Never the exercises, check questions, narration, plan,
+research bundle or review.
+
+Text is checked sentence by sentence (examples, headings, analogies, image descriptions and reference fields as a
+whole) with `reveals()` against every answer the learner is graded on with this lesson, and a sentence that states
+one is left out:
+
+- always: the lesson's exercise and check-question answers, and the expected and acceptable answers of every
+  assessment item registered on the lesson (by its artifact or its task id; the session's graded questions are
+  registered there too);
+- while a question is open for the learner: the pending question of any of their teaching sessions, and the answer
+  keys of any of their tasks waiting on a sheet (diagnostic or evaluation), read from the stored records on every
+  request (so any replica sees them). The reading is never an open book on a question being answered.
+
+`withheld` counts what was left out and `question_open` says whether an open question held back more than the
+lesson's own keys, so the app can say "come back after answering". A lesson that is not complete is a `409`.
+Ownership is the lesson's (a teacher reads their learner's, like every GET). Residual risks: as for images,
+`reveals()` matches whole words, so a paraphrase or translation is not caught; a question opened after the learner
+loaded the reading does not change a page already shown (the app reloads the reading each time it is opened).
 
 ## Artifact content
 

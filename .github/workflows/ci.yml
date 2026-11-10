@@ -54,6 +54,27 @@ jobs:
       - name: Learning cycle demo (next action -> lesson -> WAITING -> restart -> session -> mastery -> next action -> COMPLETE)
         run: python scripts/run_learning_cycle_demo.py
 
+  browser:
+    # The student web app (app/api/web/) in a real Chromium, driven through its own page script against the real API
+    # on mock providers (tests/browser). The test job skips these tests (no Playwright there); this job must run them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: System packages (FFmpeg and DejaVu fonts, as in the test job)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+      - name: Install
+        run: |
+          pip install -e ".[dev,providers,browser]"
+          python -m playwright install --with-deps chromium
+      - name: Student web app browser tests (must run, not skip)
+        run: |
+          set -o pipefail
+          python -m pytest -q -rs tests/browser | tee browser-tests.log
+          if grep -qi "skipped" browser-tests.log; then echo "tests/browser was skipped"; exit 1; fi
+
   postgres:
     # The concurrency guarantees on PostgreSQL 16 (tests/postgres): the spend ledger (races between threads and
     # processes, the lease fence, the in-flight key and the sweep), the task job queue, and the fenced, versioned

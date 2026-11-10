@@ -84,6 +84,7 @@ def routes(ids: dict) -> list[tuple[str, str, dict | None]]:
         ids["cycle"]
     return [
         ("GET", "/providers", None), ("GET", "/agents", None), ("GET", "/tools", None),
+        ("GET", "/me", None), ("GET", "/courses", None),
         ("PUT", f"/learners/{lid}", {"display_name": "hijacked"}),
         ("GET", f"/learners/{lid}", None),
         ("GET", f"/learners/{lid}/progress", None),
@@ -106,6 +107,7 @@ def routes(ids: dict) -> list[tuple[str, str, dict | None]]:
         ("GET", f"/tasks/{tid}/artifacts", None),
         ("GET", f"/tasks/{tid}/events", None),
         ("POST", f"/lessons/{ids['lesson']}/teaching-session", {"idempotency_key": "intrusion"}),
+        ("GET", f"/lessons/{ids['lesson']}/reading", None),
         ("GET", f"/teaching-sessions/{sid}", None),
         ("POST", f"/teaching-sessions/{sid}/answers", {"answer": "x", "client_turn_id": "intrusion"}),
         ("POST", f"/teaching-sessions/{sid}/pause", None),
@@ -199,7 +201,7 @@ def test_learner_b_cannot_reach_any_of_learner_a_resources(world) -> None:
         before = snapshot(a, ids)
         for method, path, body in routes(ids):
             r = send(b, method, path, body)
-            if path in ("/providers", "/agents", "/tools"):
+            if path in ("/providers", "/agents", "/tools", "/me", "/courses"):
                 assert r.status_code == 200  # not learner data: any authenticated principal
                 continue
             if (method, path) in TEACHER_ONLY:

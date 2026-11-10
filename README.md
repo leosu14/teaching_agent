@@ -79,6 +79,7 @@ python scripts/run_provider_demo.py    # provider registry, selection, health, u
 python scripts/run_production_demo.py --dry-run  # a production lesson's plan: providers, budget, stages
 python -m pytest                    # unit, integration, e2e and architecture-lint tests
 uvicorn app.api.main:app --reload   # the same services over HTTP (authenticated: see docs/security.md)
+                                    # and the student web app at http://localhost:8000/app/
 python -m app.services.worker       # the task worker: runs the lessons and evaluations the API queues
 ```
 
@@ -173,7 +174,11 @@ worker next to the API (`python -m app.services.worker`), or set `TA_WORKER_EMBE
 process for development. The worker also sweeps for tasks a killed process left mid-run and queues their continuation
 (`--sweep` runs one pass, for cron). See [architecture](docs/architecture.md#background-worker).
 
-Every route except `/health` requires authentication, and every learner-owned resource is checked against the
+The student web app is served at `/app/` (see [architecture](docs/architecture.md#student-web-app)). For a local
+run, use development tokens (`TA_AUTH_MODE=static`, [docs/security.md](docs/security.md#development)), set
+`TA_WORKER_EMBEDDED=true`, open `http://localhost:8000/app/` and paste a token whose principal has one learner id.
+
+Every route except `/health` and the app's static files requires authentication, and every learner-owned resource is checked against the
 caller's learner scope (another learner's resource is a 404, exactly like a missing one). Learner-facing responses
 never carry answer keys or internal workflow state. See [docs/security.md](docs/security.md) for the gateway contract,
 development tokens and the test mechanism.
@@ -207,6 +212,10 @@ development tokens and the test mechanism.
 | POST | `/learning-cycles/{id}/resume` · `/cancel` | Retry a BLOCKED cycle's step / cancel the cycle and its running step |
 | GET | `/learning-cycles/{id}/events` · `/artifacts` | The cycle's event stream as learner events / its LEARNING_CYCLE artifacts |
 | GET | `/learners/{id}/next-action` | The next learning action across the learner's goals (`?as_of=` for a given time) |
+| GET | `/lessons/{lesson_id}/reading` | The lesson's teaching text for the learner: no exercise, check question or narration, and no sentence that states an answer they are graded on or the answer of a question open for them (409 until the lesson is complete) |
+| GET | `/me` | The caller: user id, learner ids, roles |
+| GET | `/courses` | The courses `TA_COURSES` loads (subject, framework, levels, topics; no probes or answers) |
+| GET | `/app/` | The student web app (static, public; its data comes from the routes above) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 
 See [docs/architecture.md](docs/architecture.md) for the design and [docs/configuration.md](docs/configuration.md)

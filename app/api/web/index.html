@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Teaching Agent</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="#/">Teaching Agent</a>
+    <nav id="nav" hidden>
+      <a href="#/" data-nav="today">Today</a>
+      <a href="#/progress" data-nav="progress">Progress</a>
+      <a href="#/history" data-nav="history">History</a>
+      <button type="button" id="sign-out" class="link">Sign out</button>
+    </nav>
+  </header>
+  <main id="main" aria-live="polite">
+    <p class="muted">Loading…</p>
+  </main>
+  <noscript><p class="notice">The Teaching Agent app needs JavaScript.</p></noscript>
+</body>
+</html>

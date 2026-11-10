@@ -28,7 +28,7 @@ from tests.learning_cycle_fixtures import LEARNER
 
 world = test_security_api.world  # the security matrix's fixture
 
-SYSTEM = ("/providers", "/agents", "/tools")
+SYSTEM = ("/providers", "/agents", "/tools", "/me", "/courses")
 FORBIDDEN = {"error": "Forbidden", "detail": "a teacher may read the learners of their classes but not act for them"}
 
 

@@ -705,6 +705,13 @@ class SqlAssessmentRepository:
             row = s.get(AssessmentItemRow, item_id)
             return AssessmentItem.model_validate_json(row.body) if row else None
 
+    def items_for_lesson(self, lesson_ids: Iterable[str]) -> list[AssessmentItem]:
+        ids = sorted(set(lesson_ids))
+        with self._sessions() as s:
+            rows = s.scalars(select(AssessmentItemRow).where(AssessmentItemRow.lesson_id.in_(ids))
+                             .order_by(AssessmentItemRow.item_id))
+            return [AssessmentItem.model_validate_json(r.body) for r in rows]
+
     def save_rubric(self, rubric: AssessmentRubric) -> bool:
         return self._save(AssessmentRubricRow, rubric.rubric_id, rubric, rubric_id=rubric.rubric_id)
 
