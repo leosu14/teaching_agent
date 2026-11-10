@@ -75,8 +75,9 @@ The validator (`app/content/course.py`) checks, beyond the field types:
 - a concept's level is one of the course's levels;
 - prerequisites are concepts of the course, listed once, not the concept itself, never at a higher level than the
   concept (a goal "up to A2" must not pull in a B1 concept), and without cycles (each cycle is named);
-- every concept has at least 2 probes with at least two different difficulties (after a missed question the adaptive
-  diagnostic asks an easier one), distinct prompts, and accepted answers that differ from the answer and each other;
+- every concept has at least 2 probes, and one of them is easier than the opening probe: the diagnostic opens on the
+  probe nearest difficulty 0.5 (on a tie, the easier one) and after a miss asks an easier one; prompts are distinct,
+  and accepted answers differ from the answer and each other;
 - across courses: course ids, concept ids and (subject, topic) pairs are unique.
 
 Grading keeps accents (`hablé` and `hable` are different words), so list an accepted answer only when it is really

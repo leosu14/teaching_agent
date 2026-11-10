@@ -1309,7 +1309,7 @@
        "prompt": "Complete: Ayer yo ___ a las ocho. (llegar)",
        "answer": "llegué",
        "accepted": [],
-       "difficulty": 0.45
+       "difficulty": 0.3
       },
       {
        "prompt": "Complete: Mientras yo ___, sonó el teléfono. (leer)",
@@ -1392,7 +1392,7 @@
        "prompt": "Complete: El año que viene yo ___ a Chile. (viajar)",
        "answer": "viajaré",
        "accepted": [],
-       "difficulty": 0.45
+       "difficulty": 0.3
       },
       {
        "prompt": "Complete: Mañana ___ sol. (hacer, future)",
@@ -1554,7 +1554,7 @@
        "prompt": "Complete: Te recomiendo que ___ agua. (beber)",
        "answer": "bebas",
        "accepted": [],
-       "difficulty": 0.45
+       "difficulty": 0.3
       },
       {
        "prompt": "Complete: Quiero que tú ___ conmigo. (venir)",
@@ -1678,13 +1678,13 @@
        "prompt": "Give the negative tú command of 'hablar'.",
        "answer": "no hables",
        "accepted": [],
-       "difficulty": 0.5
+       "difficulty": 0.35
       },
       {
        "prompt": "Complete: No ___ eso. (tú, decir)",
        "answer": "digas",
        "accepted": [],
-       "difficulty": 0.65
+       "difficulty": 0.55
       },
       {
        "prompt": "Give the negative tú command of 'ir'.",
@@ -1724,7 +1724,7 @@
        "prompt": "Complete: ___ doy un regalo a mi madre. (to her)",
        "answer": "le",
        "accepted": [],
-       "difficulty": 0.45
+       "difficulty": 0.3
       },
       {
        "prompt": "Complete: ___ escribo a mis amigos. (to them)",

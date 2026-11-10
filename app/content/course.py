@@ -12,9 +12,9 @@ What is checked, beyond the field types of `app/schemas/course.py`:
 - every concept's level is one of the course's levels;
 - prerequisites are known concepts of the course, listed once, not the concept itself, never at a higher level than
   the concept (a goal "up to A2" must not pull in a B1 concept), and the graph has no cycle (each cycle is named);
-- every concept has at least `MIN_PROBES` probes with at least two difficulties (the adaptive diagnostic follows a
-  missed question with an easier one), distinct prompts, and accepted answers that differ from the answer and from
-  each other;
+- every concept has at least `MIN_PROBES` probes, one of them easier than the opening probe (the one nearest medium
+  difficulty: the adaptive diagnostic opens there and follows a missed question with an easier one), distinct
+  prompts, and accepted answers that differ from the answer and from each other;
 - across courses: course ids, concept ids, and (subject, topic) pairs are unique.
 """
 
@@ -35,6 +35,13 @@ from app.utils.text import normalize
 
 MIN_PROBES = 2
 MAX_CONCEPTS_PER_UNIT = 12  # rag.concept_map's default k
+OPENING_DIFFICULTY = 0.5  # the diagnostic opens on a medium question
+
+
+def opening_probe(probes):
+    """The probe a diagnostic opens with: the one nearest medium difficulty. On a tie, the easier one, so a probe
+    easier than the opening one exists whichever of the tied probes is asked first."""
+    return min(probes, key=lambda p: (round(abs(p.difficulty - OPENING_DIFFICULTY), 6), p.difficulty))
 
 
 class CourseError(ValueError):
@@ -184,6 +191,12 @@ def _probe_problems(probes) -> list[str]:
         out.append(f"probes: {len(probes)} probe(s): a concept needs at least {MIN_PROBES}")
     elif len({p.difficulty for p in probes}) < 2:
         out.append("probes: every probe has the same difficulty: the diagnostic needs an easier follow-up question")
+    else:
+        opening = opening_probe(probes)
+        if not any(p.difficulty < opening.difficulty for p in probes):
+            out.append(f"probes: no probe is easier than the opening question probes[{probes.index(opening)}] "
+                       f"(difficulty {opening.difficulty}, the one nearest {OPENING_DIFFICULTY}): the diagnostic "
+                       "follows a missed question with an easier one")
     prompts: dict[str, int] = {}
     for i, probe in enumerate(probes):
         prompt = normalize(probe.prompt)

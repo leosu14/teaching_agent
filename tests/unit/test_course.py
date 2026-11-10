@@ -40,7 +40,7 @@ def concept(cid: str, *, prerequisites=(), level=None) -> dict:
     out = {"concept_id": cid, "name": cid.split(".")[-1].title(), "prerequisites": list(prerequisites),
            "description": f"About {cid}.", "explanation": f"How {cid} works.", "examples": [f"Example of {cid}."],
            "practice": {"prompt": f"Practise {cid}.", "answer": "yes"},
-           "probes": [probe(f"Easy {cid}?", "a", 0.3), probe(f"Hard {cid}?", "b", 0.7)]}
+           "probes": [probe(f"Easy {cid}?", "a", 0.3), probe(f"Hard {cid}?", "b", 0.6)]}
     if level:
         out["level"] = level
     return out
@@ -176,6 +176,12 @@ def test_field_errors_name_the_file_and_the_field_path() -> None:
      "units[0].concepts[0].probes: 1 probe(s): a concept needs at least 2"),
     (lambda r: r["units"][0]["concepts"][0].update(probes=[probe("One?", "x", 0.5), probe("Two?", "y", 0.5)]),
      "units[0].concepts[0].probes: every probe has the same difficulty"),
+    # The diagnostic opens on the probe nearest 0.5 and follows a miss with an easier one: there must be one.
+    (lambda r: r["units"][0]["concepts"][0].update(probes=[probe("One?", "x", 0.5), probe("Two?", "y", 0.65)]),
+     "units[0].concepts[0].probes: no probe is easier than the opening question probes[0] (difficulty 0.5"),
+    # A tie for the opening question counts the easier probe as the opening one.
+    (lambda r: r["units"][0]["concepts"][0].update(probes=[probe("One?", "x", 0.45), probe("Two?", "y", 0.55)]),
+     "units[0].concepts[0].probes: no probe is easier than the opening question probes[0] (difficulty 0.45"),
     (lambda r: r["units"][0]["concepts"][0].update(probes=[probe("Same?", "x", 0.3), probe("same", "y", 0.6)]),
      "units[0].concepts[0].probes[1].prompt: same prompt as probes[0]"),
     (lambda r: r["units"][0]["concepts"][0]["probes"][0].update(accepted=["A!"]),
