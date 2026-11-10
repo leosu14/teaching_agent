@@ -31,14 +31,16 @@ from app.config.settings import Settings
 from app.observability.redaction import register_secret
 
 AUTHOR = "author"  # may register assessment items (with their answer keys and rubrics) on lessons in scope
-ROLES = frozenset({AUTHOR})
+TEACHER = "teacher"  # may create classes and read (never change) the data of the learners on their rosters
+ROLES = frozenset({AUTHOR, TEACHER})
 
 
 @dataclass(frozen=True)
 class Principal:
     """An authenticated caller. `learner_ids` is the learner scope: the learners whose data this caller may read and
-    change (a learner has their own id; a teacher or parent may have several). Nothing outside the scope exists for
-    them."""
+    change (a learner has their own id; a guardian may have several). A `teacher` also reads, but never changes, the
+    learners on the rosters of their classes (app/api/authorization.py); the gateway does not list those. Nothing
+    outside the two exists for them."""
 
     user_id: str
     learner_ids: frozenset[str] = field(default_factory=frozenset)

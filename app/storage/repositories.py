@@ -25,6 +25,7 @@ from app.schemas.assessment import (
     AttemptOutcome,
     ItemConflict,
 )
+from app.schemas.classroom import ClassMember, Classroom
 from app.schemas.curriculum import (
     CurriculumProgress,
     CurriculumRecord,
@@ -77,6 +78,8 @@ from app.storage.orm import (
     AssessmentGradeRow,
     AssessmentItemRow,
     AssessmentRubricRow,
+    ClassMemberRow,
+    ClassRow,
     CurriculumProgressRow,
     CurriculumRow,
     CurriculumVersionRow,
@@ -1276,3 +1279,107 @@ class SqlTaskJobRepository:
 def _aware(at: datetime) -> datetime:
     """SQLite returns naive datetimes for timezone-aware columns: they were written in UTC."""
     return at if at.tzinfo is not None else at.replace(tzinfo=timezone.utc)
+
+
+class SqlClassRepository:
+    """Classes and their rosters. A join reads the class by its code under a row lock and inserts the membership in
+    the same transaction, so a join never lands after a rotation that retired the code it used (PostgreSQL: the
+    rotation's UPDATE waits for the lock; SQLite serializes writers). The roster's primary key makes a join
+    idempotent, also when two joins race."""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def create(self, classroom: Classroom, join_code_hash: str) -> None:
+        with self._sessions.begin() as s:
+            s.add(ClassRow(class_id=classroom.class_id, teacher_id=classroom.teacher_id, tenant_id=classroom.tenant_id,
+                           name=classroom.name, join_code_hash=join_code_hash, created_at=classroom.created_at))
+
+    def get(self, class_id: str) -> Classroom | None:
+        with self._sessions() as s:
+            row = s.get(ClassRow, class_id)
+            return self._class(row) if row is not None else None
+
+    def for_teacher(self, teacher_id: str, tenant_id: str | None) -> list[Classroom]:
+        with self._sessions() as s:
+            rows = s.scalars(select(ClassRow).where(ClassRow.teacher_id == teacher_id, _tenant_is(tenant_id))
+                             .order_by(ClassRow.created_at, ClassRow.class_id))
+            return [self._class(r) for r in rows]
+
+    def set_join_code(self, class_id: str, join_code_hash: str) -> bool:
+        with self._sessions.begin() as s:
+            done = s.execute(update(ClassRow).where(ClassRow.class_id == class_id)
+                             .values(join_code_hash=join_code_hash))
+            return done.rowcount == 1
+
+    def join(self, join_code_hash: str, learner_id: str, at: datetime,
+             tenant_id: str | None) -> tuple[Classroom, ClassMember, bool] | None:
+        """Put the learner on the roster of the class in this tenant whose current code hashes to `join_code_hash`.
+        None when there is no such class; otherwise the class, the membership and whether this call created it."""
+        by_code = select(ClassRow).where(ClassRow.join_code_hash == join_code_hash, _tenant_is(tenant_id))
+        try:
+            with self._sessions.begin() as s:
+                row = s.scalars(by_code.with_for_update()).first()
+                if row is None:
+                    return None
+                classroom = self._class(row)
+                existing = s.get(ClassMemberRow, (row.class_id, learner_id))
+                if existing is not None:
+                    return classroom, self._member(existing), False
+                s.add(ClassMemberRow(class_id=row.class_id, learner_id=learner_id, joined_at=at))
+                s.flush()
+                return classroom, ClassMember(learner_id=learner_id, joined_at=at), True
+        except IntegrityError:  # a concurrent join of the same learner committed first: theirs is the membership
+            with self._sessions() as s:
+                found = s.scalars(by_code).first()
+                member = s.get(ClassMemberRow, (found.class_id, learner_id)) if found is not None else None
+                if found is None or member is None:
+                    raise
+                return self._class(found), self._member(member), False
+
+    def remove(self, class_id: str, learner_id: str) -> bool:
+        with self._sessions.begin() as s:
+            done = s.execute(delete(ClassMemberRow).where(ClassMemberRow.class_id == class_id,
+                                                          ClassMemberRow.learner_id == learner_id))
+            return done.rowcount == 1
+
+    def members(self, class_id: str) -> list[ClassMember]:
+        with self._sessions() as s:
+            rows = s.scalars(select(ClassMemberRow).where(ClassMemberRow.class_id == class_id)
+                             .order_by(ClassMemberRow.joined_at, ClassMemberRow.learner_id))
+            return [self._member(r) for r in rows]
+
+    def member(self, class_id: str, learner_id: str) -> ClassMember | None:
+        with self._sessions() as s:
+            row = s.get(ClassMemberRow, (class_id, learner_id))
+            return self._member(row) if row is not None else None
+
+    def enrollments(self, learner_id: str) -> list[tuple[Classroom, ClassMember]]:
+        with self._sessions() as s:
+            rows = s.execute(select(ClassRow, ClassMemberRow).join(ClassMemberRow,
+                                                                   ClassMemberRow.class_id == ClassRow.class_id)
+                             .where(ClassMemberRow.learner_id == learner_id)
+                             .order_by(ClassMemberRow.joined_at, ClassRow.class_id))
+            return [(self._class(c), self._member(m)) for c, m in rows]
+
+    def teaches(self, teacher_id: str, tenant_id: str | None, learner_id: str) -> bool:
+        """Whether `learner_id` is on the roster of a class of this teacher, in this tenant."""
+        with self._sessions() as s:
+            found = s.execute(select(ClassMemberRow.class_id).join(ClassRow,
+                                                                   ClassRow.class_id == ClassMemberRow.class_id)
+                              .where(ClassMemberRow.learner_id == learner_id, ClassRow.teacher_id == teacher_id,
+                                     _tenant_is(tenant_id)).limit(1)).first()
+            return found is not None
+
+    @staticmethod
+    def _class(row: ClassRow) -> Classroom:
+        return Classroom(class_id=row.class_id, name=row.name, teacher_id=row.teacher_id, tenant_id=row.tenant_id,
+                         created_at=_aware(row.created_at))
+
+    @staticmethod
+    def _member(row: ClassMemberRow) -> ClassMember:
+        return ClassMember(learner_id=row.learner_id, joined_at=_aware(row.joined_at))
+
+
+def _tenant_is(tenant_id: str | None):
+    return ClassRow.tenant_id.is_(None) if tenant_id is None else ClassRow.tenant_id == tenant_id

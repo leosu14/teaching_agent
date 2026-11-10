@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Response
 from pydantic import Field
 
 from app.api.auth import Principal
-from app.api.authorization import owned_goal, principal, require_learner
+from app.api.authorization import Forbidden, owned_goal, principal, require_learner
 from app.api.deps import container
 from app.schemas.common import Schema
 from app.schemas.curriculum import (
@@ -63,8 +63,13 @@ def list_goals(learner_id: str, c: Container = Depends(container)) -> list[Learn
 
 @router.get("/learners/{learner_id}/next-action", response_model=NextLearningAction,
             dependencies=[Depends(require_learner)])
-async def next_action(learner_id: str, as_of: datetime | None = None,
+async def next_action(learner_id: str, as_of: datetime | None = None, p: Principal = Depends(principal),
                       c: Container = Depends(container)) -> NextLearningAction:
+    """The next learning action. Selecting it refreshes and stores the learner's curriculum progress as of `as_of`
+    (default: now), so only the learner's own scope may choose the time: a teacher reading a learner on their roster
+    gets the action as of now, and `as_of` from them is a change (403)."""
+    if as_of is not None and not p.may_access(learner_id):
+        raise Forbidden("a teacher may read the learners of their classes but not act for them")
     return await c.curriculum_service.next_action(learner_id, as_of=as_of)
 
 

@@ -98,6 +98,7 @@ from app.schemas.presentation import PresentationConfig
 from app.schemas.providers import Capability
 from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
+from app.services.classes import ClassService
 from app.services.curriculum import CurriculumService
 from app.services.learners import LearnerService
 from app.services.artifact_content import ArtifactContentService
@@ -123,6 +124,7 @@ from app.storage.repositories import (
     SqlTaskJobRepository,
     SqlTaskRepository,
     SqlAssessmentRepository,
+    SqlClassRepository,
     SqlLearningCycleRepository,
     SqlTeachingRepository,
 )
@@ -394,6 +396,7 @@ class Container:
     learning_cycle_service: LearningCycleService
     assessment_service: AssessmentService
     ownership: OwnershipService
+    classes: ClassService  # classes and rosters: whose learners a teacher may read
     artifact_content: ArtifactContentService
     catalog: CatalogService
     production: ProductionService
@@ -598,6 +601,7 @@ def build_container(
         assessment_service=assessment_service,
         ownership=OwnershipService(tasks=task_service, artifacts=artifacts, memory=memory, teaching=teaching_service,
                                    assessment=assessment_service, cycles=learning_cycle_service),
+        classes=ClassService(SqlClassRepository(sessions), memory, clock),
         artifact_content=ArtifactContentService(artifacts),
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         production=ProductionService(settings=settings, events=events, registry=providers.registry,

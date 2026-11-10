@@ -4,7 +4,19 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -342,3 +354,25 @@ class TaskJobRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ClassRow(Base):
+    """A teacher's class (app/schemas/classroom.py). `join_code_hash` is the SHA-256 of the current join code: the
+    plain code is never stored. It is unique, so a code names at most one class."""
+
+    __tablename__ = "classes"
+    class_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    teacher_id: Mapped[str] = mapped_column(String(128), index=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    name: Mapped[str] = mapped_column(String(200))
+    join_code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ClassMemberRow(Base):
+    """A learner on a class's roster. The primary key makes a join idempotent: a learner is on a roster once."""
+
+    __tablename__ = "class_members"
+    class_id: Mapped[str] = mapped_column(String(64), ForeignKey("classes.class_id"), primary_key=True)
+    learner_id: Mapped[str] = mapped_column(String(128), primary_key=True, index=True)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

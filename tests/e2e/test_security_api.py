@@ -12,13 +12,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.app import create_app
-from app.api.auth import AUTHOR
+from app.api.auth import AUTHOR, TEACHER
 from app.schemas.learner import LearnerProfileInput
 from app.schemas.learning_cycle import LearnerPrompt
 from tests.auth import TestAuth, client_for, settle
 from tests.learning_cycle_fixtures import CONCEPT, LEARNER, ScriptedLearner
 
 INTRUDER = "intruder-learner"
+TEACHER_ID = "teacher-of-a"  # teaches the class learner A joined (MVP item 4)
 SENTINEL = "SENTINEL-ANSWER-KEY-41f7"  # the registered item's answer key: no learner-facing response may carry it
 # Keys that only internal records carry: answer keys, grading internals, workflow state, provider records, host paths.
 FORBIDDEN_KEYS = {"expected_answer", "accepted_answers", "acceptable_answers", "answer_key", "correct_answer",
@@ -62,11 +63,17 @@ def world(cycle_env_at):
         attempt = a.post("/assessment-items/sec-item/attempts",
                          json={"learner_id": LEARNER, "answer": "hablaba", "attempt_id": "sec-attempt"})
         assert attempt.status_code == 201, attempt.text
+        created = a.post("/classes", json={"name": "Spanish B1"},
+                         headers=auth.headers(user_id=TEACHER_ID, roles=(TEACHER,)))
+        assert created.status_code == 201, created.text
+        joined = a.post(f"/learners/{LEARNER}/classes", json={"join_code": created.json()["join_code"]})
+        assert joined.status_code == 201, joined.text
     ids = {"learner": LEARNER, "goal": c.curriculum_service.goals(LEARNER)[0].goal_id, "cycle": cycle.cycle_id,
            "task": lesson_task, "evaluation": evaluation, "session": session, "item": "sec-item",
            "attempt": "sec-attempt", "lesson": c.artifacts.find(lesson_task, "lesson").artifact_id,
            # a learning cycle's own artifact: owned through the cycle, not a task
-           "artifact": c.learning_cycle_service.artifacts(cycle.cycle_id)[0].artifact_id}
+           "artifact": c.learning_cycle_service.artifacts(cycle.cycle_id)[0].artifact_id,
+           "class": created.json()["class_id"], "join_code": created.json()["join_code"]}
     yield env, ids, auth
 
 
@@ -120,7 +127,17 @@ def routes(ids: dict) -> list[tuple[str, str, dict | None]]:
         ("GET", f"/learning-cycles/{cid}/events", None),
         ("GET", f"/learning-cycles/{cid}/artifacts", None),
         ("GET", f"/artifacts/{ids['artifact']}/content", None),
+        ("POST", "/classes", {"name": "Another class"}),
+        ("GET", "/classes", None),
+        ("GET", f"/classes/{ids['class']}", None),
+        ("POST", f"/classes/{ids['class']}/join-code", None),
+        ("DELETE", f"/classes/{ids['class']}/learners/{lid}", None),
+        ("POST", f"/learners/{lid}/classes", {"join_code": ids["join_code"]}),
+        ("GET", f"/learners/{lid}/classes", None),
     ]
+
+
+TEACHER_ONLY = {("POST", "/classes"), ("GET", "/classes")}  # need the teacher role: 403 without it
 
 
 def template(path: str, ids: dict) -> str:
@@ -129,7 +146,7 @@ def template(path: str, ids: dict) -> str:
     names = {ids["learner"]: "learner_id", ids["goal"]: "goal_id", ids["task"]: "task_id",
              ids["evaluation"]: "task_id", ids["session"]: "session_id", ids["cycle"]: "cycle_id",
              ids["item"]: "item_id", ids["attempt"]: "attempt_id", ids["lesson"]: "lesson_id",
-             ids["artifact"]: "artifact_id"}
+             ids["artifact"]: "artifact_id", ids["class"]: "class_id"}
     return "/".join("{" + names[part] + "}" if part in names else part for part in path.split("/"))
 
 
@@ -142,7 +159,8 @@ def snapshot(client: TestClient, ids: dict) -> dict:
     reads = [f"/learners/{ids['learner']}", f"/learners/{ids['learner']}/goals", f"/goals/{ids['goal']}",
              f"/goals/{ids['goal']}/curriculum/versions", f"/tasks/{ids['task']}", f"/tasks/{ids['evaluation']}",
              f"/teaching-sessions/{ids['session']}", f"/learners/{ids['learner']}/learning-cycles",
-             f"/assessment-items/{ids['item']}/attempts?learner_id={ids['learner']}"]
+             f"/assessment-items/{ids['item']}/attempts?learner_id={ids['learner']}",
+             f"/learners/{ids['learner']}/classes"]
     out = {}
     for path in reads:
         r = client.get(path)
@@ -184,6 +202,9 @@ def test_learner_b_cannot_reach_any_of_learner_a_resources(world) -> None:
             if path in ("/providers", "/agents", "/tools"):
                 assert r.status_code == 200  # not learner data: any authenticated principal
                 continue
+            if (method, path) in TEACHER_ONLY:
+                assert r.status_code == 403 and r.json()["error"] == "Forbidden", (method, path, r.text)
+                continue
             assert r.status_code == 404, (method, path, r.status_code, r.text)
             assert r.json() == NOT_FOUND, (method, path)  # the same answer as for an id that does not exist
         assert snapshot(a, ids) == before  # nothing B sent changed anything of A's
@@ -208,6 +229,9 @@ def test_learner_a_reaches_their_own_resources_without_internal_state(world) -> 
             if method != "GET":
                 continue
             r = a.get(path)
+            if path.startswith("/classes"):  # A is a learner, not a teacher: classes are not A's to see
+                assert r.status_code in (403, 404), (path, r.text)
+                continue
             if path.endswith("/content"):  # a cycle artifact: its type is not servable (app/services/artifact_content.py)
                 assert (r.status_code, r.json()) == (404, NOT_FOUND), path
                 continue
