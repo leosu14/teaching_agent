@@ -8,6 +8,7 @@ item, in order). Nothing is ever overwritten, so every attempt stays auditable.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Protocol
 
@@ -28,6 +29,10 @@ class AssessmentRepository(Protocol):
         ...
 
     def item(self, item_id: str) -> AssessmentItem | None: ...
+
+    def items_for_lesson(self, lesson_ids: Iterable[str]) -> list[AssessmentItem]:
+        """The items registered on any of these lessons (a lesson is addressed by its artifact or task id)."""
+        ...
 
     def save_rubric(self, rubric: AssessmentRubric) -> bool: ...
 
@@ -78,6 +83,10 @@ class InMemoryAssessmentRepository:
 
     def item(self, item_id: str) -> AssessmentItem | None:
         return self._items.get(item_id)
+
+    def items_for_lesson(self, lesson_ids: Iterable[str]) -> list[AssessmentItem]:
+        ids = set(lesson_ids)
+        return sorted((i for i in self._items.values() if i.lesson_id in ids), key=lambda i: i.assessment_item_id)
 
     def save_rubric(self, rubric: AssessmentRubric) -> bool:
         with self._lock:

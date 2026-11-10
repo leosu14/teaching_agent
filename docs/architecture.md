@@ -5,7 +5,8 @@
 Imports only go downward. `tests/unit/test_architecture.py` fails the build on any upward import.
 
 ```
-api          FastAPI routes: validate input, call a service, return the result
+api          FastAPI routes: validate input, call a service, return the result; the student web app's static
+             files (app/api/web/, served at /app/)
 services     application services + the composition root (container.py); the CLI uses the same services
 runtime      orchestrator (task lifecycle), workflow engine + node types, task state machine, workflow templates
 agents       decide WHAT to do; reach models only via ModelRouter and tools only via ToolManager
@@ -957,9 +958,35 @@ on resume and invalidates only the nodes whose artifacts are missing or corrupt,
 graph, per-node trace, usage). `scripts/run_production_demo.py` is a thin CLI over it; see
 [production](production.md).
 
+## Student web app
+
+`/app/` is the learner's web app (MVP item 6): one HTML page, one stylesheet and one dependency-free script
+(`app/api/web/`), served by the API itself and calling the same JSON API every other client uses. There is no build
+step and no server-side rendering; the page holds no data until the API returns it.
+
+| Screen | API |
+|---|---|
+| Sign-in (development token; behind the gateway the browser's session is enough) | `GET /me` |
+| Onboarding: name and session length | `GET/PUT /learners/{id}` |
+| New goal: course and level (from `GET /courses`; CEFR when the knowledge base is the fixture), title, date | `POST /learners/{id}/goals`, `POST /goals/{id}/curriculum` |
+| Today: the active cycle, or the next action with "Start", or "Plan my path"; goals with progress | `GET /learners/{id}/next-action`, `/goals`, `/learning-cycles`, `GET /goals/{id}/curriculum` |
+| A learning cycle: steps; diagnostic and evaluation forms; the session as a chat (answer, ask, stop); outcome | `POST /learners/{id}/learning-cycles`, `GET /learning-cycles/{id}`, `POST .../responses`, `.../resume`, `.../cancel`, `GET /teaching-sessions/{id}` |
+| The lesson: answer-isolated reading with its images | `GET /lessons/{id}/reading`, `GET /artifacts/{id}/content` |
+| Progress: mastery, weak and due concepts, each goal's objectives | `GET /learners/{id}/progress`, `GET /learners/{id}`, curricula |
+| History: past cycles | `GET /learners/{id}/learning-cycles` |
+
+The app is a thin client: every decision (what to learn next, the questions, grading, mastery) stays in the API.
+Retries are safe because every write it sends is idempotent (`idempotency_key` for goals and cycles,
+`client_response_id` for responses, reused until the response is accepted). A cycle that another request is driving
+(`busy_until`) is polled every two seconds; a RUNNING cycle nobody drives is resumed. Lesson generation happens inside
+the cycle's start and response requests, so the page shows a spinner meanwhile.
+
+The lesson player is text and images: the deck, narration and video are blocked for learners because they can hold
+answer slides (see [security](security.md#lesson-reading)); serving them needs an answer-free render first.
+
 ## Not in this release
 
 Learned mastery models (BKT / IRT) and FSRS-style scheduling (the updater and scheduler are replaceable), courses
 beyond the Spanish A1 to B1 pilot and a course authoring UI, real image-search providers, video generation providers other than MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
-design, animations, cloud rendering, coding exercises and VS Code integration, UI, deployment. The provider and
+design, animations, cloud rendering, coding exercises and VS Code integration, a teacher UI, deployment. The provider and
 tool interfaces they plug into already exist.

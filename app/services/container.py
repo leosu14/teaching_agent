@@ -30,6 +30,7 @@ from app.config.providers import ProviderSettings, apply_llm_overrides
 from app.config.routing import ConfigError, RoutingConfig, load_routing
 from app.config.settings import Settings
 from app.content.course import CourseError, load_courses
+from app.schemas.course import CourseSummary
 from app.curriculum.engine import CurriculumEngine
 from app.curriculum.tracker import CurriculumTracker
 from app.learner.frameworks import FrameworkRegistry, default_frameworks
@@ -103,6 +104,7 @@ from app.services.classes import ClassService
 from app.services.curriculum import CurriculumService
 from app.services.learners import LearnerService
 from app.services.artifact_content import ArtifactContentService
+from app.services.lesson_reading import LessonReadingService
 from app.services.ownership import OwnershipService
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
@@ -399,6 +401,8 @@ class Container:
     ownership: OwnershipService
     classes: ClassService  # classes and rosters: whose learners a teacher may read
     artifact_content: ArtifactContentService
+    lesson_reading: LessonReadingService  # the learner-safe text of a lesson (the student app's lesson player)
+    courses: list[CourseSummary]  # the courses TA_COURSES loads (empty: the fixture knowledge base)
     catalog: CatalogService
     production: ProductionService
     spend: SpendStore  # the spend ledger: entries and budget counters, read-only for callers
@@ -429,9 +433,11 @@ def build_container(
     settings = settings or Settings()
     settings.validate_runtime()
     knowledge_documents = None
+    courses: list[CourseSummary] = []
     if retriever is None and settings.course_paths():
         try:  # an invalid course stops startup, with every problem of every course
-            knowledge_documents = load_courses(settings.course_paths(), default_frameworks()).documents
+            loaded = load_courses(settings.course_paths(), default_frameworks())
+            knowledge_documents, courses = loaded.documents, loaded.summaries()
         except CourseError as exc:
             raise ConfigError(f"TA_COURSES: {exc}") from None
 
@@ -600,6 +606,7 @@ def build_container(
         SqlLearningCycleRepository(sessions), curriculum=curriculum_service, tasks=task_service,
         teaching=teaching_service, memory=memory, artifacts=artifacts, events=events, event_log=event_repo,
         clock=clock)
+    artifact_content = ArtifactContentService(artifacts)
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
@@ -611,7 +618,10 @@ def build_container(
         ownership=OwnershipService(tasks=task_service, artifacts=artifacts, memory=memory, teaching=teaching_service,
                                    assessment=assessment_service, cycles=learning_cycle_service),
         classes=ClassService(SqlClassRepository(sessions), memory, clock),
-        artifact_content=ArtifactContentService(artifacts),
+        artifact_content=artifact_content,
+        lesson_reading=LessonReadingService(artifacts=artifacts, tasks=task_service, teaching=teaching_service,
+                                            assessment=assessment_service, content=artifact_content),
+        courses=courses,
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         production=ProductionService(settings=settings, events=events, registry=providers.registry,
                                      selector=providers.selector, router=router, agents=agents, tools=tools,

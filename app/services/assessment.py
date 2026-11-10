@@ -152,6 +152,10 @@ class AssessmentService:
             raise AssessmentItemNotFound(f"assessment item {item_id} not found")
         return found
 
+    def items_for_lesson(self, *lesson_ids: str) -> list[AssessmentItem]:
+        """The items registered on a lesson, by its LESSON artifact id and its lesson task id."""
+        return self._repo.items_for_lesson(lesson_ids)
+
     # --- grading -------------------------------------------------------------------------------------------------
 
     async def assess(self, request: AssessRequest, *, scope: ExecutionScope | None = None,
