@@ -84,10 +84,16 @@ Credentials are only ever reported as set or missing.
 
 ### Knowledge base
 
-The diagnostic needs the concepts of the lesson's subject and topic from the knowledge base
-(`TA_CORPUS_DIR/knowledge_base.json`). The preflight counts them and refuses the run if there are none. The bundled
-corpus covers Spanish B1 "Climate change" (the documented example) and Spanish A2 "football". Add concept documents
-for other subjects and topics; nothing in the pipeline is specific to Spanish.
+The diagnostic needs the concepts of the lesson's subject and topic from the knowledge base. The preflight counts them
+and refuses the run if there are none.
+
+For a pilot, set `TA_COURSES=spanish-a1-b1`: the bundled Spanish A1 to B1 course (18 units, one lesson topic each,
+46 concepts) becomes the knowledge base, validated at startup. A lesson's topic is a unit's topic, for example
+`--level A2 --topic "daily routine"`; `python -m app.content validate spanish-a1-b1` lists them. Other courses are
+authored in the same format ([courses](../courses/README.md)); nothing in the pipeline is specific to Spanish.
+
+Without `TA_COURSES` the fixture knowledge base `TA_CORPUS_DIR/knowledge_base.json` is used: Spanish B1 "Climate
+change" (the documented example) and Spanish A2 "football".
 
 ## Budgets
 
@@ -353,7 +359,9 @@ and PostgreSQL and need no manual step.
 
 - Image search has no real adapter yet: searched images come from the local catalog, so production plans use
   generated visuals only (`MAX_SEARCHED_IMAGES=0`).
-- Concept maps come from the local knowledge base; topics it does not cover are refused at preflight.
+- Concept maps come from the local knowledge base (the courses of `TA_COURSES`, or the fixture); topics it does not
+  cover are refused at preflight. Courses are files: there is no authoring API or UI, and a changed course takes
+  effect when the application restarts.
 - The cost limit covers known costs only; unpriced models are bounded by the unit limits.
 - Trace linkage is per workflow node: a node's artifacts are linked to all of that node's provider requests.
 - The real adapters are tested against faithful in-process fakes of the vendor APIs; the live test is opt-in.

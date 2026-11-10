@@ -160,6 +160,10 @@ the last checkpoint without regenerating intact artifacts, and a `production_run
 graph, per-request traceability, usage and cost. `--mock` rehearses the same path offline. See
 [docs/production.md](docs/production.md).
 
+Course content is authored as JSON files in [courses/](courses/README.md). `TA_COURSES=spanish-a1-b1` makes the
+bundled Spanish A1 to B1 course (18 units, 46 concepts) the knowledge base; `python -m app.content validate <course>`
+checks a course with the same rules as startup and lists every problem with its field path.
+
 ## API
 
 Task work runs in the background: the routes that would run a lesson or an evaluation validate the request, queue a

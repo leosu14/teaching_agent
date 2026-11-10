@@ -250,9 +250,10 @@ class ProductionService:
             warnings = []
         concepts = await self._concepts(request)
         if concepts == 0:
-            problems.append(f"the knowledge base ({self._settings.corpus_dir / 'knowledge_base.json'}) has no concepts "
+            problems.append(f"the knowledge base ({self._settings.knowledge_source()}) has no concepts "
                             f"for subject '{request.subject}' and topic '{request.topic}': the diagnostic needs them "
-                            "(add concept documents, or set TA_CORPUS_DIR to a knowledge base that has them)")
+                            "(add a unit for the topic to a course, or set TA_COURSES or TA_CORPUS_DIR to a knowledge base "
+                            "that has it)")
         definition = template.build(request)
         return ProductionPlan(
             mode=self._settings.providers.mode, ready=not problems, problems=problems, warnings=warnings, task=task,
