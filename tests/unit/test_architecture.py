@@ -33,7 +33,14 @@ ALLOWED: dict[str, set[str]] = {
     "services": FOUNDATION | {"services", "runtime", "agents", "tools", "providers", "learner", "pedagogy",
                               "curriculum", "artifacts", "storage", "teaching", "assessment", "content"},
     "api": FOUNDATION | {"api", "services"},
+    # The identity gateway is a separate process in front of the API: it verifies the identity provider's tokens and
+    # signs the API's identity headers with the API's own contract (app.api.auth), and nothing else of the app.
+    "gateway": FOUNDATION | {"gateway"},
 }
+# The gateway's one import from the API: the signing side of the identity contract (and the role names).
+GATEWAY_API_MODULES = {"app.api.auth": {"gateway_headers", "ROLES"}}
+# What only the gateway may use outside the provider layer: it is an HTTP proxy that fetches the IdP's keys.
+GATEWAY_NETWORK = {"httpx"}
 # Finer rules on top of the layer order.
 # Agents reach models only through the router and StructuredLLM: never a provider, a provider interface or a vendor.
 AGENT_PROVIDER_MODULES = {"app.providers.llm.router", "app.providers.llm.structured"}
@@ -86,7 +93,11 @@ def violations_for(layer: str, module: str, names: list[str], where: str) -> lis
             return [f"{where}: bare 'app' import"]
         target = parts[1]
         allowed = ALLOWED[layer]
-        if layer == "api" and module in API_EXCEPTION_MODULES:
+        if layer == "gateway" and module in GATEWAY_API_MODULES:
+            if not set(names) <= GATEWAY_API_MODULES[module]:
+                problems.append(f"{where}: the gateway may only import {sorted(GATEWAY_API_MODULES[module])} "
+                                f"from {module}")
+        elif layer == "api" and module in API_EXCEPTION_MODULES:
             if not set(names) <= API_EXCEPTION_MODULES[module]:
                 problems.append(f"{where}: api may only import exception types from {module}")
         elif target not in allowed:
@@ -101,7 +112,7 @@ def violations_for(layer: str, module: str, names: list[str], where: str) -> lis
     else:
         if root in SQL_PACKAGES and layer != "storage":
             problems.append(f"{where}: only the storage layer may use {root}")
-        if root in VENDOR_SDKS and layer != "providers":
+        if root in VENDOR_SDKS and layer != "providers" and not (layer == "gateway" and root in GATEWAY_NETWORK):
             problems.append(f"{where}: vendor SDK '{root}' outside the providers layer")
         if any(module == m or module.startswith(m + ".") for m in NETWORK_MODULES) and layer != "providers":
             problems.append(f"{where}: network module '{module}' outside the providers layer")

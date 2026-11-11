@@ -7,3 +7,4 @@ dist/
 .env
 var/
 .venv/
+deploy/secrets/

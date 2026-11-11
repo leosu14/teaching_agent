@@ -48,7 +48,7 @@ def test_batch_builds_dependency_graph_and_stores_blobs_outside_db(artifacts, tm
     assert artifacts.graph("t1") == {ids["lesson"]: [], ids["script"]: [ids["lesson"]], ids["review"]: [ids["lesson"]]}
     assert [a.name for a in artifacts.lineage(ids["script"])] == ["lesson"]
     lesson = artifacts.get(ids["lesson"])
-    assert lesson.uri.startswith("file://") and artifacts.read(ids["lesson"]) == b"body"
+    assert lesson.uri == "object:t1/lesson/v1.txt" and artifacts.read(ids["lesson"]) == b"body"
     assert (tmp_path / "objects" / "t1" / "lesson" / "v1.txt").read_bytes() == b"body"
     assert [e.type for e in events] == ["artifact.created"] * 3
 

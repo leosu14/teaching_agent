@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.config.production import ProductionSettings
 from app.config.providers import ProviderSettings
 from app.config.routing import ConfigError
+from app.config.storage import S3Settings
 from app.schemas.curriculum import CurriculumConfig, FeasibilityConfig
 from app.schemas.generative_video import GeneratedVideoConfig
 from app.schemas.pedagogy import (
@@ -40,9 +41,34 @@ def course_path(entry: str) -> Path:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TA_", env_file=".env", extra="ignore")
 
+    # Deployment profile (MVP item 8, docs/deployment.md). "development" (the default) changes nothing. "production"
+    # is a deployed pilot: the API and the worker refuse to start unless the deployment checks pass
+    # (`deployment_problems`): PostgreSQL under schema migrations, the S3 object store, the signed identity gateway,
+    # daily spending caps on, and a declared hard cap at every real vendor in use.
+    deployment: Literal["development", "production"] = "development"
+
     data_dir: Path = REPO_ROOT / "var"
     database_url: str | None = None
+    # How the schema is managed (app/storage/migrate.py): "create" makes missing tables on startup; "migrations"
+    # requires the database at the newest Alembic revision. Unset: "migrations" in production, "create" otherwise.
+    database_schema: Literal["create", "migrations"] | None = None
+    # Where artifact bytes go: "filesystem" (TA_OBJECT_STORE_DIR, one machine) or "s3" (any S3-compatible bucket).
+    object_store: Literal["filesystem", "s3"] = "filesystem"
     object_store_dir: Path | None = None
+    s3_bucket: str | None = None
+    s3_region: str = "us-east-1"
+    s3_endpoint_url: str | None = None  # unset: AWS; set for MinIO, R2, ...
+    s3_prefix: str = ""
+    s3_path_style: bool | None = None  # unset: path style for a custom endpoint, virtual-hosted for AWS
+    s3_allow_http: bool = False  # plain http only for a store on a private network
+    s3_access_key_id: SecretStr | None = None
+    s3_secret_access_key: SecretStr | None = None
+    s3_session_token: SecretStr | None = None
+    s3_timeout_seconds: float = Field(default=60.0, gt=0, le=3600)
+    # Hard spending caps the operator has set in each vendor's own console, declared here as `vendor=USD per month`
+    # (comma-separated, e.g. "openai=200,tavily=30"). The application cannot set them; a production deployment
+    # refuses to start while a real vendor in use has none declared, so the step cannot be forgotten.
+    vendor_caps: str = ""
     routing_file: Path = REPO_ROOT / "config" / "routing.toml"
 
     # LLM, TTS, image and search providers: unprefixed variables (LLM_PROVIDER, TTS_PROVIDER, ...), see
@@ -208,6 +234,97 @@ class Settings(BaseSettings):
                               attempt=budget("attempt") or TaskBudget(), learner_daily=budget("learner_daily"),
                               global_daily=budget("global_daily"),
                               reservation_grace_seconds=self.spend_reservation_grace_seconds)
+
+    @property
+    def resolved_database_schema(self) -> Literal["create", "migrations"]:
+        if self.database_schema is not None:
+            return self.database_schema
+        return "migrations" if self.deployment == "production" else "create"
+
+    def s3_config(self) -> S3Settings:
+        def secret(value: SecretStr | None) -> str:
+            return value.get_secret_value() if value is not None else ""
+
+        if not self.s3_bucket:
+            raise ConfigError("TA_OBJECT_STORE=s3 needs TA_S3_BUCKET")
+        return S3Settings(bucket=self.s3_bucket, region=self.s3_region, endpoint_url=self.s3_endpoint_url or None,
+                          prefix=self.s3_prefix, path_style=self.s3_path_style, allow_http=self.s3_allow_http,
+                          access_key_id=secret(self.s3_access_key_id),
+                          secret_access_key=secret(self.s3_secret_access_key),
+                          session_token=secret(self.s3_session_token) or None,
+                          timeout_seconds=self.s3_timeout_seconds)
+
+    def declared_vendor_caps(self) -> dict[str, float]:
+        caps: dict[str, float] = {}
+        for entry in (e.strip() for e in self.vendor_caps.split(",")):
+            if not entry:
+                continue
+            vendor, sep, amount = entry.partition("=")
+            try:
+                value = float(amount)
+            except ValueError:
+                value = -1.0
+            if not sep or not vendor.strip() or value <= 0:
+                raise ConfigError(f"TA_VENDOR_CAPS: {entry!r} is not vendor=USD (a positive monthly amount)")
+            caps[vendor.strip().lower()] = value
+        return caps
+
+    def real_vendors(self) -> list[str]:
+        """The real (paid) vendors this configuration can call: every capability's provider and fallback, and the
+        per-role LLM routes. Mock providers are not vendors. Empty in offline mode, where none can be called."""
+        if self.providers.offline:
+            return []
+        from app.schemas.providers import Capability
+
+        used = {p for c in Capability for p in self.providers.chain(c)}
+        used |= {provider for provider, _model in (self.providers.llm_routes or {}).values() if provider}
+        return sorted(p.lower() for p in used if p and p.lower() != "mock")
+
+    def deployment_problems(self) -> list[str]:
+        """Why this configuration is not a production deployment (an empty list: it is). Never shows a secret."""
+        problems = []
+        url = self.resolved_database_url
+        if not url.startswith(("postgresql://", "postgresql+")):
+            problems.append("TA_DATABASE_URL must be a PostgreSQL URL (postgresql+psycopg://...); SQLite is for one "
+                            "machine and development")
+        if self.resolved_database_schema != "migrations":
+            problems.append("TA_DATABASE_SCHEMA must be 'migrations' (the schema is versioned; run "
+                            "`python -m app.storage.migrate upgrade` before starting a new version)")
+        if self.object_store != "s3":
+            problems.append("TA_OBJECT_STORE must be 's3': the filesystem store is not shared between machines")
+        else:
+            try:
+                self.s3_config()
+            except ConfigError as exc:
+                problems.append(str(exc))
+        if self.auth_mode != "gateway":
+            problems.append("TA_AUTH_MODE must be 'gateway' (static development tokens never expire)")
+        elif self.auth_gateway_secret is None or len(self.auth_gateway_secret.get_secret_value()) < 32:
+            problems.append("TA_AUTH_GATEWAY_SECRET (or TA_AUTH_GATEWAY_SECRET_FILE) must be set, at least 32 "
+                            "characters")
+        if self.worker_embedded:
+            problems.append("TA_WORKER_EMBEDDED must be false: the worker runs as its own process")
+        priced = (self.providers.llm_input_price_per_mtok is not None
+                  and self.providers.llm_output_price_per_mtok is not None)
+        for scope in ("learner_daily", "global_daily"):
+            label = f"TA_BUDGET_{scope.upper()}_"
+            units = all(getattr(self, f"budget_{scope}_{f}") is not None
+                        for f in ("max_llm_requests", "max_llm_tokens"))
+            cost = getattr(self, f"budget_{scope}_max_cost_usd") is not None and (priced or self.providers.offline)
+            if not (units or cost):
+                problems.append(f"daily caps must be on: set {label}MAX_LLM_REQUESTS and {label}MAX_LLM_TOKENS, or "
+                                f"{label}MAX_COST_USD with LLM pricing (LLM_INPUT_PRICE_PER_MTOK and "
+                                f"LLM_OUTPUT_PRICE_PER_MTOK; without a price a cost cap does not bind)")
+        try:
+            caps = self.declared_vendor_caps()
+        except ConfigError as exc:
+            problems.append(str(exc))
+            caps = {}
+        missing = [v for v in self.real_vendors() if v not in caps]
+        if missing:
+            problems.append("TA_VENDOR_CAPS must declare the hard spending cap set in the console of "
+                            f"{', '.join(missing)} (vendor=USD per month)")
+        return problems
 
     @property
     def resolved_database_url(self) -> str:

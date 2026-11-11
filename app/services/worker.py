@@ -239,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process en
     parser.add_argument("--sweep", action="store_true",
                         help="queue the continuation of work killed workers left mid-run (one pass), then exit")
     args = parser.parse_args(argv)
+    from app.config.secrets import load_secret_files
+
+    load_secret_files()
     settings = Settings()
     configure_logging(settings.log_level, settings.log_json)
     container = build_container(settings)

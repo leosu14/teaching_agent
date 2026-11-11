@@ -265,8 +265,8 @@ async def test_resume_regenerates_only_what_is_missing_or_corrupt(vendors, tmp_p
         await first.production.run(plan, answer=answer)
     crashed = first.task_service.list_for_learner(TASK.learner_id)[-1]
     image = next(a for a in first.artifacts.list_for_task(crashed.task_id) if a.type == ArtifactType.IMAGE_ASSET)
+    path = first.object_store.local_path(image.uri)
     first.close()
-    path = image.uri.removeprefix("file://")
     with open(path, "wb") as fh:
         fh.write(b"corrupted")
     research_before = requests_by_node(crashed).get("research")

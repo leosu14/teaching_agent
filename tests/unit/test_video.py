@@ -333,7 +333,7 @@ def test_service_composes_validates_and_stores_a_video_artifact(scenario, servic
     # Deduplication: the same key finds it; a different configuration or tampered bytes do not.
     assert service.find("task_v", "video", key).artifact_id == artifact.artifact_id
     assert service.find("task_v", "video", "vc_other") is None
-    with open(artifact.uri.removeprefix("file://"), "ab") as f:
+    with open(FilesystemObjectStore(tmp_path / "objects").local_path(artifact.uri), "ab") as f:
         f.write(b"tamper")
     assert service.find("task_v", "video", key) is None
 
