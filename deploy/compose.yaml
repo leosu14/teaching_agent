@@ -56,7 +56,7 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: ${TA_S3_SERVER_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
     command: ["server", "/data"]
     environment:
       MINIO_ROOT_USER_FILE: s3_access_key_id
@@ -71,7 +71,7 @@ services:
     restart: unless-stopped
 
   bucket:  # creates the bucket, once
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z  # the server image ships the mc client
+    image: ${TA_S3_SERVER_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}  # the server image ships the mc client
     depends_on:
       minio: {condition: service_healthy}
     secrets: [s3_access_key_id, s3_secret_access_key]
