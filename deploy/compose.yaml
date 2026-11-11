@@ -4,7 +4,7 @@
 #   deploy/secrets/ holds the secret files (never committed; docs/deployment.md lists each one).
 #   docker compose -f deploy/compose.yaml up -d --build
 #
-# PostgreSQL and MinIO run next to the app here, so the stack is complete on one machine (CI runs it end to end with
+# PostgreSQL and an S3-compatible store (RustFS) run next to the app here, so the stack is complete on one machine (CI runs it end to end with
 # deploy/smoke.py). A hosted pilot points TA_DATABASE_URL at managed PostgreSQL (with backups) and TA_S3_* at a
 # managed bucket, and drops those two services.
 
@@ -18,8 +18,8 @@ x-app: &app
     TA_DATABASE_URL_FILE: /run/secrets/database_url
     TA_OBJECT_STORE: s3
     TA_S3_BUCKET: teaching-agent
-    TA_S3_ENDPOINT_URL: http://minio:9000
-    TA_S3_ALLOW_HTTP: "true"  # MinIO is on the compose network only; a managed bucket is https
+    TA_S3_ENDPOINT_URL: http://objects:9000
+    TA_S3_ALLOW_HTTP: "true"  # the store is on the compose network only; a managed bucket is https
     TA_S3_ACCESS_KEY_ID_FILE: /run/secrets/s3_access_key_id
     TA_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/s3_secret_access_key
     TA_AUTH_MODE: gateway
@@ -55,29 +55,26 @@ services:
       retries: 30
     restart: unless-stopped
 
-  minio:
-    image: ${TA_S3_SERVER_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
-    command: ["server", "/data"]
+  objects:  # an S3-compatible store (RustFS, Apache-2.0); a hosted pilot uses a managed bucket instead
+    image: ${TA_S3_SERVER_IMAGE:-rustfs/rustfs:1.0.5@sha256:b81d16a90ee25bd9511280127ca1471788c6e874cf0f0da759645f46b2dc1d74}
     environment:
-      MINIO_ROOT_USER_FILE: s3_access_key_id
-      MINIO_ROOT_PASSWORD_FILE: s3_secret_access_key
+      RUSTFS_ACCESS_KEY_FILE: /run/secrets/s3_access_key_id
+      RUSTFS_SECRET_KEY_FILE: /run/secrets/s3_secret_access_key
     secrets: [s3_access_key_id, s3_secret_access_key]
     volumes: [objects:/data]
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health"]
       interval: 2s
       timeout: 5s
       retries: 30
     restart: unless-stopped
 
-  bucket:  # creates the bucket, once
-    image: ${TA_S3_SERVER_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}  # the server image ships the mc client
+  bucket:  # one-shot: creates TA_S3_BUCKET in that store if it does not exist
+    <<: *app
+    command: ["create-bucket"]
+    restart: "no"
     depends_on:
-      minio: {condition: service_healthy}
-    secrets: [s3_access_key_id, s3_secret_access_key]
-    entrypoint: ["/bin/sh", "/run/ta-config/create-bucket.sh"]
-    volumes:
-      - ./create-bucket.sh:/run/ta-config/create-bucket.sh:ro
+      objects: {condition: service_healthy}
 
   migrate:  # one-shot: the schema to the newest revision before the API and the worker start
     <<: *app

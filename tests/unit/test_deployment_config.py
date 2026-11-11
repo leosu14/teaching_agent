@@ -32,6 +32,7 @@ def test_secret_files_set_their_variables(tmp_path) -> None:
     (tmp_path / "key").write_text("sk-test-key-value\n")
     env = {"TA_AUTH_GATEWAY_SECRET_FILE": str(tmp_path / "gw"), "OPENAI_API_KEY_FILE": str(tmp_path / "key")}
     env["TA_AUTH_STATIC_TOKENS_FILE"] = "/elsewhere/tokens.json"  # a setting that is a file, not a secret
+    env["OTHER_TOOL_TOKEN_FILE"] = "/elsewhere/token"  # another program's variable: not ours to judge
     assert load_secret_files(env) == ["TA_AUTH_GATEWAY_SECRET", "OPENAI_API_KEY"]
     assert env["TA_AUTH_GATEWAY_SECRET"] == SECRET and env["OPENAI_API_KEY"] == "sk-test-key-value"
 

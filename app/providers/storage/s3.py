@@ -9,7 +9,7 @@ optional prefix (`TA_S3_PREFIX`) is applied here only, so a recorded URI never n
 - `put_if_absent` and `put_file_if_absent` are conditional writes (`If-None-Match: *`): of two concurrent writers of
   one key exactly one creates it and an existing object is never replaced, as with the filesystem store's hard links.
   S3 has supported this since 2024; MinIO does too.
-- HTTPS only, unless `allow_http` is set for a store on a private network (a MinIO container next to the app).
+- HTTPS only, unless `allow_http` is set for a store on a private network (an S3 server container next to the app).
 - Not a vendor API: it does not go through the provider HTTP client, so offline mode (mock providers) still stores
   artifacts in a bucket.
 """
@@ -192,6 +192,26 @@ class S3ObjectStore:
                     raise ObjectStoreError("object store check: the probe object read back differently")
         finally:
             self._request("DELETE", key, expect={200, 204, 404})
+
+    def ensure_bucket(self) -> bool:
+        """Create the bucket if it does not exist (for a self-hosted store; a managed bucket is made by its operator).
+        Returns True when it was created."""
+        c = self._config
+        url = f"{c.base}/{_encode(c.bucket)}" if c.uses_path_style else f"{urlsplit(c.base).scheme}://{c.bucket}." \
+            f"{urlsplit(c.base).netloc}/"
+        httpx = _httpx()
+        try:
+            response = self._client.request("PUT", url, headers=self._signed("PUT", url, b"", None), content=b"")
+        except httpx.HTTPError as exc:
+            raise ObjectStoreError(f"object store bucket creation failed: {type(exc).__name__}") from None
+        try:
+            if response.status_code == 200:
+                return True
+            if response.status_code == 409 and b"BucketAlreadyOwnedByYou" in response.read():
+                return False
+            raise self._error("PUT bucket", response)
+        finally:
+            response.close()
 
     def close(self) -> None:
         self._client.close()

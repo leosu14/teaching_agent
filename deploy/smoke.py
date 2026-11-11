@@ -6,7 +6,7 @@
 It plays the identity provider: it makes an RSA key, writes its public half as the gateway's static key set
 (TA_GATEWAY_JWKS_FILE) and signs the learners' and the teacher's tokens. Every secret is generated into
 deploy/secrets/ for this run. Nothing reaches the network beyond the image registries; the app runs on the offline
-mock providers, with the real FFmpeg, PostgreSQL and MinIO.
+mock providers, with the real FFmpeg, PostgreSQL and an S3-compatible store (RustFS).
 
 What it checks, all through the published gateway only:
 - the migration ran (the API and the worker start only at the newest schema revision) and `check` reports READY;
@@ -36,7 +36,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 SECRETS = DEPLOY / "secrets"
-COMPOSE = ["docker", "compose", "-f", str(DEPLOY / "compose.yaml"), "-p", "ta-smoke"]
+COMPOSE = ["docker", "compose", "-f", str(DEPLOY / "compose.yaml"),
+           *(["-f", os.environ["SMOKE_COMPOSE_OVERRIDE"]] if os.environ.get("SMOKE_COMPOSE_OVERRIDE") else []),
+           "-p", "ta-smoke"]
 ISSUER, AUDIENCE, KID = "https://idp.smoke.test/", "teaching-agent", "smoke-key-1"
 FIXTURES = ROOT / "fixtures" / "demo"
 TERMINAL_JOB = {"SUCCEEDED", "FAILED", "CANCELLED"}
@@ -117,7 +119,7 @@ def diagnostic_answers(task: dict) -> list[dict]:
     return [{"question_id": q["question_id"], "answer": key[q["concept_id"]]} for q in sheet["questions"]]
 
 
-def run(port: str) -> None:
+def run(port: str, build: bool = True) -> None:
     key = write_secrets()
     learner = json.loads((FIXTURES / "learner.json").read_text(encoding="utf-8"))
     lid = learner["learner_id"]
@@ -125,7 +127,7 @@ def run(port: str) -> None:
     other = {"Authorization": f"Bearer {token(key, 'other-learner')}"}
     teacher = {"Authorization": f"Bearer {token(key, 'teacher-1', roles=['teacher'])}"}
 
-    compose("up", "-d", "--build")
+    compose("up", "-d", *(["--build"] if build else []))
     with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=60) as c:
         wait_for(c, "/gateway/health", timeout=600)
         assert c.get("/health").json() == {"status": "ok"}
@@ -181,10 +183,11 @@ def run(port: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--keep", action="store_true", help="leave the stack running")
+    parser.add_argument("--no-build", action="store_true", help="use the teaching-agent:local image as it is")
     args = parser.parse_args()
     port = os.environ.get("SMOKE_PORT", "8080")
     try:
-        run(port)
+        run(port, build=not args.no_build)
         return 0
     except BaseException:
         compose("ps", "-a", check=False)

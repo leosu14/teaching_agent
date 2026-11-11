@@ -56,6 +56,7 @@ def load_secret_files(environ: MutableMapping[str, str] | None = None) -> list[s
         loaded.append(name)
     unknown = sorted(k for k in env if k.endswith("_FILE") and k not in NOT_SECRET_FILES
                      and k.removesuffix("_FILE") not in SECRET_VARIABLES
+                     and (k.startswith("TA_") or k.endswith("_API_KEY_FILE"))  # this app's variables only
                      and any(w in k for w in ("SECRET", "KEY", "TOKEN", "PASSWORD")))
     if unknown:  # a misspelt secret would otherwise leave its setting unset
         raise ConfigError(f"{', '.join(unknown)}: not a secret that can be read from a file "

@@ -109,7 +109,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process en
     from app.config.secrets import load_secret_files
 
     parser = argparse.ArgumentParser(description="Check that this configuration is a production deployment.")
-    parser.add_argument("action", choices=["check"])
+    parser.add_argument("action", choices=["check", "create-bucket"],
+                        help="check: the deployment checks; create-bucket: create TA_S3_BUCKET if it does not exist "
+                             "(a self-hosted store such as the compose stack's)")
     parser.add_argument("--connect", action="store_true",
                         help="also check the database schema and the object store over the network")
     args = parser.parse_args(argv)
@@ -119,6 +121,19 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process en
     except (ConfigError, ValueError) as exc:
         print(f"PROBLEM: {exc}")
         return 2
+    if args.action == "create-bucket":
+        from app.services.container import build_object_store
+
+        store = build_object_store(settings)
+        try:
+            created = store.ensure_bucket()
+        except (ConfigError, OSError) as exc:
+            print(f"UNREACHABLE: object store: {exc}")
+            return 3
+        finally:
+            store.close()
+        print(f"bucket {settings.s3_bucket}: {'ready' if created else 'exists'}")
+        return 0
     report = check(settings, connect=args.connect)
     print("\n".join(report.lines()))
     return report.exit_code

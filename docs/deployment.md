@@ -22,8 +22,9 @@ browser ──> login proxy (optional) ──> identity gateway ──> API ─�
 | `gateway` | the identity gateway, port 8080 (`uvicorn app.gateway.main:app`); the only published port |
 | `migrate` | the schema to the newest revision, then exit (`python -m app.storage.migrate upgrade`) |
 | `check` | the deployment check, then exit (`python -m app.services.deployment check --connect`) |
+| `create-bucket` | create `TA_S3_BUCKET` if it does not exist, then exit (for a self-hosted store) |
 
-`deploy/compose.yaml` is a complete pilot on one machine (PostgreSQL and MinIO beside the app). CI's `deploy` job
+`deploy/compose.yaml` is a complete pilot on one machine (PostgreSQL and an S3-compatible store, RustFS, beside the app). CI's `deploy` job
 builds the image, starts that stack and runs `deploy/smoke.py` through the gateway. A hosted pilot uses the same
 image with managed PostgreSQL and a managed bucket.
 
@@ -87,7 +88,7 @@ any machine and the bucket and prefix can change by copying keys. Rows written b
 | `TA_S3_ACCESS_KEY_ID`, `TA_S3_SECRET_ACCESS_KEY`, `TA_S3_SESSION_TOKEN` | the credentials (as secret files) |
 
 New objects are written with `If-None-Match: *`, so an existing object is never replaced (the store needs
-conditional writes: AWS S3 and MinIO have them). The bucket should block public access; the API is the only reader.
+conditional writes: AWS S3, MinIO and RustFS have them). The bucket should block public access; the API is the only reader.
 Instance-role credentials are not supported yet: use an access key scoped to the bucket.
 
 ## Identity

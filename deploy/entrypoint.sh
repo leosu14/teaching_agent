@@ -12,6 +12,8 @@ case "$command" in
     exec uvicorn app.gateway.main:app --host 0.0.0.0 --port "${PORT:-8080}" "$@" ;;
   migrate)
     exec python -m app.storage.migrate upgrade "$@" ;;
+  create-bucket)
+    exec python -m app.services.deployment create-bucket "$@" ;;
   check)
     exec python -m app.services.deployment check --connect "$@" ;;
   *)
