@@ -52,6 +52,11 @@ class AssessmentRepository(Protocol):
 
     def grade(self, grade_id: str) -> AssessmentGrade | None: ...
 
+    def graded_attempts(self, learner_ids: Iterable[str]) -> list[tuple[AssessmentAttempt, AssessmentGrade]]:
+        """Every attempt of these learners with its grade, by learner, item and attempt number (the teacher
+        dashboard reads a class's roster at once)."""
+        ...
+
     def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at: datetime,
                  fence: Lease | None = None) -> AssessmentAttempt:
         """Mark the attempt's publication done (once; a second call keeps the first outcome). Fenced like
@@ -118,6 +123,12 @@ class InMemoryAssessmentRepository:
 
     def grade(self, grade_id: str) -> AssessmentGrade | None:
         return self._grades.get(grade_id)
+
+    def graded_attempts(self, learner_ids: Iterable[str]) -> list[tuple[AssessmentAttempt, AssessmentGrade]]:
+        ids = set(learner_ids)
+        found = sorted((a for a in self._attempts.values() if a.learner_id in ids),
+                       key=lambda a: (a.learner_id, a.assessment_item_id, a.attempt_number))
+        return [(a.model_copy(deep=True), self._grades[a.grade_id]) for a in found]
 
     def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at: datetime,
                  fence: Lease | None = None) -> AssessmentAttempt:

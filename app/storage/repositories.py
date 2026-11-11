@@ -764,6 +764,19 @@ class SqlAssessmentRepository:
             row = s.get(AssessmentGradeRow, grade_id)
             return AssessmentGrade.model_validate_json(row.body) if row else None
 
+    def graded_attempts(self, learner_ids: Iterable[str]) -> list[tuple[AssessmentAttempt, AssessmentGrade]]:
+        """One query for a whole roster: attempts joined with their grades (both rows are written together)."""
+        ids = sorted(set(learner_ids))
+        if not ids:
+            return []
+        with self._sessions() as s:
+            rows = s.execute(select(AssessmentAttemptRow.body, AssessmentGradeRow.body)
+                             .join(AssessmentGradeRow, AssessmentGradeRow.grade_id == AssessmentAttemptRow.grade_id)
+                             .where(AssessmentAttemptRow.learner_id.in_(ids))
+                             .order_by(AssessmentAttemptRow.learner_id, AssessmentAttemptRow.item_id,
+                                       AssessmentAttemptRow.attempt_number))
+            return [(AssessmentAttempt.model_validate_json(a), AssessmentGrade.model_validate_json(g)) for a, g in rows]
+
     def complete(self, attempt_id: str, outcome: AttemptOutcome | None, at,
                  fence: Lease | None = None) -> AssessmentAttempt:
         with self._sessions.begin() as s:

@@ -100,6 +100,7 @@ from app.schemas.presentation import PresentationConfig
 from app.schemas.providers import Capability
 from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
+from app.services.class_dashboard import ClassDashboardService
 from app.services.classes import ClassService
 from app.services.curriculum import CurriculumService
 from app.services.learners import LearnerService
@@ -400,6 +401,7 @@ class Container:
     assessment_service: AssessmentService
     ownership: OwnershipService
     classes: ClassService  # classes and rosters: whose learners a teacher may read
+    class_dashboard: ClassDashboardService  # the teacher dashboard: a class's progress and UNCERTAIN grades (read-only)
     artifact_content: ArtifactContentService
     lesson_reading: LessonReadingService  # the learner-safe text of a lesson (the student app's lesson player)
     courses: list[CourseSummary]  # the courses TA_COURSES loads (empty: the fixture knowledge base)
@@ -607,6 +609,7 @@ def build_container(
         teaching=teaching_service, memory=memory, artifacts=artifacts, events=events, event_log=event_repo,
         clock=clock)
     artifact_content = ArtifactContentService(artifacts)
+    classes = ClassService(SqlClassRepository(sessions), memory, clock)
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
@@ -617,7 +620,10 @@ def build_container(
         assessment_service=assessment_service,
         ownership=OwnershipService(tasks=task_service, artifacts=artifacts, memory=memory, teaching=teaching_service,
                                    assessment=assessment_service, cycles=learning_cycle_service),
-        classes=ClassService(SqlClassRepository(sessions), memory, clock),
+        classes=classes,
+        class_dashboard=ClassDashboardService(classes=classes, memory=memory, curriculum=curriculum_service,
+                                              cycles=learning_cycle_service.repository,
+                                              assessment=assessment_service.repository, clock=clock),
         artifact_content=artifact_content,
         lesson_reading=LessonReadingService(artifacts=artifacts, tasks=task_service, teaching=teaching_service,
                                             assessment=assessment_service, content=artifact_content),

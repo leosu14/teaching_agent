@@ -480,3 +480,18 @@ def test_the_store_numbers_attempts_and_never_overwrites() -> None:
     second = repo.complete("a0", AttemptOutcome(evidence_ids=["e2"]), AT)
     assert first.outcome.evidence_ids == second.outcome.evidence_ids == ["e1"]
     assert [a.attempt_id for a in repo.attempts("conj", "l1")] == ["a0", "a1", "a2"]
+
+
+def test_the_store_reads_a_rosters_attempts_with_their_grades_in_order() -> None:
+    """The teacher dashboard (MVP item 7) reads a whole roster at once: by learner, item and attempt number."""
+    repo = InMemoryAssessmentRepository()
+    for attempt_id, learner, item in [("x1", "l2", "b"), ("x2", "l1", "b"), ("x3", "l1", "a"), ("x4", "l1", "b"),
+                                      ("x5", "l3", "a")]:
+        a, g = attempt(attempt_id)
+        repo.add_attempt(a.model_copy(update={"learner_id": learner, "assessment_item_id": item}),
+                         g.model_copy(update={"assessment_item_id": item}))
+    rows = repo.graded_attempts(["l1", "l2"])
+    assert [(a.learner_id, a.assessment_item_id, a.attempt_number, a.attempt_id) for a, _ in rows] == [
+        ("l1", "a", 1, "x3"), ("l1", "b", 1, "x2"), ("l1", "b", 2, "x4"), ("l2", "b", 1, "x1")]
+    assert all(g.grade_id == a.grade_id for a, g in rows)
+    assert repo.graded_attempts([]) == []

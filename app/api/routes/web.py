@@ -1,7 +1,8 @@
-"""The student web app: static files only, served without authentication.
+"""The student web app and the teacher dashboard: static files only, served without authentication.
 
-The app (app/api/web/) is HTML, CSS and one script with no data in it: everything it shows comes from the
-authenticated JSON API, called from the page (same origin). So these routes are public like /health, and nothing
+The apps (app/api/web/: the student app at /app/, the teacher dashboard at /app/teacher.html) are HTML, CSS and one
+script each, with no data in them: everything they show comes from the authenticated JSON API, called from the page
+(same origin). So these routes are public like /health, and nothing
 else is: they serve exactly the files listed in `FILES` and never a path from the request. Every response carries a
 strict Content-Security-Policy (no inline script, no third-party origin, blob: only for media the page fetched
 itself)."""
@@ -18,6 +19,8 @@ FILES: dict[str, str] = {
     "index.html": "text/html; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
+    "teacher.html": "text/html; charset=utf-8",  # the teacher dashboard (MVP item 7), same rules, same stylesheet
+    "teacher.js": "text/javascript; charset=utf-8",
 }
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")

@@ -40,7 +40,8 @@ def anonymous(container):
 def test_the_app_files_are_served_without_credentials_and_with_a_strict_policy(anonymous) -> None:
     root = anonymous.get("/app", follow_redirects=False)
     assert root.status_code == 308 and root.headers["location"] == "/app/"
-    for path, media in [("/app/", "text/html"), ("/app/app.js", "text/javascript"), ("/app/app.css", "text/css")]:
+    for path, media in [("/app/", "text/html"), ("/app/app.js", "text/javascript"), ("/app/app.css", "text/css"),
+                        ("/app/teacher.html", "text/html"), ("/app/teacher.js", "text/javascript")]:
         r = anonymous.get(path)
         assert r.status_code == 200 and r.headers["content-type"].startswith(media), path
         assert r.headers["content-security-policy"] == web.CSP
@@ -69,15 +70,27 @@ def test_only_health_and_the_app_files_are_public(container) -> None:
         assert c.get("/lessons/anything/reading").status_code == 401
 
 
-def test_the_page_has_no_inline_script_markup_injection_or_third_party_origin() -> None:
-    html, js, css = [(web.WEB_DIR / n).read_text(encoding="utf-8") for n in ("index.html", "app.js", "app.css")]
-    assert re.findall(r"<script\b[^>]*>", html) == ['<script src="app.js" defer>']  # no inline script
+@pytest.mark.parametrize("page,script", [("index.html", "app.js"), ("teacher.html", "teacher.js")])
+def test_the_page_has_no_inline_script_markup_injection_or_third_party_origin(page, script) -> None:
+    """The student app and the teacher dashboard (MVP item 7) follow the same rules."""
+    html, js, css = [(web.WEB_DIR / n).read_text(encoding="utf-8") for n in (page, script, "app.css")]
+    assert re.findall(r"<script\b[^>]*>", html) == [f'<script src="{script}" defer>']  # no inline script
     assert " style=" not in html and not re.search(r"\son[a-z]+\s*=", html)  # no inline style or handler
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
         assert sink not in js, sink  # text is only ever set with textContent
     assert 'setAttribute("style"' not in js and "style:" not in js  # the CSP allows no inline style attribute
     for text in (html, js, css):
         assert not re.search(r"https?://", text)  # no CDN, font or analytics origin
+
+
+def test_the_teacher_dashboard_sends_no_change_of_a_learners_data() -> None:
+    """The dashboard reads learners' data and changes only the teacher's own classes: its only writes are creating a
+    class and rotating a join code, and it never asks for the next action (a read that stores progress)."""
+    js = (web.WEB_DIR / "teacher.js").read_text(encoding="utf-8")
+    assert re.findall(r'\bpost\(`?"?([^`",]+)', js) == ["/classes", "/classes/${enc(classId)}/join-code"]
+    assert set(re.findall(r'api\("([A-Z]+)"', js)) == {"GET", "POST"}
+    assert js.count('api("POST"') == 1  # only inside the `post` helper: every other request is a GET
+    assert "next-action" not in js and "/responses" not in js and "/attempts" not in js
 
 
 def test_identity_is_the_callers_own(container) -> None:

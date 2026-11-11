@@ -984,9 +984,31 @@ the cycle's start and response requests, so the page shows a spinner meanwhile.
 The lesson player is text and images: the deck, narration and video are blocked for learners because they can hold
 answer slides (see [security](security.md#lesson-reading)); serving them needs an answer-free render first.
 
+## Teacher dashboard
+
+`/app/teacher.html` is the teacher's page (MVP item 7): the same stylesheet and rules as the student app (one
+dependency-free script, `app/api/web/teacher.js`, text set with `textContent` only, the same strict CSP), for a
+principal with the `teacher` role. It reads learners' data and never changes it: its only writes are the teacher's
+own, creating a class and rotating its join code.
+
+| Screen | API |
+|---|---|
+| Classes: the teacher's classes and a new class (its join code is shown once) | `GET/POST /classes` |
+| A class: each learner's goal progress, average mastery, concepts needing work and due, current cycle, last activity and answers to review; the answers the grader could not decide (UNCERTAIN), with the question and the learner's answer | `GET /classes/{id}/dashboard`, `GET /classes/{id}/uncertain-grades`, `POST /classes/{id}/join-code` |
+| A learner: mastery by concept, each goal's objectives, recent learning sessions, their answers to review | `GET /learners/{id}`, `/progress`, `/goals`, `/learning-cycles`, `GET /goals/{id}/curriculum` (the learner routes a teacher may read) |
+
+The two class routes are served by `ClassDashboardService` (`app/services/class_dashboard.py`). It is read-only and
+reads stored records only: profiles, goals and curricula (progress computed now and not recorded, as
+`GET /goals/{id}/curriculum` does), learning cycles as stored (no reconciliation) and the roster's assessment attempts
+with their grades, in one query (`graded_attempts`). An UNCERTAIN grade is never evidence; it stays "to review" until
+the learner answers the same item again and that answer is graded (`resolved`). There is no grade override yet:
+the teacher sees the answer and can follow up with the learner (overrides are on the roadmap after the MVP). The
+learner's side of a class is a "Join a class" form on the student app's Progress page (`POST /learners/{id}/classes`).
+
 ## Not in this release
 
 Learned mastery models (BKT / IRT) and FSRS-style scheduling (the updater and scheduler are replaceable), courses
 beyond the Spanish A1 to B1 pilot and a course authoring UI, real image-search providers, video generation providers other than MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
-design, animations, cloud rendering, coding exercises and VS Code integration, a teacher UI, deployment. The provider and
+design, animations, cloud rendering, coding exercises and VS Code integration, teacher grade overrides and lesson
+approval, deployment. The provider and
 tool interfaces they plug into already exist.

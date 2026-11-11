@@ -240,7 +240,8 @@ function renderNoLearner() {
   show(h("h1", { text: "No learner profile" }), h("div", { class: "card" },
     h("p", {}, "This account is not linked to a learner, so there is nothing to study here."),
     (app.me.roles || []).includes("teacher")
-      ? h("p", { class: "muted" }, "You are signed in as a teacher. The teacher dashboard is a separate app.") : null));
+      ? h("p", {}, "You are signed in as a teacher. ", h("a", { href: "/app/teacher.html", "data-testid": "teacher-link" },
+        "Open the teacher dashboard")) : null));
 }
 
 function renderLearnerPicker(ids) {
@@ -761,7 +762,53 @@ async function renderProgress() {
         h("td", {}, h("div", { text: o.name }), meter(o.current_mastery / (o.target_mastery || 1), o.status === "MASTERED")),
         h("td", {}, h("span", { class: statusClass(o.status) }, o.status.replace(/_/g, " ").toLowerCase()))))))));
   }
+  nodes.push(h("h2", { text: "Your classes" }), classesCard());
   show(nodes);
+}
+
+// A teacher's class: the learner joins with the code the teacher gave them, which lets that teacher see (never change)
+// their progress on the teacher dashboard.
+function classesCard() {
+  const card = h("div", { class: "card", "data-testid": "classes" }, busy("Loading…"));
+  const code = h("input", { type: "text", id: "join-code", maxlength: 64, autocomplete: "off", "data-testid": "join-code" });
+  const feedback = h("div");
+  const fill = async () => {
+    let classes;
+    try {
+      classes = await get(`${L()}/classes`);
+    } catch (err) {
+      return card.replaceChildren(errorBox(err));
+    }
+    const form = h("form", {
+      on: {
+        submit: async (e) => {
+          e.preventDefault();
+          if (!code.value.trim()) return;
+          const button = form.querySelector("button");
+          button.disabled = true;
+          try {
+            await post(`${L()}/classes`, { join_code: code.value.trim() });
+            code.value = "";
+            feedback.replaceChildren();
+            fill();
+          } catch (err) {
+            feedback.replaceChildren(err.status === 404
+              ? h("div", { class: "error", role: "alert", "data-testid": "error" }, "That code was not recognised. Check it with your teacher.")
+              : errorBox(err));
+            button.disabled = false;
+          }
+        },
+      },
+    }, feedback, h("label", { for: "join-code", text: "Join a class with your teacher's code" }), code,
+    h("p", { class: "muted small" }, "Your teacher will see your progress. They cannot change anything."),
+    h("button", { type: "submit", class: "secondary", "data-testid": "join-class" }, "Join"));
+    card.replaceChildren(
+      classes.length ? h("ul", { class: "plain" }, classes.map((c) => h("li", { "data-testid": "enrollment", text: c.name })))
+        : h("p", { class: "muted small" }, "You are not in a class."),
+      form);
+  };
+  fill();
+  return card;
 }
 
 async function renderHistory() {

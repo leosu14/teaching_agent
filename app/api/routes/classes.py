@@ -1,4 +1,4 @@
-"""Classes and rosters (MVP item 4). A teacher (the `teacher` role) creates classes and hands out their join codes;
+"""Classes and rosters (MVP item 4), and the teacher dashboard over them (MVP item 7). A teacher (the `teacher` role) creates classes and hands out their join codes;
 a learner joins with a code, and from then on the teacher may read, never change, that learner's data through every
 learner route (app/api/authorization.py). Either side can end the membership: the teacher removes the learner, or
 the learner leaves.
@@ -8,12 +8,13 @@ or retired join code."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from app.api.auth import TEACHER, Principal
 from app.api.authorization import ResourceNotFound, authorize, principal, require_learner, require_role, taught_class
 from app.api.deps import container
 from app.schemas.classroom import ClassJoinCode, Classroom, ClassView, CreateClass, Enrollment, JoinClass
+from app.schemas.dashboard import ClassDashboard, UncertainGrade
 from app.services.container import Container
 
 router = APIRouter(tags=["classes"])
@@ -37,6 +38,23 @@ def list_classes(p: Principal = Depends(principal), c: Container = Depends(conta
 @router.get("/classes/{class_id}", response_model=ClassView)
 def get_class(classroom: Classroom = Depends(taught_class), c: Container = Depends(container)) -> ClassView:
     return c.classes.view(classroom)
+
+
+@router.get("/classes/{class_id}/dashboard", response_model=ClassDashboard)
+def class_dashboard(classroom: Classroom = Depends(taught_class),
+                    c: Container = Depends(container)) -> ClassDashboard:
+    """The teacher dashboard (MVP item 7): every learner on the roster with their mastery, goals and curriculum
+    progress, learning-cycle state and open UNCERTAIN grades. Read-only: nothing is reconciled or recorded."""
+    return c.class_dashboard.dashboard(classroom)
+
+
+@router.get("/classes/{class_id}/uncertain-grades", response_model=list[UncertainGrade])
+def uncertain_grades(classroom: Classroom = Depends(taught_class), include_resolved: bool = Query(default=False),
+                     c: Container = Depends(container)) -> list[UncertainGrade]:
+    """The roster's answers the grader could not decide, newest first: the question as the learner saw it and their
+    answer, never the answer key or the grader's reason. By default only those that no later graded attempt on the
+    same item settled; `include_resolved=true` lists all."""
+    return c.class_dashboard.uncertain_grades(classroom, include_resolved=include_resolved)
 
 
 @router.post("/classes/{class_id}/join-code", response_model=ClassJoinCode)
