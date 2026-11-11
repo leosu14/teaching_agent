@@ -88,8 +88,9 @@ curl -H "Authorization: Bearer <the token>" localhost:8000/learners/demo-learner
 
 ### The student web app
 
-`/app/` serves the student web app (`app/api/web/`): an HTML page, a stylesheet and one script, with no data in them.
-They are public like `/health` (`app/api/routes/web.py` serves exactly the three listed files, never a path from the
+`/app/` serves the student web app (`app/api/web/`): an HTML page, a stylesheet and one script, with no data in them
+(`/app/teacher.html` and `teacher.js`, the teacher dashboard, follow every rule below too).
+They are public like `/health` (`app/api/routes/web.py` serves exactly the listed files, never a path from the
 request), and everything the page shows comes from the authenticated JSON API, called from the page on the same
 origin. `tests/unit/test_student_app.py` checks that these are the only routes outside the OpenAPI schema, so the
 security matrix still covers every other route.
@@ -184,6 +185,32 @@ primary key makes a join idempotent under races (`tests/postgres/test_classes_po
 session view: PR17 M1) do so for a teacher's read too; they never drive a child or call a model, and they store only what the learner's own next read would. `GET /learners/{id}/next-action` stores the curriculum's progress as of its `as_of` query parameter, so only the learner's own scope may pass it: from a teacher it is a `403`. Join codes are
 bearer secrets: anyone with a learner's credentials and the code can join that learner, and a leaked code should
 be rotated. There is no rate limit on joins at the API (gateway limits apply).
+
+### The teacher dashboard
+
+MVP item 7. Two read-only routes aggregate a class for its teacher; both take the class through `taught_class`, so a
+class of another teacher or tenant, a principal without the `teacher` role and a class that does not exist all get the
+uniform `404`, and only `GET` is served (any other method is `405`).
+
+| Route | What |
+|---|---|
+| `GET /classes/{class_id}/dashboard` | Per learner on the roster: display name, mastery numbers and counts (`/progress`), goals with curriculum progress, learning-cycle state, last activity, open UNCERTAIN count |
+| `GET /classes/{class_id}/uncertain-grades` | The roster's UNCERTAIN grades: the item's `prompt` and `choices` (what the learner was shown), the learner's own answer, the source, attempt number, time, grader type and confidence, and whether a later graded attempt settled it |
+
+- **Roster only.** The roster is read on every request, like the access rule: a learner who left, or was removed,
+  is not read at all. Nothing of a learner outside the roster is read.
+- **The same learner-safe information.** The dashboard carries what the learner's own views carry. An UNCERTAIN grade
+  is served without the answer key (`expected_answer`, acceptable answers, rubric, known errors) and without
+  `uncertainty_reason`, the grader's raw text that can quote the expected answer (the same rule as `PublicGrade`).
+  `tests/e2e/test_class_dashboard_api.py` grades an answer on an item whose key is the security matrix's sentinel and
+  checks that no response carries it; both routes are in the security matrix.
+- **Read-only.** Nothing is reconciled, recorded or graded: the service reads stored records only
+  (`tests/integration/test_class_dashboard.py` compares every table before and after). The page itself sends only
+  the teacher's own changes (creating a class, rotating its join code); `tests/unit/test_student_app.py` checks its
+  script.
+- **Residual points.** The learner page of the dashboard uses the learner routes a teacher may already read
+  (above); it does not call `GET /learning-cycles/{id}` or the next action, the reads that reconcile or store. A
+  teacher sees the learner's own answer text, which the learner wrote to be graded.
 
 ## Learner-facing responses
 

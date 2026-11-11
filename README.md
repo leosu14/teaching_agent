@@ -177,6 +177,8 @@ process for development. The worker also sweeps for tasks a killed process left 
 The student web app is served at `/app/` (see [architecture](docs/architecture.md#student-web-app)). For a local
 run, use development tokens (`TA_AUTH_MODE=static`, [docs/security.md](docs/security.md#development)), set
 `TA_WORKER_EMBEDDED=true`, open `http://localhost:8000/app/` and paste a token whose principal has one learner id.
+Teachers use the dashboard at `/app/teacher.html` with a token whose principal has the `teacher` role (see
+[architecture](docs/architecture.md#teacher-dashboard)).
 
 Every route except `/health` and the app's static files requires authentication, and every learner-owned resource is checked against the
 caller's learner scope (another learner's resource is a 404, exactly like a missing one). Learner-facing responses
@@ -215,7 +217,14 @@ development tokens and the test mechanism.
 | GET | `/lessons/{lesson_id}/reading` | The lesson's teaching text for the learner: no exercise, check question or narration, and no sentence that states an answer they are graded on or the answer of a question open for them (409 until the lesson is complete) |
 | GET | `/me` | The caller: user id, learner ids, roles |
 | GET | `/courses` | The courses `TA_COURSES` loads (subject, framework, levels, topics; no probes or answers) |
-| GET | `/app/` | The student web app (static, public; its data comes from the routes above) |
+| POST/GET | `/classes` | Create a class with its join code / the caller's classes and rosters (`teacher` role) |
+| GET | `/classes/{id}` | A class of the caller and its roster |
+| POST | `/classes/{id}/join-code` | A new join code (the old one stops working; the roster stays) |
+| DELETE | `/classes/{id}/learners/{learner_id}` | Take a learner off the roster (the teacher) or leave (the learner) |
+| POST/GET | `/learners/{id}/classes` | Join a class with its code / the learner's classes |
+| GET | `/classes/{id}/dashboard` | The teacher dashboard: each learner on the roster with mastery, goal and curriculum progress, cycle state and open UNCERTAIN grades (read-only) |
+| GET | `/classes/{id}/uncertain-grades` | The roster's answers the grader could not decide, newest first: question and answer, never the answer key (`?include_resolved=true` adds those a later graded attempt settled) |
+| GET | `/app/` · `/app/teacher.html` | The student web app and the teacher dashboard (static, public; their data comes from the routes above) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 
 See [docs/architecture.md](docs/architecture.md) for the design and [docs/configuration.md](docs/configuration.md)

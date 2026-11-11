@@ -132,6 +132,8 @@ def routes(ids: dict) -> list[tuple[str, str, dict | None]]:
         ("POST", "/classes", {"name": "Another class"}),
         ("GET", "/classes", None),
         ("GET", f"/classes/{ids['class']}", None),
+        ("GET", f"/classes/{ids['class']}/dashboard", None),
+        ("GET", f"/classes/{ids['class']}/uncertain-grades", None),
         ("POST", f"/classes/{ids['class']}/join-code", None),
         ("DELETE", f"/classes/{ids['class']}/learners/{lid}", None),
         ("POST", f"/learners/{lid}/classes", {"join_code": ids["join_code"]}),
