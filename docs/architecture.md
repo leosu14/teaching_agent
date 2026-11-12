@@ -1005,6 +1005,18 @@ the learner answers the same item again and that answer is graded (`resolved`). 
 the teacher sees the answer and can follow up with the learner (overrides are on the roadmap after the MVP). The
 learner's side of a class is a "Join a class" form on the student app's Progress page (`POST /learners/{id}/classes`).
 
+## Deployment
+
+MVP item 8 ([deployment](deployment.md)). The layers are unchanged; what changes is how the outer services are
+chosen. `Settings.deployment_problems` is the production profile (`TA_DEPLOYMENT=production`), checked by
+`build_container` before anything is opened. `create_db(url, schema)` either creates the tables (`create`) or
+requires the newest Alembic revision (`migrations`, `app/storage/migrate.py`, revisions in
+`app/storage/migrations/versions/`). `build_object_store` picks `FilesystemObjectStore` (storage layer) or
+`S3ObjectStore` (provider layer: it is network code), both behind the artifact service's `ObjectStore` protocol and
+both recording `object:<key>` URIs (`app/utils/object_uri.py`). The identity gateway (`app/gateway/`) is its own
+layer and process: it imports only the signing side of the API's identity contract (`app.api.auth.gateway_headers`)
+and may use httpx, which the architecture test otherwise keeps in the provider layer.
+
 ## Not in this release
 
 Learned mastery models (BKT / IRT) and FSRS-style scheduling (the updater and scheduler are replaceable), courses

@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.venv
+var
+output
+**/__pycache__
+**/*.pyc
+.pytest_cache
+*.egg-info
+build
+dist
+deploy/secrets
+deploy/gateway
+tests
+docs
+scripts

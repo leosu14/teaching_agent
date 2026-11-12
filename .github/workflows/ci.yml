@@ -127,3 +127,19 @@ jobs:
           set -o pipefail
           python -m pytest -q -rs tests/postgres | tee pg-tests.log
           if grep -qi "skipped" pg-tests.log; then echo "tests/postgres was skipped"; exit 1; fi
+
+  deploy:
+    # The deployment (MVP item 8) end to end: build the image, start the compose stack (PostgreSQL, an S3 store, the
+    # one-shot migration, the API, the worker and the identity gateway; TA_DEPLOYMENT=production, so the API and the
+    # worker refuse to start unless the deployment checks pass), then deploy/smoke.py drives a learner's lesson, the
+    # teacher's dashboard and the identity checks through the gateway only. Mock providers: nothing is paid.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the smoke test's client (the IdP's token signing and HTTP)
+        run: pip install "httpx>=0.27" "PyJWT[crypto]>=2.8"
+      - name: Deployment smoke test (image, compose stack, migrations, S3, gateway, worker)
+        run: python deploy/smoke.py

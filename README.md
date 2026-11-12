@@ -161,6 +161,11 @@ the last checkpoint without regenerating intact artifacts, and a `production_run
 graph, per-request traceability, usage and cost. `--mock` rehearses the same path offline. See
 [docs/production.md](docs/production.md).
 
+Deploying the pilot (MVP item 8): one image (`Dockerfile`) runs the API, the worker, the identity gateway and the
+schema migrations; `deploy/compose.yaml` is a complete stack on PostgreSQL and an S3-compatible bucket, and
+`TA_DEPLOYMENT=production` refuses to start without migrations, the bucket, the signed gateway, daily caps and a
+declared cap at each vendor. See [docs/deployment.md](docs/deployment.md).
+
 Course content is authored as JSON files in [courses/](courses/README.md). `TA_COURSES=spanish-a1-b1` makes the
 bundled Spanish A1 to B1 course (18 units, 46 concepts) the knowledge base; `python -m app.content validate <course>`
 checks a course with the same rules as startup and lists every problem with its field path.

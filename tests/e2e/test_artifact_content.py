@@ -45,8 +45,8 @@ def allow(container, *types: ArtifactType, media: str = MEDIA) -> None:
                                                         provenance={})
 
 
-def object_path(artifact) -> Path:
-    return Path(artifact.uri.removeprefix("file://"))
+def object_path(artifact, container) -> Path:
+    return container.object_store.local_path(artifact.uri)
 
 
 # --- the policy itself -------------------------------------------------------------------------------------------
@@ -153,7 +153,7 @@ def test_served_content_is_a_download_without_storage_details(env) -> None:
     for name in ("content-length", "etag", "last-modified", "content-md5", "digest", "location"):
         assert name not in h, name
     everything = " ".join(f"{k}: {v}" for k, v in h.items())
-    for secret in (artifact.uri, artifact.content_hash, str(object_path(artifact)), artifact.name):
+    for secret in (artifact.uri, artifact.content_hash, str(object_path(artifact, container)), artifact.name):
         assert secret not in everything
 
 
@@ -197,11 +197,11 @@ def test_a_missing_object_gets_a_fixed_sanitized_error(env) -> None:
     container, stored, auth = env
     artifact = stored[ArtifactType.IMAGE_ASSET]
     allow(container, ArtifactType.IMAGE_ASSET)
-    object_path(artifact).unlink()
+    object_path(artifact, container).unlink()
     with client_for(container, OWNER, auth=auth) as a:
         r = a.get(f"/artifacts/{artifact.artifact_id}/content")
     assert (r.status_code, r.json()) == (500, UNAVAILABLE)
-    for secret in (artifact.uri, artifact.content_hash, str(object_path(artifact)), "objects", "file://"):
+    for secret in (artifact.uri, artifact.content_hash, str(object_path(artifact, container)), "objects", "file://", "object:"):
         assert secret not in r.text
     assert "content-disposition" not in r.headers
 
@@ -211,8 +211,8 @@ def test_a_missing_object_is_still_404_when_not_yours_or_not_servable(env) -> No
     container, stored, auth = env
     allowed, blocked = stored[ArtifactType.IMAGE_ASSET], stored[ArtifactType.LESSON]
     allow(container, ArtifactType.IMAGE_ASSET)
-    object_path(allowed).unlink()
-    object_path(blocked).unlink()
+    object_path(allowed, container).unlink()
+    object_path(blocked, container).unlink()
     with client_for(container, INTRUDER, auth=auth) as b, client_for(container, OWNER, auth=auth) as a:
         assert b.get(f"/artifacts/{allowed.artifact_id}/content").json() == NOT_FOUND
         assert a.get(f"/artifacts/{blocked.artifact_id}/content").json() == NOT_FOUND

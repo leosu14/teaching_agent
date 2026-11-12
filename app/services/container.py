@@ -116,6 +116,7 @@ from app.services.learning_cycles import LearningCycleService
 from app.services.teaching import TeachingSessionService
 from app.storage.db import create_db, dispose
 from app.storage.object_store import FilesystemObjectStore
+from app.providers.storage.s3 import S3ObjectStore
 from app.storage.repositories import (
     SqlArtifactRepository,
     SqlCurriculumRepository,
@@ -409,9 +410,20 @@ class Container:
     production: ProductionService
     spend: SpendStore  # the spend ledger: entries and budget counters, read-only for callers
     _sessions: object
+    object_store: object = None  # the artifacts' store (filesystem or S3), for readiness checks and closing
 
     def close(self) -> None:
         dispose(self._sessions)
+        close = getattr(self.object_store, "close", None)
+        if close is not None:
+            close()
+
+
+def build_object_store(settings: Settings):
+    """The configured object store: the filesystem (TA_OBJECT_STORE_DIR) or an S3-compatible bucket."""
+    if settings.object_store == "s3":
+        return S3ObjectStore(settings.s3_config())
+    return FilesystemObjectStore(settings.resolved_object_store_dir)
 
 
 def build_container(
@@ -434,6 +446,9 @@ def build_container(
     """`clock` judges lease expiry (task leases and the learning cycle's drive lease); tests move it."""
     settings = settings or Settings()
     settings.validate_runtime()
+    if settings.deployment == "production" and (problems := settings.deployment_problems()):
+        raise ConfigError("TA_DEPLOYMENT=production, but this is not a production deployment: "
+                          + "; ".join(problems))
     knowledge_documents = None
     courses: list[CourseSummary] = []
     if retriever is None and settings.course_paths():
@@ -443,7 +458,7 @@ def build_container(
         except CourseError as exc:
             raise ConfigError(f"TA_COURSES: {exc}") from None
 
-    sessions = create_db(settings.resolved_database_url)
+    sessions = create_db(settings.resolved_database_url, settings.resolved_database_schema)
     task_repo = SqlTaskRepository(sessions, clock)
     spend = SqlSpendRepository(sessions, clock)  # the durable spend ledger and budget counters
     budgets = settings.budget_defaults()
@@ -468,8 +483,8 @@ def build_container(
                                   evidence=SqlEvidenceRepository(sessions, clock),
                                   events=SqlLearningEventRepository(sessions, clock),
                                   goals=SqlGoalRepository(sessions, clock), config=pedagogy)
-    artifacts = ArtifactService(SqlArtifactRepository(sessions, clock),
-                                FilesystemObjectStore(settings.resolved_object_store_dir))
+    object_store = build_object_store(settings)
+    artifacts = ArtifactService(SqlArtifactRepository(sessions, clock), object_store)
     curriculum = CurriculumEngine(SqlCurriculumRepository(sessions, clock), settings.curriculum_config())
 
     if retriever is None:
@@ -635,4 +650,5 @@ def build_container(
                                      learners=learner_service, spend=spend),
         spend=spend,
         _sessions=sessions,
+        object_store=object_store,
     )

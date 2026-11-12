@@ -1,0 +1,138 @@
+# A single-teacher pilot (MVP item 8, docs/deployment.md): one API, one worker and the identity gateway on
+# PostgreSQL and an S3-compatible store, from one image. Only the gateway is published.
+#
+#   deploy/secrets/ holds the secret files (never committed; docs/deployment.md lists each one).
+#   deploy/gateway/ holds the gateway's public configuration (a static jwks.json, if the IdP's keys come as a file).
+#   docker compose -f deploy/compose.yaml up -d --build
+#
+# PostgreSQL and an S3-compatible store (RustFS) run next to the app here, so the stack is complete on one machine (CI runs it end to end with
+# deploy/smoke.py). A hosted pilot points TA_DATABASE_URL at managed PostgreSQL (with backups) and TA_S3_* at a
+# managed bucket, and drops those two services.
+
+x-app: &app
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  image: teaching-agent:local
+  environment:
+    TA_DEPLOYMENT: production
+    TA_DATABASE_URL_FILE: /run/secrets/database_url
+    TA_OBJECT_STORE: s3
+    TA_S3_BUCKET: teaching-agent
+    TA_S3_ENDPOINT_URL: http://objects:9000
+    TA_S3_ALLOW_HTTP: "true"  # the store is on the compose network only; a managed bucket is https
+    TA_S3_ACCESS_KEY_ID_FILE: /run/secrets/s3_access_key_id
+    TA_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/s3_secret_access_key
+    TA_AUTH_MODE: gateway
+    TA_AUTH_GATEWAY_SECRET_FILE: /run/secrets/gateway_secret
+    TA_COURSES: ${TA_COURSES:-}
+    # Daily caps are on in a deployment: the API and the worker refuse to start without them.
+    TA_BUDGET_LEARNER_DAILY_MAX_LLM_REQUESTS: ${TA_BUDGET_LEARNER_DAILY_MAX_LLM_REQUESTS:-300}
+    TA_BUDGET_LEARNER_DAILY_MAX_LLM_TOKENS: ${TA_BUDGET_LEARNER_DAILY_MAX_LLM_TOKENS:-1500000}
+    TA_BUDGET_GLOBAL_DAILY_MAX_LLM_REQUESTS: ${TA_BUDGET_GLOBAL_DAILY_MAX_LLM_REQUESTS:-5000}
+    TA_BUDGET_GLOBAL_DAILY_MAX_LLM_TOKENS: ${TA_BUDGET_GLOBAL_DAILY_MAX_LLM_TOKENS:-20000000}
+    # Providers: the offline mock providers unless configured. For real providers set TEACHING_AGENT_MODE=production,
+    # the *_PROVIDER variables, each key as a *_API_KEY_FILE secret, and TA_VENDOR_CAPS for every vendor used.
+    TEACHING_AGENT_MODE: ${TEACHING_AGENT_MODE:-offline}
+    TA_VENDOR_CAPS: ${TA_VENDOR_CAPS:-}
+  secrets: [database_url, s3_access_key_id, s3_secret_access_key, gateway_secret]
+  volumes:
+    - scratch:/var/lib/teaching-agent  # FFmpeg scratch space only; the artifacts are in the bucket
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ta
+      POSTGRES_DB: teaching_agent
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ta -d teaching_agent"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  objects:  # an S3-compatible store (RustFS, Apache-2.0); a hosted pilot uses a managed bucket instead
+    image: ${TA_S3_SERVER_IMAGE:-rustfs/rustfs:1.0.5@sha256:b81d16a90ee25bd9511280127ca1471788c6e874cf0f0da759645f46b2dc1d74}
+    environment:
+      RUSTFS_ACCESS_KEY_FILE: /run/secrets/s3_access_key_id
+      RUSTFS_SECRET_KEY_FILE: /run/secrets/s3_secret_access_key
+    secrets: [s3_access_key_id, s3_secret_access_key]
+    volumes: [objects:/data]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  bucket:  # one-shot: creates TA_S3_BUCKET in that store if it does not exist
+    <<: *app
+    command: ["create-bucket"]
+    restart: "no"
+    depends_on:
+      objects: {condition: service_healthy}
+
+  migrate:  # one-shot: the schema to the newest revision before the API and the worker start
+    <<: *app
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: *app
+    command: ["api"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      bucket: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      bucket: {condition: service_completed_successfully}
+
+  gateway:
+    <<: *app
+    command: ["gateway"]
+    environment:
+      TA_AUTH_GATEWAY_SECRET_FILE: /run/secrets/gateway_secret
+      TA_GATEWAY_UPSTREAM_URL: http://api:8000
+      TA_GATEWAY_OIDC_ISSUER: ${TA_GATEWAY_OIDC_ISSUER:?set the identity provider's issuer}
+      TA_GATEWAY_OIDC_AUDIENCE: ${TA_GATEWAY_OIDC_AUDIENCE:?set the audience (client id) of its tokens}
+      TA_GATEWAY_JWKS_URL: ${TA_GATEWAY_JWKS_URL:-}
+      TA_GATEWAY_JWKS_FILE: ${TA_GATEWAY_JWKS_FILE:-}
+      TA_GATEWAY_ROLES_CLAIM: ${TA_GATEWAY_ROLES_CLAIM:-ta_roles}
+      TA_GATEWAY_ROLE_MAP: ${TA_GATEWAY_ROLE_MAP:-teacher=teacher,author=author}
+    secrets: [gateway_secret]
+    volumes:
+      # Public configuration only: a static JWKS file (jwks.json), for an IdP whose keys come as a file. Never
+      # ./secrets: the gateway is the published service and needs no database or object-store credential.
+      - ./gateway:/run/ta-config:ro
+    ports:
+      - "${TA_GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      api: {condition: service_healthy}
+
+secrets:
+  database_url: {file: ./secrets/database_url}
+  postgres_password: {file: ./secrets/postgres_password}
+  s3_access_key_id: {file: ./secrets/s3_access_key_id}
+  s3_secret_access_key: {file: ./secrets/s3_secret_access_key}
+  gateway_secret: {file: ./secrets/gateway_secret}
+
+volumes:
+  pgdata:
+  objects:
+  scratch:

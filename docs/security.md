@@ -74,6 +74,27 @@ How the gateway maps identity to learner scope is a deployment decision; typical
 Replacing the gateway with direct token verification (e.g. a JWT authenticator) means adding one `Authenticator`
 class that returns the same `Principal`; nothing behind the boundary changes.
 
+#### The bundled identity gateway
+
+MVP item 8 ships one such gateway, `app/gateway/` (the image's `gateway` command; [deployment](deployment.md#identity)).
+It verifies the identity provider's OIDC tokens with the issuer's public keys only: the token's `alg` must be in the
+configured asymmetric list (RS256/ES256 by default; `none` and HMAC are refused, so a public key can never be used as
+a shared secret), and `iss`, `aud` and an unexpired `exp` are required. User, learner and tenant ids must be plain
+identifiers (no comma, whitespace or newline), so a claim cannot add a learner to the signed comma-separated list.
+Roles come only from values listed in `TA_GATEWAY_ROLE_MAP`. Before forwarding, the gateway removes `Authorization`,
+cookies, every `x-auth-*` header, the token headers and the forwarding headers the client sent; the token never
+reaches the API, and without a valid one the API is never called (401). `/health` and the web app's static files
+under `/app` pass through without an identity, as the API serves them publicly. The gateway holds no authorization
+rule: learner scope, rosters and answer isolation stay in the API.
+
+#### Deployment secrets and storage
+
+The shared gateway secret, the database URL, the bucket credentials and the provider keys are read from secret
+files (`<NAME>_FILE`, `app/config/secrets.py`) and reported only as set or missing; `check` prints the database
+scheme without its URL. Artifact rows hold store-relative `object:` keys, never a host path, a bucket or an endpoint,
+and `ArtifactView` still serves no URI at all. The S3 store refuses plain http unless `TA_S3_ALLOW_HTTP` is set for a
+private network, signs every request, and its errors carry the operation, status and S3 error code only.
+
 ### Development
 
 Create a tokens file outside the repository and point the API at it:

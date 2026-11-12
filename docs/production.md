@@ -343,17 +343,13 @@ Without `RUN_LIVE_E2E=true`, or in offline mode, it is skipped.
 
 ## Upgrading an existing database
 
-Tables and indexes are created on startup. Columns added to an existing table are added automatically on SQLite only
-(`app/storage/db.py`, `ADDED_COLUMNS`); on PostgreSQL apply them before starting the new version, for example (MVP
-item 2, the versioned learner profile and curriculum pointer):
+A deployed database is under schema migrations (`TA_DEPLOYMENT=production`, see [deployment](deployment.md)): run
+`python -m app.storage.migrate upgrade` (the image's `migrate` command) before starting a new version. It also
+adopts a database an earlier version created on startup, adding the columns that version lacked (for example the
+versioned learner profile and curriculum pointer of MVP item 2) and stamping it, so no manual SQL is needed.
 
-```sql
-ALTER TABLE learners ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE curricula ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
-```
-
-New tables, such as the `classes` and `class_members` tables of MVP item 4, are created on startup on both SQLite
-and PostgreSQL and need no manual step.
+In development (`create` mode, the default) tables are created on startup, and on SQLite the columns of
+`ADDED_COLUMNS` (`app/storage/db.py`) are added automatically.
 
 ## Known limitations
 
