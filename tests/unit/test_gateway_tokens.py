@@ -125,3 +125,16 @@ def test_gateway_settings_refuse_weak_configurations(tmp_path) -> None:
         assert len(problems) == 1, (field, problems)
     with pytest.raises(ConfigError, match="identity gateway"):
         GatewaySettings(oidc_issuer="", auth_gateway_secret=None).require_valid()
+
+
+def test_empty_key_settings_count_as_unset(monkeypatch) -> None:
+    """deploy/compose.yaml passes unset TA_GATEWAY_JWKS_FILE / _URL as "": that must mean the URL or discovery, not a
+    key file at "." (every verified request was a 500)."""
+    monkeypatch.setenv("TA_GATEWAY_JWKS_FILE", "")
+    monkeypatch.setenv("TA_GATEWAY_JWKS_URL", "https://idp.example.test/jwks")
+    monkeypatch.setenv("TA_GATEWAY_TENANT_CLAIM", "")
+    settings = GatewaySettings(oidc_issuer=ISSUER, oidc_audience=AUDIENCE, auth_gateway_secret="s" * 40)
+    assert settings.jwks_file is None and settings.tenant_claim is None
+    assert settings.jwks_url == "https://idp.example.test/jwks"
+    monkeypatch.setenv("TA_GATEWAY_JWKS_URL", "")
+    assert GatewaySettings(oidc_issuer=ISSUER, oidc_audience=AUDIENCE, auth_gateway_secret="s" * 40).jwks_url is None

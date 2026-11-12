@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.config.routing import ConfigError
@@ -49,6 +49,13 @@ class GatewaySettings(BaseSettings):
 
     auth_gateway_secret: SecretStr | None = Field(default=None, validation_alias=AliasChoices(
         "TA_AUTH_GATEWAY_SECRET", "auth_gateway_secret"))
+
+    @field_validator("jwks_url", "jwks_file", "tenant_claim", mode="before")
+    @classmethod
+    def _empty_is_unset(cls, value):
+        # Compose passes an unset variable as "" (`${TA_GATEWAY_JWKS_FILE:-}`); as a Path that would be "." (truthy),
+        # and the gateway would read its keys from the working directory instead of the URL or discovery.
+        return None if isinstance(value, str) and not value.strip() else value
 
     def algorithm_list(self) -> list[str]:
         return _csv(self.algorithms)
