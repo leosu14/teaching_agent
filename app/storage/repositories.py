@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, delete, func, or_, select, update
@@ -35,6 +36,7 @@ from app.schemas.curriculum import (
 )
 from app.schemas.common import utcnow
 from app.schemas.events import Event
+from app.schemas.privacy import RETAINED_RECORDS, LearnerDataBusy
 from app.schemas.lease import Lease, LeaseLost, WriteConflict, write_fence
 from app.schemas.learning_cycle import (
     TERMINAL_CYCLE_STATUSES,
@@ -1403,3 +1405,196 @@ class SqlClassRepository:
 
 def _tenant_is(tenant_id: str | None):
     return ClassRow.tenant_id.is_(None) if tenant_id is None else ClassRow.tenant_id == tenant_id
+
+
+# --- learner data deletion (MVP item 9) ------------------------------------------------------------------------------
+
+# Every table, by what a learner's deletion does with it. A new table must be added to one of the two
+# (tests/unit/test_learner_deletion.py checks that together they are exactly the schema), so learner data cannot be
+# added without deciding how it is deleted.
+ERASED_TABLES = (
+    "learners", "learning_evidence", "learning_events", "learning_goals", "curricula", "curriculum_versions",
+    "curriculum_progress", "tasks", "task_jobs", "events", "artifacts", "teaching_sessions", "teaching_turns",
+    "interaction_evidence", "teaching_requests", "teaching_outbox", "assessment_items", "assessment_attempts",
+    "assessment_grades", "learning_cycles", "learning_cycle_slots", "learning_cycle_requests", "class_members",
+)
+# Not learner data, or kept on purpose: classes and rubrics belong to teachers and authors; the spend ledger holds ids
+# and amounts only and is what the budgets and daily caps count, so a deletion must not reset them.
+KEPT_TABLES = ("classes", "assessment_rubrics") + RETAINED_RECORDS
+CONTENT_ADDRESSED = "objects/sha256/"  # app/artifacts/service.py: media stored once and shared by identical bytes
+_CHUNK = 500  # ids per IN list
+
+
+@dataclass(frozen=True)
+class LearnerObjects:
+    """The stored objects of a learner's artifacts: the ones to delete, and how many are kept because an artifact of
+    someone else points at identical (content-addressed) bytes."""
+
+    delete: tuple[str, ...]
+    shared: int
+
+
+@dataclass(frozen=True)
+class _LearnerIds:
+    tasks: list[str]
+    cycles: list[str]
+    sessions: list[str]
+    curricula: list[str]
+    goals: list[str]
+    items: list[str]
+    attempts: list[str]
+
+    @property
+    def owners(self) -> list[str]:
+        """What artifacts and events record as their `task_id`: the learner's tasks and learning cycles."""
+        return self.tasks + self.cycles
+
+
+class SqlLearnerDataRepository:
+    """Everything stored about one learner, found and deleted together (MVP item 9).
+
+    `erase` deletes the learner's rows from every table in `ERASED_TABLES` in one transaction, and refuses
+    (`LearnerDataBusy`, nothing deleted) while a worker may still write for them: a queued or running job of one of
+    their tasks, a task under a live execution lease, or a learning cycle being driven. The learner's task and cycle
+    rows are locked first (`FOR UPDATE` on PostgreSQL), so a claim either happened before (and is seen as a lease) or
+    waits and then finds nothing to claim. A worker that still holds an old in-memory copy cannot bring anything back:
+    its writes are fenced by the task row (gone) or version-checked against rows that no longer exist."""
+
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+        self._sessions = sessions
+        self._clock = clock
+
+    def objects(self, learner_id: str) -> LearnerObjects:
+        """The objects to delete with the learner (LearnerDataBusy while work is in progress). An object in the
+        content-addressed area is shared by identical bytes: it is kept when an artifact outside the learner's has
+        the same content hash. Any other object is under a key of the learner's own task or cycle."""
+        with self._sessions() as s:
+            self._refuse_busy(s, learner_id)
+            ids = self._ids(s, learner_id)
+            rows = [(r.content_hash, r.body) for chunk in _chunks(ids.owners)
+                    for r in s.execute(select(ArtifactRow.content_hash, ArtifactRow.body)
+                                       .where(ArtifactRow.task_id.in_(chunk)))]
+            delete: dict[str, None] = {}
+            shared: set[str] = set()
+            for content_hash, body in rows:
+                uri = json.loads(body).get("uri")
+                if not uri or uri in delete or uri in shared:
+                    continue
+                if CONTENT_ADDRESSED in uri and self._referenced_elsewhere(s, content_hash, ids.owners):
+                    shared.add(uri)
+                else:
+                    delete[uri] = None
+            return LearnerObjects(delete=tuple(delete), shared=len(shared))
+
+    def erase(self, learner_id: str) -> dict[str, int]:
+        """Delete the learner's rows; returns the number deleted by table (tables with none are left out)."""
+        with self._sessions.begin() as s:
+            self._refuse_busy(s, learner_id)
+            ids = self._ids(s, learner_id)
+            counts: dict[str, int] = {}
+
+            def run(table: str, statement) -> None:
+                n = s.execute(statement).rowcount or 0
+                if n:
+                    counts[table] = counts.get(table, 0) + n
+
+            def each(table: str, row_type, column, values: list[str]) -> None:
+                for chunk in _chunks(values):
+                    run(table, delete(row_type).where(column.in_(chunk)))
+
+            each("assessment_grades", AssessmentGradeRow, AssessmentGradeRow.attempt_id, ids.attempts)
+            each("assessment_attempts", AssessmentAttemptRow, AssessmentAttemptRow.attempt_id, ids.attempts)
+            each("assessment_items", AssessmentItemRow, AssessmentItemRow.item_id, ids.items)
+            for row_type, table in ((TeachingTurnRow, "teaching_turns"), (InteractionEvidenceRow, "interaction_evidence"),
+                                    (TeachingRequestRow, "teaching_requests"), (TeachingOutboxRow, "teaching_outbox"),
+                                    (TeachingSessionRow, "teaching_sessions")):
+                each(table, row_type, row_type.session_id, ids.sessions)
+            each("learning_cycle_requests", LearningCycleRequestRow, LearningCycleRequestRow.cycle_id, ids.cycles)
+            run("learning_cycle_slots", delete(LearningCycleSlotRow).where(LearningCycleSlotRow.learner_id == learner_id))
+            each("learning_cycles", LearningCycleRow, LearningCycleRow.cycle_id, ids.cycles)
+            each("curriculum_versions", CurriculumVersionRow, CurriculumVersionRow.curriculum_id, ids.curricula)
+            each("curriculum_progress", CurriculumProgressRow, CurriculumProgressRow.curriculum_id, ids.curricula)
+            each("curricula", CurriculumRow, CurriculumRow.curriculum_id, ids.curricula)
+            each("learning_goals", LearningGoalRow, LearningGoalRow.goal_id, ids.goals)
+            each("artifacts", ArtifactRow, ArtifactRow.task_id, ids.owners)
+            each("events", EventRow, EventRow.task_id, ids.owners)
+            # Events outside any task or cycle that name the learner (goals created or changed, profile updates).
+            run("events", delete(EventRow).where(EventRow.body.like(_learner_pattern(learner_id), escape="\\")))
+            each("task_jobs", TaskJobRow, TaskJobRow.task_id, ids.tasks)
+            each("tasks", TaskRow, TaskRow.task_id, ids.tasks)
+            for row_type, table in ((LearningEvidenceRow, "learning_evidence"), (LearningEventRow, "learning_events"),
+                                    (ClassMemberRow, "class_members"), (LearnerRow, "learners")):
+                run(table, delete(row_type).where(row_type.learner_id == learner_id))
+            return counts
+
+    def holds_data(self, learner_id: str) -> bool:
+        """Whether any row of `ERASED_TABLES` is still the learner's (tests and the deletion's own check)."""
+        with self._sessions() as s:
+            ids = self._ids(s, learner_id)
+            if any((ids.tasks, ids.cycles, ids.sessions, ids.curricula, ids.goals, ids.items, ids.attempts)):
+                return True
+            direct = (LearnerRow, LearningEvidenceRow, LearningEventRow, ClassMemberRow, LearningCycleSlotRow)
+            if any(s.scalar(select(func.count()).select_from(r).where(r.learner_id == learner_id)) for r in direct):
+                return True
+            return bool(s.scalar(select(func.count()).select_from(EventRow)
+                                 .where(EventRow.body.like(_learner_pattern(learner_id), escape="\\"))))
+
+    # --- helpers ----------------------------------------------------------------------------------------------------
+
+    def _refuse_busy(self, s: Session, learner_id: str) -> None:
+        now = _ms(self._clock())
+        # Lock the learner's task and cycle rows (PostgreSQL; SQLite serializes writers anyway), so that no claim of
+        # one of them can start between this check and the deletion.
+        s.execute(select(TaskRow.task_id).where(TaskRow.learner_id == learner_id).with_for_update())
+        s.execute(select(LearningCycleRow.cycle_id).where(LearningCycleRow.learner_id == learner_id)
+                  .with_for_update())
+        leased_task = s.scalar(select(func.count()).select_from(TaskRow).where(
+            TaskRow.learner_id == learner_id, TaskRow.lease_owner.is_not(None), TaskRow.lease_expires_ms > now))
+        active_job = s.scalar(select(func.count()).select_from(TaskJobRow).join(
+            TaskRow, TaskRow.task_id == TaskJobRow.task_id).where(
+            TaskRow.learner_id == learner_id, TaskJobRow.status.in_([j.value for j in ACTIVE_JOB_STATUSES])))
+        driven_cycle = s.scalar(select(func.count()).select_from(LearningCycleRow).where(
+            LearningCycleRow.learner_id == learner_id, LearningCycleRow.lease_token.is_not(None),
+            LearningCycleRow.lease_expires_ms > now))
+        if leased_task or active_job or driven_cycle:
+            raise LearnerDataBusy()
+
+    @staticmethod
+    def _ids(s: Session, learner_id: str) -> _LearnerIds:
+        def ids(column, *where) -> list[str]:
+            return list(s.scalars(select(column).where(*where)))
+
+        tasks = ids(TaskRow.task_id, TaskRow.learner_id == learner_id)
+        lessons = [a for chunk in _chunks(tasks) for a in ids(ArtifactRow.artifact_id, ArtifactRow.task_id.in_(chunk),
+                                                              ArtifactRow.type == "LESSON")]
+        # The items registered on the learner's lessons, and every attempt on them or by the learner.
+        items = [i for chunk in _chunks(lessons) for i in ids(AssessmentItemRow.item_id,
+                                                               AssessmentItemRow.lesson_id.in_(chunk))]
+        attempts = dict.fromkeys(ids(AssessmentAttemptRow.attempt_id, AssessmentAttemptRow.learner_id == learner_id))
+        for chunk in _chunks(items):
+            attempts.update(dict.fromkeys(ids(AssessmentAttemptRow.attempt_id, AssessmentAttemptRow.item_id.in_(chunk))))
+        return _LearnerIds(
+            tasks=tasks,
+            cycles=ids(LearningCycleRow.cycle_id, LearningCycleRow.learner_id == learner_id),
+            sessions=ids(TeachingSessionRow.session_id, TeachingSessionRow.learner_id == learner_id),
+            curricula=ids(CurriculumRow.curriculum_id, CurriculumRow.learner_id == learner_id),
+            goals=ids(LearningGoalRow.goal_id, LearningGoalRow.learner_id == learner_id),
+            items=items, attempts=list(attempts))
+
+    @staticmethod
+    def _referenced_elsewhere(s: Session, content_hash: str, owners: list[str]) -> bool:
+        query = select(ArtifactRow.artifact_id).where(ArtifactRow.content_hash == content_hash)
+        for chunk in _chunks(owners):
+            query = query.where(ArtifactRow.task_id.not_in(chunk))
+        return s.execute(query.limit(1)).first() is not None
+
+
+def _chunks(values: list[str]) -> list[list[str]]:
+    return [values[i:i + _CHUNK] for i in range(0, len(values), _CHUNK)]
+
+
+def _learner_pattern(learner_id: str) -> str:
+    """A LIKE pattern for `"learner_id":"<id>"` anywhere in an event's JSON body (as pydantic writes it)."""
+    fragment = '"learner_id":' + json.dumps(learner_id, ensure_ascii=False)
+    escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"

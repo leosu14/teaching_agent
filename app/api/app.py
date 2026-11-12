@@ -34,6 +34,7 @@ from app.learner.memory import UnknownGoal, UnknownLearner
 from app.runtime.orchestrator.orchestrator import InvalidInput
 from app.runtime.tasks.state_machine import InvalidTransition
 from app.schemas.lease import LeaseLost, WriteConflict
+from app.schemas.privacy import LearnerDataBusy, ObjectDeletionFailed
 from app.services.artifact_content import ArtifactContentNotFound, ArtifactContentUnavailable
 from app.services.assessment import (
     AssessmentItemNotFound,
@@ -93,7 +94,7 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
                              (ItemConflict, 409), (InvalidAssessmentRequest, 422),
                              (CycleNotFound, 404), (CycleConflict, 409), (InvalidCycleTransition, 409),
                              (InvalidCycleRequest, 422), (LeaseLost, 409), (WriteConflict, 409), (JobConflict, 409),
-                             (LessonNotReady, 409)):
+                             (LessonNotReady, 409), (LearnerDataBusy, 409), (ObjectDeletionFailed, 503)):
         app.add_exception_handler(exc_type, _handler(status))
     app.add_exception_handler(AuthenticationFailed, _unauthenticated)
     app.add_exception_handler(Forbidden, _handler(403))

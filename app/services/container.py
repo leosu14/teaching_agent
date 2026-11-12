@@ -105,6 +105,7 @@ from app.services.classes import ClassService
 from app.services.curriculum import CurriculumService
 from app.services.learners import LearnerService
 from app.services.artifact_content import ArtifactContentService
+from app.services.learner_deletion import LearnerDeletionService
 from app.services.lesson_reading import LessonReadingService
 from app.services.ownership import OwnershipService
 from app.services.production import ProductionService
@@ -121,6 +122,7 @@ from app.storage.repositories import (
     SqlArtifactRepository,
     SqlCurriculumRepository,
     SqlEventRepository,
+    SqlLearnerDataRepository,
     SqlEvidenceRepository,
     SqlGoalRepository,
     SqlLearnerRepository,
@@ -405,6 +407,7 @@ class Container:
     class_dashboard: ClassDashboardService  # the teacher dashboard: a class's progress and UNCERTAIN grades (read-only)
     artifact_content: ArtifactContentService
     lesson_reading: LessonReadingService  # the learner-safe text of a lesson (the student app's lesson player)
+    learner_deletion: LearnerDeletionService  # deletes everything stored about a learner (MVP item 9)
     courses: list[CourseSummary]  # the courses TA_COURSES loads (empty: the fixture knowledge base)
     catalog: CatalogService
     production: ProductionService
@@ -642,6 +645,7 @@ def build_container(
         artifact_content=artifact_content,
         lesson_reading=LessonReadingService(artifacts=artifacts, tasks=task_service, teaching=teaching_service,
                                             assessment=assessment_service, content=artifact_content),
+        learner_deletion=LearnerDeletionService(SqlLearnerDataRepository(sessions, clock), artifacts, clock),
         courses=courses,
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         production=ProductionService(settings=settings, events=events, registry=providers.registry,

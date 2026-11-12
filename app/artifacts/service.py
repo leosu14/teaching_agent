@@ -251,6 +251,10 @@ class ArtifactService:
             return f"object unreadable: {exc}"
         return None
 
+    def delete_object(self, uri: str) -> None:
+        """Remove a stored object for good (a learner's data deletion). A missing object is not an error."""
+        self._store.delete(uri)
+
     def discard_object(self, artifact: Artifact) -> None:
         """Remove an artifact's corrupt object so that storing the same content again writes it afresh."""
         self._store.delete(artifact.uri)

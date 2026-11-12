@@ -14,6 +14,8 @@ What it checks, all through the published gateway only:
 - a learner's lesson is queued (202), run by the worker process and completed, with its media in the bucket and
   served back through the API; another learner gets 404 for it;
 - a teacher creates a class, the learner joins, and the teacher's dashboard lists the learner;
+- the privacy notice is served; the learner deletes their data (the teacher and another learner cannot), after which
+  their lesson, its content and their place on the dashboard are gone;
 - the published gateway sees only its own secret (no database or object-store credential);
 - running the migration again changes nothing.
 """
@@ -174,6 +176,20 @@ def run(port: str, build: bool = True) -> None:
         dashboard = c.get(f"/classes/{made.json()['class_id']}/dashboard", headers=teacher)
         assert dashboard.status_code == 200 and lid in dashboard.text, dashboard.text
         assert c.get(f"/classes/{made.json()['class_id']}/dashboard", headers=other).status_code == 404
+
+        # The learner deletes their data (MVP item 9): only their own scope may; the rows and the bucket's objects
+        # go, and the teacher stops seeing them.
+        assert c.get("/app/privacy.html").status_code == 200
+        assert c.delete(f"/learners/{lid}", headers=teacher).status_code == 403
+        assert c.delete(f"/learners/{lid}", headers=other).status_code == 404
+        deleted = c.delete(f"/learners/{lid}", headers=me)
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["records"].get("tasks") and deleted.json()["objects_deleted"] > 0, deleted.text
+        assert c.get(f"/learners/{lid}", headers=me).status_code == 404
+        assert c.get(f"/tasks/{task['task_id']}", headers=me).status_code == 404
+        assert c.get(f"/artifacts/{served[0]['artifact_id']}/content", headers=me).status_code == 404
+        dashboard = c.get(f"/classes/{made.json()['class_id']}/dashboard", headers=teacher)
+        assert dashboard.status_code == 200 and lid not in dashboard.text, dashboard.text
 
     # The published gateway holds only its own secret: no database URL or object-store key is visible in it.
     seen = compose("exec", "-T", "gateway", "sh", "-c", "ls /run/secrets /run/ta-config", capture=True).stdout

@@ -110,7 +110,8 @@ curl -H "Authorization: Bearer <the token>" localhost:8000/learners/demo-learner
 ### The student web app
 
 `/app/` serves the student web app (`app/api/web/`): an HTML page, a stylesheet and one script, with no data in them
-(`/app/teacher.html` and `teacher.js`, the teacher dashboard, follow every rule below too).
+(`/app/teacher.html` and `teacher.js`, the teacher dashboard, follow every rule below too, and so does
+`/app/privacy.html`, the privacy notice, which has no script at all).
 They are public like `/health` (`app/api/routes/web.py` serves exactly the listed files, never a path from the
 request), and everything the page shows comes from the authenticated JSON API, called from the page on the same
 origin. `tests/unit/test_student_app.py` checks that these are the only routes outside the OpenAPI schema, so the
@@ -232,6 +233,22 @@ uniform `404`, and only `GET` is served (any other method is `405`).
 - **Residual points.** The learner page of the dashboard uses the learner routes a teacher may already read
   (above); it does not call `GET /learning-cycles/{id}` or the next action, the reads that reconcile or store. A
   teacher sees the learner's own answer text, which the learner wrote to be graded.
+
+## Learner data deletion
+
+MVP item 9 ([privacy](privacy.md)). `DELETE /learners/{learner_id}` deletes everything stored about a learner. It is
+a change, so `Access.check` decides as for every other change: the learner's own scope may (`200` and a receipt of
+counts), a teacher of their class gets `403`, anyone else the uniform `404` (the route is in the security matrix,
+and `tests/e2e/test_learner_deletion_api.py` checks each case leaves the learner's data as it was).
+
+- **Nothing of the deleted data in the answer.** The receipt carries table names and counts; the store's error on a
+  failed object deletion is logged, never returned (`503` with a fixed message). The log line has no learner id.
+- **No resurrection.** The deletion refuses (`409`) while a worker may write for the learner, and a worker's later
+  fenced writes fail because the task row they are fenced by is gone (`tests/postgres/test_learner_deletion_postgres.py`).
+- **Exact matching.** Events outside a task are found by `"learner_id":"<id>"` in their JSON with LIKE wildcards
+  escaped, so a learner id with `_` or `%` never takes another learner's events with it (tested on SQLite and
+  PostgreSQL).
+- **Spending caps hold.** The spend ledger is kept, so deleting a learner does not reset their daily cap.
 
 ## Learner-facing responses
 

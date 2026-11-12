@@ -277,6 +277,8 @@ function renderOnboarding() {
   h("p", {}), h("button", { type: "submit", "data-testid": "save-profile" }, "Continue"));
   show(h("h1", { text: "Welcome" }),
     h("p", { class: "muted" }, "A few details first. Your level is found with a short check in your first lesson."),
+    h("p", { class: "muted small" }, "What is kept about you and who can see it: ",
+      h("a", { href: "privacy.html", "data-testid": "onboarding-privacy" }, "privacy notice"), "."),
     h("div", { class: "card" }, form));
 }
 
@@ -763,7 +765,61 @@ async function renderProgress() {
         h("td", {}, h("span", { class: statusClass(o.status) }, o.status.replace(/_/g, " ").toLowerCase()))))))));
   }
   nodes.push(h("h2", { text: "Your classes" }), classesCard());
+  nodes.push(h("h2", { text: "Your data" }), dataCard());
   show(nodes);
+}
+
+// MVP item 9: the learner deletes everything stored about them. Two steps (open, then type DELETE), because it cannot
+// be undone. Afterwards the page keeps nothing of the learner: the tab forgets which learner it was acting for.
+function dataCard() {
+  const feedback = h("div");
+  const confirm = h("input", { type: "text", id: "confirm-delete", autocomplete: "off", "data-testid": "confirm-delete" });
+  const form = h("form", {
+    hidden: true,
+    on: {
+      submit: async (e) => {
+        e.preventDefault();
+        if (confirm.value.trim().toUpperCase() !== "DELETE") {
+          feedback.replaceChildren(h("div", { class: "error", role: "alert", "data-testid": "error" }, "Type DELETE to confirm."));
+          return;
+        }
+        const button = form.querySelector("button[type=submit]");
+        button.disabled = true;
+        try {
+          await api("DELETE", L());
+          renderDeleted();
+        } catch (err) {
+          const text = err.status === 409
+            ? "A lesson is being prepared right now. Wait until it is ready, or stop it, then try again."
+            : err.status === 503 ? "Not everything could be deleted, so nothing was. Try again in a moment." : null;
+          feedback.replaceChildren(text ? h("div", { class: "error", role: "alert", "data-testid": "error" }, text) : errorBox(err));
+          button.disabled = false;
+        }
+      },
+    },
+  }, h("p", {}, "This deletes, for good, your profile, goals, plans, lessons, answers, grades, progress and class memberships. Your teachers will stop seeing you. It cannot be undone."),
+  feedback, h("label", { for: "confirm-delete", text: "Type DELETE to confirm" }), confirm, h("p", {}),
+  h("div", { class: "row" },
+    h("button", { type: "submit", class: "danger", "data-testid": "delete-data" }, "Delete everything"),
+    h("button", { type: "button", class: "secondary", on: { click: () => { form.hidden = true; open.hidden = false; } } }, "Keep my data")));
+  const open = h("button", {
+    type: "button", class: "secondary", "data-testid": "open-delete",
+    on: { click: () => { form.hidden = false; open.hidden = true; confirm.focus(); } },
+  }, "Delete my data…");
+  return h("div", { class: "card danger", "data-testid": "your-data" },
+    h("p", {}, "What is kept about you, who can see it and how long it is kept: ",
+      h("a", { href: "privacy.html", "data-testid": "privacy-notice" }, "privacy notice"), "."),
+    open, form);
+}
+
+function renderDeleted() {
+  store("sessionStorage", LEARNER_KEY, null);
+  app.learnerId = null;
+  app.profile = null;
+  document.getElementById("nav").hidden = true;
+  show(h("h1", { text: "Your data has been deleted" }), h("div", { class: "card", "data-testid": "deleted" },
+    h("p", {}, "Everything the Teaching Agent kept about your learning is gone. If you come back, you start from the beginning."),
+    h("button", { type: "button", on: { click: () => { location.hash = "#/"; location.reload(); } } }, "Start again")));
 }
 
 // A teacher's class: the learner joins with the code the teacher gave them, which lets that teacher see (never change)
