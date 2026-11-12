@@ -8,3 +8,4 @@ dist/
 var/
 .venv/
 deploy/secrets/
+deploy/gateway/

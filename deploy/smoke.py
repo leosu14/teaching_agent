@@ -4,9 +4,9 @@
     python deploy/smoke.py --keep     # leave the stack running afterwards
 
 It plays the identity provider: it makes an RSA key, writes its public half as the gateway's static key set
-(TA_GATEWAY_JWKS_FILE) and signs the learners' and the teacher's tokens. Every secret is generated into
-deploy/secrets/ for this run. Nothing reaches the network beyond the image registries; the app runs on the offline
-mock providers, with the real FFmpeg, PostgreSQL and an S3-compatible store (RustFS).
+(TA_GATEWAY_JWKS_FILE, in deploy/gateway/) and signs the learners' and the teacher's tokens. Every secret is
+generated into deploy/secrets/ for this run. Nothing reaches the network beyond the image registries; the app runs on
+the offline mock providers, with the real FFmpeg, PostgreSQL and an S3-compatible store (RustFS).
 
 What it checks, all through the published gateway only:
 - the migration ran (the API and the worker start only at the newest schema revision) and `check` reports READY;
@@ -14,6 +14,7 @@ What it checks, all through the published gateway only:
 - a learner's lesson is queued (202), run by the worker process and completed, with its media in the bucket and
   served back through the API; another learner gets 404 for it;
 - a teacher creates a class, the learner joins, and the teacher's dashboard lists the learner;
+- the published gateway sees only its own secret (no database or object-store credential);
 - running the migration again changes nothing.
 """
 
@@ -36,6 +37,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 SECRETS = DEPLOY / "secrets"
+GATEWAY_CONFIG = DEPLOY / "gateway"  # the gateway's public configuration (the static JWKS)
 COMPOSE = ["docker", "compose", "-f", str(DEPLOY / "compose.yaml"),
            *(["-f", os.environ["SMOKE_COMPOSE_OVERRIDE"]] if os.environ.get("SMOKE_COMPOSE_OVERRIDE") else []),
            "-p", "ta-smoke"]
@@ -67,7 +69,8 @@ def write_secrets() -> rsa.RSAPrivateKey:
     numbers = key.public_key().public_numbers()
     jwks = {"keys": [{"kty": "RSA", "kid": KID, "use": "sig", "alg": "RS256", "n": b64(numbers.n),
                       "e": b64(numbers.e)}]}
-    (SECRETS / "jwks.json").write_text(json.dumps(jwks), encoding="utf-8")
+    GATEWAY_CONFIG.mkdir(parents=True, exist_ok=True)
+    (GATEWAY_CONFIG / "jwks.json").write_text(json.dumps(jwks), encoding="utf-8")
     return key
 
 
@@ -171,6 +174,11 @@ def run(port: str, build: bool = True) -> None:
         dashboard = c.get(f"/classes/{made.json()['class_id']}/dashboard", headers=teacher)
         assert dashboard.status_code == 200 and lid in dashboard.text, dashboard.text
         assert c.get(f"/classes/{made.json()['class_id']}/dashboard", headers=other).status_code == 404
+
+    # The published gateway holds only its own secret: no database URL or object-store key is visible in it.
+    seen = compose("exec", "-T", "gateway", "sh", "-c", "ls /run/secrets /run/ta-config", capture=True).stdout
+    names = set(seen.split()) - {"/run/secrets:", "/run/ta-config:"}
+    assert names == {"gateway_secret", "jwks.json"}, seen
 
     again = compose("run", "--rm", "migrate", capture=True)
     assert "already at" in again.stdout, again.stdout

@@ -133,6 +133,9 @@ an empty or unreadable file, and a misspelt secret file variable stop the proces
 
 `deploy/compose.yaml` reads them from `deploy/secrets/` (git-ignored): `database_url`, `postgres_password`,
 `s3_access_key_id`, `s3_secret_access_key`, `gateway_secret` (the same file for the API and the gateway).
+The gateway, the only published service, gets `gateway_secret` alone: it holds no database or object-store
+credential. A static key set for it (`TA_GATEWAY_JWKS_FILE=/run/ta-config/jwks.json`) goes in `deploy/gateway/`
+(git-ignored), mounted read-only; it is public key material, never a secret file.
 
 ## Known limits
 

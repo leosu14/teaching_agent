@@ -2,6 +2,7 @@
 # PostgreSQL and an S3-compatible store, from one image. Only the gateway is published.
 #
 #   deploy/secrets/ holds the secret files (never committed; docs/deployment.md lists each one).
+#   deploy/gateway/ holds the gateway's public configuration (a static jwks.json, if the IdP's keys come as a file).
 #   docker compose -f deploy/compose.yaml up -d --build
 #
 # PostgreSQL and an S3-compatible store (RustFS) run next to the app here, so the stack is complete on one machine (CI runs it end to end with
@@ -116,7 +117,9 @@ services:
       TA_GATEWAY_ROLE_MAP: ${TA_GATEWAY_ROLE_MAP:-teacher=teacher,author=author}
     secrets: [gateway_secret]
     volumes:
-      - ./secrets:/run/ta-config:ro  # a static JWKS file (jwks.json), for an IdP whose keys come as a file
+      # Public configuration only: a static JWKS file (jwks.json), for an IdP whose keys come as a file. Never
+      # ./secrets: the gateway is the published service and needs no database or object-store credential.
+      - ./gateway:/run/ta-config:ro
     ports:
       - "${TA_GATEWAY_PORT:-8080}:8080"
     depends_on:
