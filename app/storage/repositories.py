@@ -1526,6 +1526,18 @@ OBJECT_RETRY = timedelta(seconds=30)  # the first wait before an object deletion
 OBJECT_RETRY_MAX = timedelta(hours=1)
 
 
+def _retry_wait(attempts: int) -> timedelta:
+    """The wait before the next try of an object deletion that failed `attempts` times: OBJECT_RETRY, doubling, up to
+    OBJECT_RETRY_MAX. The exponent is capped before the product is formed: timedelta(seconds=30) * 2**42 is past
+    timedelta.max, and an OverflowError here would leave the row due at once, ahead of every other queued deletion."""
+    wait = OBJECT_RETRY
+    for _ in range(max(attempts - 1, 0)):
+        if wait >= OBJECT_RETRY_MAX:
+            break
+        wait *= 2
+    return min(wait, OBJECT_RETRY_MAX)
+
+
 @dataclass(frozen=True)
 class LearnerObjects:
     """The stored objects of a learner's artifacts and holds: the ones that would be deleted now, and how many would
@@ -1718,8 +1730,7 @@ class SqlLearnerDataRepository:
                 row = s.get(ObjectDeletionRow, deletion_id)
                 if row is not None:
                     row.attempts += 1
-                    wait = min(OBJECT_RETRY * (2 ** (row.attempts - 1)), OBJECT_RETRY_MAX)
-                    row.next_attempt_at = self._clock() + wait
+                    row.next_attempt_at = self._clock() + _retry_wait(row.attempts)
             return "pending"
 
     def holds_data(self, learner_id: str) -> bool:

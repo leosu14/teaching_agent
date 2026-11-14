@@ -226,3 +226,37 @@ def test_the_sweeper_queues_no_recovery_for_a_learner_deleted_meanwhile(sessions
     assert report.recovered == []
     with sessions() as s:
         assert s.scalars(select(TaskJobRow)).all() == [] and s.get(TaskRow, "t-stranded") is None
+
+
+def test_a_file_the_store_keeps_refusing_backs_off_at_most_an_hour_and_never_blocks_the_queue(sessions) -> None:
+    """A store that refuses one object for days (a bucket retention rule, a missing delete permission) is retried every
+    hour at most, for as long as it takes, and the queue keeps working: another learner's queued file is still deleted.
+    The wait is capped before it is computed: 30 s doubled 42 times is past timedelta's range."""
+    from app.storage.orm import ObjectDeletionRow
+    from app.storage.repositories import OBJECT_RETRY, OBJECT_RETRY_MAX, _retry_wait
+
+    assert [_retry_wait(n) for n in (1, 2, 3)] == [OBJECT_RETRY, 2 * OBJECT_RETRY, 4 * OBJECT_RETRY]
+    assert _retry_wait(43) == _retry_wait(10 ** 6) == OBJECT_RETRY_MAX
+    now = [NOW]
+    repo = SqlLearnerDataRepository(sessions, clock=lambda: now[0])
+    stuck, other = "object:task_a/lesson/v1.json", "object:task_b/lesson/v1.json"
+    with sessions.begin() as s:
+        s.add(ObjectDeletionRow(deletion_id="objdel_a", uri=stuck, content_hash="", queued_at=NOW, attempts=0,
+                                next_attempt_at=NOW))
+    deleted = []
+
+    def delete(uri: str) -> None:
+        if uri == stuck:
+            raise OSError("AccessDenied")
+        deleted.append(uri)
+
+    for _ in range(60):  # 60 hourly sweeper passes, past the 43rd failure
+        assert repo.purge(delete).pending == 1
+        now[0] += OBJECT_RETRY_MAX + timedelta(seconds=1)
+    with sessions.begin() as s:
+        assert s.get(ObjectDeletionRow, "objdel_a").attempts == 60
+        s.add(ObjectDeletionRow(deletion_id="objdel_b", uri=other, content_hash="", queued_at=now[0], attempts=0,
+                                next_attempt_at=now[0]))
+    result = repo.purge(delete)
+    assert (result.deleted, result.pending) == (1, 1) and deleted == [other]
+    assert repo.pending_deletions() == 1  # the refused file stays queued, recoverable once the store lets it go
