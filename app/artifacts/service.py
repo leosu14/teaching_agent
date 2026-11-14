@@ -16,7 +16,7 @@ from app.observability.scope import ExecutionScope
 from app.schemas.artifact import Artifact, ArtifactDraft, ArtifactType, StoredArtifacts, StoredObject
 from app.schemas.common import new_id
 from app.schemas.events import EventType
-from app.schemas.lease import Lease
+from app.schemas.lease import LearnerDataGone, Lease, LeaseLost
 
 EXTENSIONS = {
     "application/json": ".json",
@@ -103,11 +103,18 @@ class ArtifactService:
         uri, created = self._store.put_if_absent(f"{task_id}/{name}/v{version}{_extension(media_type)}", content)
         if not created:
             uri = self._store.put(f"{task_id}/{name}/v{version}-{artifact_id}{_extension(media_type)}", content)
-        return self._add(Artifact(
-            artifact_id=artifact_id, task_id=task_id, type=type, name=name, uri=uri, media_type=media_type,
-            content_hash=digest, size_bytes=len(content), version=version, provider=provider,
-            parent_ids=parent_ids, metadata=metadata,
-        ), scope)
+        try:
+            return self._add(Artifact(
+                artifact_id=artifact_id, task_id=task_id, type=type, name=name, uri=uri, media_type=media_type,
+                content_hash=digest, size_bytes=len(content), version=version, provider=provider,
+                parent_ids=parent_ids, metadata=metadata,
+            ), scope)
+        except (LeaseLost, LearnerDataGone):
+            # The row was refused (a worker that lost its lease, or a learner deleted meanwhile): the object this call
+            # wrote is under a key of its own that no row will ever point at, so it goes too. Otherwise a deletion
+            # that ran between the put and the row could not find it, and it would keep the content.
+            self._store.delete(uri)
+            raise
 
     def put_object(self, content: bytes, media_type: str) -> StoredObject:
         """Store bytes content-addressed by their sha256. Identical content is written once and reused."""

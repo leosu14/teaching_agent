@@ -8,14 +8,20 @@ in the bucket."""
 
 from __future__ import annotations
 
+import json
+import sys
+import threading
+
 import pytest
 
+from app.api.auth import AUTHOR
 from app.config.settings import Settings
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
 from app.providers.storage.s3 import S3ObjectStore
 from app.services import container as container_module
 from app.services.container import build_container
+from app.storage import repositories
 from tests.auth import client_for, drain
 from tests.conftest import ANSWERS, LEARNER
 from tests.fake_s3 import FakeS3
@@ -85,3 +91,68 @@ def test_each_learner_deletes_their_lesson_from_the_bucket(s3_container) -> None
         left = [k for k in fake.objects if not k.startswith("pilot/records/")]
         assert all(k.startswith("pilot/objects/sha256/") and k.endswith((".png", ".jpg", ".webp", ".svg"))
                    for k in left), left
+
+
+ANSWER = "respuesta-carrera-s3"  # no object in the bucket may hold it after the deletion
+
+
+def registered_item(c, client, task_id: str) -> str:
+    lesson = c.artifacts.find(task_id, "lesson")
+    concept = json.loads(c.artifacts.read(lesson.artifact_id))["sections"][0]["concept_id"]
+    item = {"item": {"assessment_item_id": "s3-race-item", "lesson_id": task_id, "concept_id": concept,
+                     "prompt": "Ayer yo ___ (hablar) con María.", "expected_answer": "hablé",
+                     "response_type": "SHORT_TEXT", "language": "es"}}
+    r = client.post("/assessment-items", json=item)
+    assert r.status_code == 201, r.text
+    return "s3-race-item"
+
+
+def left_in_bucket(fake, task_id: str) -> list[str]:
+    """Objects under the learner's task key, or holding their answer."""
+    return sorted(k for k, data in fake.objects.items() if k.startswith(f"pilot/{task_id}/") or ANSWER.encode() in data)
+
+
+@pytest.mark.parametrize("order", ["deletion first", "grading first"])
+def test_a_deletion_racing_a_graded_answer_leaves_nothing_in_the_bucket(s3_container, monkeypatch, order) -> None:
+    """MVP item 9 on S3: the grading writes its grade and feedback files to the bucket. Deletion first (it runs while
+    the answer is being graded): every later write is refused, and a file put just before its refused row is
+    removed again. Grading first (its attempt write holds the locks, the deletion waits): the deletion then removes
+    what the grading wrote, files included."""
+    c, fake = s3_container
+    with client_for(c, FIRST, roles=(AUTHOR,)) as one:
+        task_id = lesson(c, one, FIRST)
+        item = registered_item(c, one, task_id)
+        receipts = []
+        if order == "deletion first":
+            real = c.assessment_service.engine.grade
+
+            async def grade_after_a_deletion(*args, **kwargs):
+                receipts.append(c.learner_deletion.delete(FIRST))
+                return await real(*args, **kwargs)
+
+            monkeypatch.setattr(c.assessment_service.engine, "grade", grade_after_a_deletion)
+        else:
+            deletion = []
+            guard = repositories._guard
+
+            def guard_then_delete(s) -> None:
+                if deletion and not receipts:  # the grading's next write waits for the deletion it let in
+                    deletion[0].join(30)
+                    receipts.append(deletion[0].receipt)
+                guard(s)
+                if not deletion and sys._getframe(1).f_code.co_name == "add_attempt":
+                    thread = threading.Thread(target=lambda: setattr(thread, "receipt", c.learner_deletion.delete(FIRST)))
+                    deletion.append(thread)
+                    thread.start()
+                    thread.join(0.3)
+                    assert thread.is_alive(), "the deletion did not wait for the grading's write"
+
+            monkeypatch.setattr(repositories, "_guard", guard_then_delete)
+        r = one.post(f"/assessment-items/{item}/attempts",
+                     json={"learner_id": FIRST, "answer": ANSWER, "attempt_id": "s3-race-attempt"})
+        assert r.status_code == 404, r.text
+        assert receipts and receipts[0].objects_deleted > 0
+        if order == "grading first":
+            assert receipts[0].records["assessment_attempts"] == 1  # the attempt it waited for
+    assert left_in_bucket(fake, task_id) == []
+    assert not c.learner_deletion.repository.holds_data(FIRST)

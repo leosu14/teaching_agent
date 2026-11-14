@@ -65,18 +65,33 @@ learner; signing in again starts from the welcome screen, as a new learner.
 
 `LearnerDeletionService` (`app/services/learner_deletion.py`) over `SqlLearnerDataRepository`:
 
-1. **Refuse while work is in progress.** A queued or running job of one of the learner's tasks, a task under a live
-   execution lease, or a learning cycle being driven: `409 LearnerDataBusy`, and nothing is deleted. A worker writing
-   the learner's lesson at that moment would keep producing data. The learner waits, or cancels the task, and
-   deletes again.
-2. **Delete the objects.** Every object an artifact of the learner's tasks and cycles points at, except a
-   content-addressed object (`objects/sha256/...`) that an artifact of someone else also holds (identical bytes are
-   stored once and shared: the same picture in two lessons). If the store refuses one, the request fails with `503
-   ObjectDeletionFailed` and no row is deleted, so a retry finds every remaining object again through the rows.
-   Deleting the rows first could leave objects that nothing references any more, which nobody could find to delete.
-3. **Delete the rows**, all in one transaction, after the same in-progress check. The learner's task and cycle rows
-   are locked first (`SELECT ... FOR UPDATE` on PostgreSQL), so a worker's claim either happened before (and is seen)
-   or finds nothing to claim afterwards.
+Everything below is one database transaction:
+
+1. **Lock.** The learner's task rows, then their learner row, then their cycle rows (`SELECT ... FOR UPDATE` on
+   PostgreSQL, after a lock that makes two deletions of one learner take turns; on SQLite the first statement is a
+   write, which holds the database's write lock).
+2. **Refuse while work is in progress.** A queued or running job of one of the learner's tasks, a task under a live
+   execution lease, or a learning cycle being driven: `409 LearnerDataBusy`, and nothing is deleted, no row and no
+   file. A worker writing the learner's lesson at that moment would keep producing data. The learner waits, or
+   cancels the task, and deletes again.
+3. **Delete the rows** of every table above but the spend ledger, including the events outside any task that name
+   the learner, one of their goals or one of their curricula (objective started, learning action selected).
+4. **Delete the objects**, still under the locks: every object an artifact of the learner's tasks and cycles points
+   at, except a content-addressed object (`objects/sha256/...`) that an artifact of someone else also holds
+   (identical bytes are stored once and shared: the same picture in two lessons). If the store refuses one, the
+   transaction rolls back and the request fails with `503 ObjectDeletionFailed`: no row is deleted, so a retry finds
+   every remaining object again through the rows (the objects already deleted stay deleted).
+5. **Commit.**
+
+**Requests at the same moment.** Grading an answer, a teaching session, queueing a lesson, a learning cycle, a goal
+and joining a class write for the learner without a task lease, so the in-progress check cannot see them. Each of
+their writes checks, inside its own transaction and before anything else, that the lesson task and the learner rows
+still exist, and locks them in the same order as the deletion (`learner_writes` in `app/schemas/lease.py`, `_guard`
+in `app/storage/repositories.py`). So either the write commits first, and the deletion waits for it and deletes it
+with the rest, or the deletion commits first, and the write and every later one of that request are refused: the
+request answers the uniform `404` and stores nothing. A file the request had already put for an artifact whose row
+is then refused is deleted again at once, so no file holds what the learner wrote. A lesson queued at the same moment
+is either seen (the deletion answers `409` and deletes nothing) or refused after it (`404`).
 
 A worker that still has the learner's task in memory cannot bring data back: its writes are fenced by the task row,
 which is gone (`LeaseLost`), and profile and curriculum saves are version-checked against rows that no longer exist.
@@ -99,8 +114,9 @@ The deletion's log line records counts, not the learner id.
   clip request, not by learner, and is reused across lessons so a paid clip is not generated twice. The ledger and
   the provider's original clip files it records are not deleted with a learner; the learner's own artifacts (the
   lesson video, the clips in it) are, and a ledger entry whose object is gone is generated again when next needed.
-- **A request racing the deletion.** A lesson the learner starts in another tab at the same moment as the deletion
-  can be created just after it and survive it; deleting again removes it.
+- **Reads during the deletion.** A page of the learner's open in another tab while the deletion runs can find a file
+  gone a moment before its record (the files go just before the commit); it then answers that the lesson is not
+  found, as it will once the deletion has committed.
 - **A shared object deleted at the moment another lesson stores the same bytes** could leave that lesson's artifact
   pointing at a missing object; the artifact service then reports it missing. Identical bytes are rare outside the
   mock providers.

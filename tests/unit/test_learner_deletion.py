@@ -68,7 +68,7 @@ def test_events_naming_a_learner_are_matched_exactly(sessions, learner_id) -> No
         events.append(Event(event_id=f"e{i}", type="GOAL_CREATED", data={"learner_id": lid}))
     repo = SqlLearnerDataRepository(sessions, clock=lambda: NOW)
     assert repo.holds_data(learner_id)
-    assert repo.erase(learner_id) == {"events": 1}
+    assert repo.erase(learner_id)[0] == {"events": 1}
     assert not repo.holds_data(learner_id)
     assert all(repo.holds_data(lid) for lid in near)
 
@@ -90,7 +90,7 @@ def test_shared_content_addressed_objects_are_kept_and_the_rest_deleted(sessions
     repo = SqlLearnerDataRepository(sessions, clock=lambda: NOW)
     found = repo.objects("learner-a")
     assert sorted(found.delete) == sorted([own, keyed]) and found.shared == 1
-    assert repo.erase("learner-a") == {"artifacts": 3, "tasks": 1}
+    assert repo.erase("learner-a")[0] == {"artifacts": 3, "tasks": 1}
     assert repo.objects("learner-b").delete == (shared, "object:t-b/lesson/v1.json")  # B's still all there
 
 
@@ -102,19 +102,19 @@ def test_a_live_task_lease_or_a_driven_cycle_blocks_and_an_expired_one_does_not(
             call("learner-a")
     assert repo.holds_data("learner-a")
     later = SqlLearnerDataRepository(sessions, clock=lambda: NOW + timedelta(minutes=6))
-    assert later.erase("learner-a") == {"tasks": 1}
+    assert later.erase("learner-a")[0] == {"tasks": 1}
 
     with sessions.begin() as s:
         s.add(LearningCycleRow(cycle_id="c-a", learner_id="learner-a", status="RUNNING", version=1, created_at=NOW,
                                body="{}", lease_token="tok", lease_expires_ms=int(NOW.timestamp() * 1000) + 60_000))
     with pytest.raises(LearnerDataBusy):
         repo.erase("learner-a")
-    assert later.erase("learner-a") == {"learning_cycles": 1}
+    assert later.erase("learner-a")[0] == {"learning_cycles": 1}
 
 
 def test_a_learner_without_data_erases_nothing(sessions) -> None:
     repo = SqlLearnerDataRepository(sessions, clock=lambda: NOW)
-    assert repo.erase("nobody") == {} and repo.objects("nobody").delete == ()
+    assert repo.erase("nobody")[0] == {} and repo.objects("nobody").delete == ()
 
 
 def test_the_privacy_notice_is_static_text_linked_from_both_apps() -> None:
@@ -133,3 +133,63 @@ def test_the_privacy_notice_is_static_text_linked_from_both_apps() -> None:
     for page in ("index.html", "teacher.html"):
         assert 'href="privacy.html"' in (web.WEB_DIR / page).read_text(encoding="utf-8"), page
     assert "privacy.html" in (web.WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+
+def test_events_naming_the_learners_goal_or_curriculum_are_erased_and_no_one_elses(sessions) -> None:
+    from app.storage.orm import CurriculumRow, LearningGoalRow
+
+    with sessions.begin() as s:
+        for goal, learner in (("goal_a_1", "learner-a"), ("goal_b_1", "learner-b")):
+            s.add(LearningGoalRow(goal_id=goal, learner_id=learner, domain="spanish", status="ACTIVE", body="{}"))
+    with sessions.begin() as s:
+        s.add(CurriculumRow(curriculum_id="cur_a_1", goal_id="goal_a_1", learner_id="learner-a", version=1, body="{}"))
+    events = SqlEventRepository(sessions)
+    events.append(Event(event_id="e-goal", type="objective.started", data={"goal_id": "goal_a_1"}))
+    events.append(Event(event_id="e-cur", type="x", data={"curriculum_id": "cur_a_1", "goal_id": "other"}))
+    events.append(Event(event_id="e-b", type="objective.started", data={"goal_id": "goal_b_1"}))
+    events.append(Event(event_id="e-near", type="x", data={"goal_id": "goal_a_10"}))  # not a prefix match
+    repo = SqlLearnerDataRepository(sessions, clock=lambda: NOW)
+    counts, _ = repo.erase("learner-a")
+    assert counts["events"] == 2 and not repo.holds_data("learner-a")
+    with sessions() as s:
+        from sqlalchemy import select
+
+        from app.storage.orm import EventRow
+        assert sorted(s.scalars(select(EventRow.event_id))) == ["e-b", "e-near"]
+
+
+def test_a_write_for_a_deleted_learner_or_lesson_is_refused_inside_its_transaction(sessions) -> None:
+    """`learner_writes`: every repository write checks the learner (and the lesson task) rows in its own
+    transaction, so nothing is written for a learner whose rows are gone, and no profile is created again."""
+    from app.schemas.lease import LearnerDataGone, learner_writes
+    from app.schemas.learner import LearnerProfile
+    from app.storage.repositories import SqlLearnerRepository
+
+    add_task(sessions, "t-a", "learner-a")
+    profiles = SqlLearnerRepository(sessions)
+    profiles.save(LearnerProfile(learner_id="learner-a", display_name="A"))
+    with learner_writes("learner-a", "t-a"):
+        add_artifact(sessions, "t-a", "object:t-a/x/v1.json", "x1")  # both rows there: written
+    SqlLearnerDataRepository(sessions, clock=lambda: NOW).erase("learner-a")
+    with learner_writes("learner-a", "t-a"), pytest.raises(LearnerDataGone):
+        add_artifact(sessions, "t-a", "object:t-a/x/v2.json", "x2")
+    with learner_writes("learner-a"), pytest.raises(LearnerDataGone):
+        profiles.save(LearnerProfile(learner_id="learner-a", display_name="A"))  # not created again
+    assert not SqlLearnerDataRepository(sessions, clock=lambda: NOW).holds_data("learner-a")
+    profiles.save(LearnerProfile(learner_id="learner-a", display_name="A again"))  # outside: a new start is allowed
+
+
+def test_a_file_put_for_a_refused_artifact_row_is_removed_again(tmp_path, sessions) -> None:
+    from app.artifacts.service import ArtifactService
+    from app.observability.events import EventBus
+    from app.observability.scope import ExecutionScope, UsageLedger
+    from app.schemas.lease import LearnerDataGone, learner_writes
+    from app.storage.object_store import FilesystemObjectStore
+
+    store = FilesystemObjectStore(tmp_path / "objects")
+    artifacts = ArtifactService(SqlArtifactRepository(sessions), store)
+    with learner_writes("gone-learner", "gone-task"), pytest.raises(LearnerDataGone):
+        artifacts.store(task_id="gone-task", name="grade", type=ArtifactType.ASSESSMENT_GRADE, media_type="application/json",
+                        content=b'{"answer": "secret"}', provider="test", parent_ids=[], metadata={},
+                        scope=ExecutionScope(events=EventBus(), usage=UsageLedger(), task_id="gone-task"))
+    assert [p for p in (tmp_path / "objects").rglob("*") if p.is_file()] == []

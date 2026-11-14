@@ -15,7 +15,8 @@ What it checks, all through the published gateway only:
   served back through the API; another learner gets 404 for it;
 - a teacher creates a class, the learner joins, and the teacher's dashboard lists the learner;
 - the privacy notice is served; the learner deletes their data (the teacher and another learner cannot), after which
-  their lesson, its content and their place on the dashboard are gone;
+  their lesson, its content and their place on the dashboard are gone, and PostgreSQL and the bucket are checked
+  directly: no row of any erased table names the learner or one of their tasks, and none of their objects is left;
 - the published gateway sees only its own secret (no database or object-store credential);
 - running the migration again changes nothing.
 """
@@ -84,11 +85,67 @@ def token(key, subject: str, *, roles: list[str] | None = None, audience: str = 
     return jwt.encode(claims, key, algorithm="RS256", headers={"kid": KID})
 
 
-def compose(*args: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+def compose(*args: str, check: bool = True, capture: bool = False, stdin: str | None = None) -> subprocess.CompletedProcess:
     env = {**os.environ, "TA_GATEWAY_OIDC_ISSUER": ISSUER, "TA_GATEWAY_OIDC_AUDIENCE": AUDIENCE,
            "TA_GATEWAY_JWKS_FILE": "/run/ta-config/jwks.json", "TA_GATEWAY_PORT": os.environ.get("SMOKE_PORT", "8080")}
     return subprocess.run([*COMPOSE, *args], cwd=ROOT, env=env, check=check, text=True,
-                          capture_output=capture)
+                          capture_output=capture or stdin is not None, input=stdin)
+
+
+# The tables a learner's deletion keeps on purpose (app/storage/repositories.py, KEPT_TABLES), and the migration's own.
+KEPT_TABLES = {"classes", "assessment_rubrics", "spend_entries", "spend_counters", "alembic_version"}
+
+
+def sql(query: str) -> list[str]:
+    """Rows of a query run in the stack's PostgreSQL (as its own user, over the container's local socket)."""
+    done = compose("exec", "-T", "postgres", "psql", "-U", "ta", "-d", "teaching_agent", "-At", "-v",
+                   "ON_ERROR_STOP=1", "-f", "-", stdin=query)
+    return [line for line in done.stdout.splitlines() if line]
+
+
+def literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def rows_naming(ids: set[str]) -> dict[str, int]:
+    """For every table that is not kept on purpose: the rows whose any column (the whole row as text) holds one of
+    `ids`. A check of the database itself, not of what the deletion reports."""
+    tables = [t for t in sql("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1")
+              if t not in KEPT_TABLES]
+    match = " OR ".join(f"strpos(r::text, {literal(i)}) > 0" for i in sorted(ids))
+    query = " UNION ALL ".join(f"SELECT '{t}', count(*) FROM {t} r WHERE {match}" for t in tables)
+    return {t: int(n) for t, n in (line.split("|") for line in sql(query + ";")) if int(n)}
+
+
+# Run inside the API container (which holds the object store's credentials; the smoke test does not): every key in
+# the bucket, one per line, through the app's own signed S3 client.
+BUCKET_KEYS = """
+import xml.etree.ElementTree as ET
+from urllib.parse import urlsplit
+from app.config.secrets import load_secret_files
+from app.config.settings import Settings
+from app.providers.storage.s3 import S3ObjectStore, _encode
+load_secret_files()
+store = S3ObjectStore(Settings().s3_config())
+c = store._config
+bucket = f"{c.base}/{_encode(c.bucket)}" if c.uses_path_style else f"{urlsplit(c.base).scheme}://{c.bucket}.{urlsplit(c.base).netloc}/"
+token = None
+while True:
+    url = bucket + "?list-type=2" + (f"&continuation-token={_encode(token)}" if token else "")
+    r = store._client.get(url, headers=store._signed("GET", url, None, None))
+    r.raise_for_status()
+    root = ET.fromstring(r.content)
+    ns = root.tag.partition("}")[0] + "}" if root.tag.startswith("{") else ""
+    for key in root.iter(f"{ns}Key"):
+        print(key.text)
+    token = root.findtext(f"{ns}NextContinuationToken")
+    if root.findtext(f"{ns}IsTruncated") != "true" or not token:
+        break
+"""
+
+
+def bucket_keys() -> set[str]:
+    return set(compose("exec", "-T", "api", "python", "-", stdin=BUCKET_KEYS).stdout.split())
 
 
 def wait_for(client: httpx.Client, path: str, timeout: float = 180) -> None:
@@ -182,9 +239,24 @@ def run(port: str, build: bool = True) -> None:
         assert c.get("/app/privacy.html").status_code == 200
         assert c.delete(f"/learners/{lid}", headers=teacher).status_code == 403
         assert c.delete(f"/learners/{lid}", headers=other).status_code == 404
+        tasks = set(sql(f"SELECT task_id FROM tasks WHERE learner_id = {literal(lid)};"))
+        uris = set(sql("SELECT body::json->>'uri' FROM artifacts WHERE task_id IN ("
+                       + ", ".join(literal(t) for t in sorted(tasks)) + ");"))
+        before = rows_naming({lid} | tasks)
+        assert {"learners", "tasks", "artifacts", "events", "class_members"} <= set(before), before
+        stored = bucket_keys()
+        own = {k for k in stored if any(k == u.removeprefix("object:") or k.endswith("/" + u.removeprefix("object:"))
+                                        for u in uris)}
+        assert own and any(t in k for k in own for t in tasks), sorted(stored)[:20]  # the lesson's files are there
         deleted = c.delete(f"/learners/{lid}", headers=me)
         assert deleted.status_code == 200, deleted.text
         assert deleted.json()["records"].get("tasks") and deleted.json()["objects_deleted"] > 0, deleted.text
+        assert deleted.json()["objects_kept_shared"] == 0, deleted.text  # no other learner shares the media here
+        # In the database itself: no row of any erased table names the learner or one of their tasks.
+        assert rows_naming({lid} | tasks) == {}, rows_naming({lid} | tasks)
+        # In the bucket itself: none of their files is left, nor anything under a key of one of their tasks.
+        left = bucket_keys()
+        assert not own & left and not [k for k in left if any(t in k for t in tasks)], sorted(own & left)
         assert c.get(f"/learners/{lid}", headers=me).status_code == 404
         assert c.get(f"/tasks/{task['task_id']}", headers=me).status_code == 404
         assert c.get(f"/artifacts/{served[0]['artifact_id']}/content", headers=me).status_code == 404

@@ -63,6 +63,7 @@ from app.schemas.assessment import (
     RegisterAssessmentItem,
 )
 from app.schemas.common import new_id, utcnow
+from app.schemas.lease import learner_writes
 from app.schemas.events import EventType
 from app.schemas.learner import LearningEvidence, graded_correctness, stable_id
 from app.schemas.usage import BudgetDefaults
@@ -243,17 +244,21 @@ class AssessmentService:
             raise InvalidAssessmentRequest(f"item {item_id} has no lesson")
         if m.task.learner_id != data.learner_id:
             raise InvalidAssessmentRequest("the item's lesson belongs to another learner")
-        try:
-            result = await self.assess(AssessRequest(
-                item=item, learner_id=data.learner_id, answer=data.answer, attempt_id=data.attempt_id or new_id("att"),
-                task_id=m.task.task_id, source="api"))
-        except BudgetExceededError as exc:  # nothing was stored: the same attempt can be submitted again later
-            raise BudgetExhausted() from exc
-        attempt = result.attempt
-        if attempt.completed_at is None:  # new, or a crash left it unfinished: record its evidence (idempotent)
-            outcome = await self._record(attempt, result.grade, item, m, result.artifact_ids)
-            attempt = self._complete(attempt, result.grade, outcome, self._scope(m.task.task_id, None),
-                                     mastery_updated=bool(outcome.evidence_ids))
+        # Every write below (the item, the attempt and grade, their artifacts and events, the evidence and mastery)
+        # is refused once the learner or the lesson is deleted, checked inside each write's own transaction: a
+        # deletion that lands while the answer is being graded leaves nothing behind (LearnerDataGone, 404).
+        with learner_writes(data.learner_id, m.task.task_id):
+            try:
+                result = await self.assess(AssessRequest(
+                    item=item, learner_id=data.learner_id, answer=data.answer,
+                    attempt_id=data.attempt_id or new_id("att"), task_id=m.task.task_id, source="api"))
+            except BudgetExceededError as exc:  # nothing was stored: the same attempt can be submitted again later
+                raise BudgetExhausted() from exc
+            attempt = result.attempt
+            if attempt.completed_at is None:  # new, or a crash left it unfinished: record its evidence (idempotent)
+                outcome = await self._record(attempt, result.grade, item, m, result.artifact_ids)
+                attempt = self._complete(attempt, result.grade, outcome, self._scope(m.task.task_id, None),
+                                         mastery_updated=bool(outcome.evidence_ids))
         return self._attempt_result(attempt, result.grade, replayed=result.replayed)
 
     def attempt(self, attempt_id: str) -> AttemptView:

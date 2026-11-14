@@ -245,9 +245,15 @@ and `tests/e2e/test_learner_deletion_api.py` checks each case leaves the learner
   failed object deletion is logged, never returned (`503` with a fixed message). The log line has no learner id.
 - **No resurrection.** The deletion refuses (`409`) while a worker may write for the learner, and a worker's later
   fenced writes fail because the task row they are fenced by is gone (`tests/postgres/test_learner_deletion_postgres.py`).
-- **Exact matching.** Events outside a task are found by `"learner_id":"<id>"` in their JSON with LIKE wildcards
-  escaped, so a learner id with `_` or `%` never takes another learner's events with it (tested on SQLite and
-  PostgreSQL).
+  A request that writes for the learner without a lease (grading an answer, a teaching session, queueing a lesson, a
+  learning cycle, a goal, joining a class) checks, inside each of its write transactions, that the lesson task and
+  the learner rows still exist, and locks them in the order the deletion does; a deletion that committed first makes
+  every later write fail (`LearnerDataGone`, the uniform `404`), and one that came second waits and deletes what the
+  write committed. A file put for a refused artifact row is removed again (`tests/e2e/test_learner_deletion_race.py`,
+  `tests/postgres/test_learner_deletion_race_postgres.py`).
+- **Exact matching.** Events outside a task are found by `"learner_id":"<id>"`, or the id of one of the learner's
+  goals or curricula, in their JSON with LIKE wildcards escaped, so a learner id with `_` or `%` never takes another
+  learner's events with it (tested on SQLite and PostgreSQL).
 - **Spending caps hold.** The spend ledger is kept, so deleting a learner does not reset their daily cap.
 
 ## Learner-facing responses

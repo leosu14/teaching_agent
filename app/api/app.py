@@ -33,7 +33,7 @@ from app.learner.frameworks import UnknownFramework
 from app.learner.memory import UnknownGoal, UnknownLearner
 from app.runtime.orchestrator.orchestrator import InvalidInput
 from app.runtime.tasks.state_machine import InvalidTransition
-from app.schemas.lease import LeaseLost, WriteConflict
+from app.schemas.lease import LearnerDataGone, LeaseLost, WriteConflict
 from app.schemas.privacy import LearnerDataBusy, ObjectDeletionFailed
 from app.services.artifact_content import ArtifactContentNotFound, ArtifactContentUnavailable
 from app.services.assessment import (
@@ -101,6 +101,7 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
     app.add_exception_handler(ResourceNotFound, _handler(404, error="NotFound"))
     app.add_exception_handler(ArtifactContentNotFound, _handler(404, error="NotFound"))
     app.add_exception_handler(ClassNotFound, _handler(404, error="NotFound"))
+    app.add_exception_handler(LearnerDataGone, _handler(404, error="NotFound"))
     app.add_exception_handler(ArtifactContentUnavailable, _handler(500, error="ContentUnavailable"))
 
     app.include_router(system.public)

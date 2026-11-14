@@ -1021,9 +1021,10 @@ and may use httpx, which the architecture test otherwise keeps in the provider l
 ## Learner data deletion
 
 MVP item 9 ([privacy](privacy.md)). `LearnerDeletionService` (`app/services/learner_deletion.py`) deletes a
-learner's stored objects through the artifact service, then their rows through `SqlLearnerDataRepository`
-(`app/storage/repositories.py`) in one transaction; both steps refuse while a job, a task lease or a cycle drive is
-live. Every table is listed in `ERASED_TABLES` or `KEPT_TABLES` (a unit test checks they cover the schema). The
+learner's rows through `SqlLearnerDataRepository` (`app/storage/repositories.py`) and, before that transaction
+commits, their stored objects through the artifact service; it refuses while a job, a task lease or a cycle drive is
+live. Requests that write for a learner run under `learner_writes(learner_id, task_id)` (`app/schemas/lease.py`):
+each repository write checks and locks the task and learner rows first (`_guard`), in the deletion's lock order. Every table is listed in `ERASED_TABLES` or `KEPT_TABLES` (a unit test checks they cover the schema). The
 student app's Progress page has the "Delete my data" card; `/app/privacy.html` is the privacy notice.
 
 ## Not in this release
