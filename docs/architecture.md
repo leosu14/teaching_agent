@@ -974,6 +974,7 @@ step and no server-side rendering; the page holds no data until the API returns 
 | The lesson: answer-isolated reading with its images | `GET /lessons/{id}/reading`, `GET /artifacts/{id}/content` |
 | Progress: mastery, weak and due concepts, each goal's objectives | `GET /learners/{id}/progress`, `GET /learners/{id}`, curricula |
 | History: past cycles | `GET /learners/{id}/learning-cycles` |
+| Your data (on Progress): the privacy notice, and "Delete my data" (type DELETE to confirm) | `DELETE /learners/{id}` |
 
 The app is a thin client: every decision (what to learn next, the questions, grading, mastery) stays in the API.
 Retries are safe because every write it sends is idempotent (`idempotency_key` for goals and cycles,
@@ -1016,6 +1017,15 @@ requires the newest Alembic revision (`migrations`, `app/storage/migrate.py`, re
 both recording `object:<key>` URIs (`app/utils/object_uri.py`). The identity gateway (`app/gateway/`) is its own
 layer and process: it imports only the signing side of the API's identity contract (`app.api.auth.gateway_headers`)
 and may use httpx, which the architecture test otherwise keeps in the provider layer.
+
+## Learner data deletion
+
+MVP item 9 ([privacy](privacy.md)). `LearnerDeletionService` (`app/services/learner_deletion.py`) deletes a
+learner's rows through `SqlLearnerDataRepository` (`app/storage/repositories.py`) and, before that transaction
+commits, their stored objects through the artifact service; it refuses while a job, a task lease or a cycle drive is
+live. Requests that write for a learner run under `learner_writes(learner_id, task_id)` (`app/schemas/lease.py`):
+each repository write checks and locks the task and learner rows first (`_guard`), in the deletion's lock order. Every table is listed in `ERASED_TABLES` or `KEPT_TABLES` (a unit test checks they cover the schema). The
+student app's Progress page has the "Delete my data" card; `/app/privacy.html` is the privacy notice.
 
 ## Not in this release
 

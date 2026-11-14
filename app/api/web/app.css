@@ -34,6 +34,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; } /* the attribute wins over a display rule (nav, buttons) */
 body {
   margin: 0;
   background: var(--bg);
@@ -123,6 +124,13 @@ th { color: var(--muted); font-weight: 600; white-space: nowrap; }
 .answer { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 0 0 8px;
   white-space: pre-wrap; overflow-wrap: anywhere; }
 .answer .who { display: block; font-size: 0.75rem; color: var(--muted); }
+/* the privacy notice (privacy.html) and the footer link to it; the learner's data card */
+.foot { max-width: 760px; margin: 0 auto; padding: 0 16px 32px; font-size: 0.875rem; }
+.foot a { color: var(--muted); }
+.notice-page ul { padding-left: 20px; margin: 0 0 10px; }
+.notice-page li { margin: 0 0 6px; }
+.card.danger { border-color: var(--bad); }
+button.danger { background: var(--bad); border-color: var(--bad); }
 @media (max-width: 520px) {
   .bubble { max-width: 100%; }
   nav { gap: 12px; }

@@ -137,6 +137,14 @@ The gateway, the only published service, gets `gateway_secret` alone: it holds n
 credential. A static key set for it (`TA_GATEWAY_JWKS_FILE=/run/ta-config/jwks.json`) goes in `deploy/gateway/`
 (git-ignored), mounted read-only; it is public key material, never a secret file.
 
+## Learner data and privacy
+
+Learners delete their own data from the student app (`DELETE /learners/{id}`): the rows go from PostgreSQL and the
+objects from the bucket, while the spend ledger stays so the daily caps hold. The privacy notice
+(`/app/privacy.html`) is part of the image; read it against the deployment and change it where it differs (who runs
+the service and a contact, the vendors, backup retention) before going live. Database backups and bucket object
+versions are not reached by a deletion. See [privacy](privacy.md).
+
 ## Known limits
 
 - One API replica and one worker: the multi-replica items (database-time leases, a shared rate limiter) come after

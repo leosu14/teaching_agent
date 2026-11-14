@@ -31,6 +31,7 @@ from app.pedagogy.knowledge import KnowledgeBase
 from app.runtime.interaction.teacher import TeacherTurnFailed, TeachingRuntime
 from app.schemas.artifact import Artifact, ArtifactType
 from app.schemas.common import new_id, utcnow
+from app.schemas.lease import learner_writes
 from app.schemas.events import EventType
 from app.schemas.assessment import AssessmentItem, AssessRequest, AttemptConflict
 from app.schemas.learner import LearningEvidence, graded_correctness, stable_id
@@ -122,6 +123,12 @@ class TeachingSessionService:
         """Create a session on a lesson and produce the teacher's opening turns. The same idempotency key returns the
         same session (finishing its opening if a failure interrupted it); without a key every call starts one."""
         m = self._lesson(lesson_id)
+        # Every write of the session (and of the grading it does) is refused once the learner or the lesson is
+        # deleted, checked inside the write's own transaction (LearnerDataGone, 404): nothing is left behind.
+        with learner_writes(m.task.learner_id, m.task.task_id):
+            return await self._start(m, data)
+
+    async def _start(self, m: LessonMaterial, data: StartTeachingSession) -> SessionStarted:
         objective_id, concept_id, description, action = self._objective(m, data)
         mode = "practice" if data.practice else "assessed"
         learner_id = m.task.learner_id
@@ -201,6 +208,11 @@ class TeachingSessionService:
         """An answer, a learner question or a request to stop. Idempotent per client_turn_id: the same id with the
         same input returns the stored result; with a different input it is a conflict."""
         session = await self._load(session_id)
+        with learner_writes(session.learner_id, session.task_id):  # as in `start`
+            return await self._submit(session, data)
+
+    async def _submit(self, session: TeachingSession, data: LearnerInput) -> AnswerResult:
+        session_id = session.session_id
         digest = hashlib.sha256(f"{data.kind}\x1f{data.answer}".encode()).hexdigest()
         if data.client_turn_id:
             record = self._repo.request(session_id, data.client_turn_id)
@@ -295,21 +307,29 @@ class TeachingSessionService:
 
     async def pause(self, session_id: str) -> TeachingSessionView:
         """Answers are refused while paused. Idempotent."""
-        await self._control(session_id, engine.pause)
+        with await self._writes(session_id):
+            await self._control(session_id, engine.pause)
         return await self.view(session_id)
 
     async def resume(self, session_id: str) -> TeachingSessionView:
         """Continue from the stored state: publish what a crash left unpublished and produce any teacher turns still
         owed. Idempotent (resuming a session that is not paused only does that recovery)."""
-        session = await self._control(session_id, engine.resume)
-        if session.status == Status.ACTIVE:
-            await self._drive(session)
+        with await self._writes(session_id):
+            session = await self._control(session_id, engine.resume)
+            if session.status == Status.ACTIVE:
+                await self._drive(session)
         return await self.view(session_id)
 
     async def cancel(self, session_id: str) -> TeachingSessionView:
         """Stop the session for good; its turns, evidence and artifacts are kept. Idempotent."""
-        await self._control(session_id, engine.cancel)
+        with await self._writes(session_id):
+            await self._control(session_id, engine.cancel)
         return await self.view(session_id)
+
+    async def _writes(self, session_id: str):
+        """The session's writes are refused once its learner or lesson is deleted (see `start`)."""
+        session = await self._load(session_id)
+        return learner_writes(session.learner_id, session.task_id)
 
     async def _control(self, session_id: str, transition: Callable[[TeachingSession, datetime],
                                                                SessionChange | None]) -> TeachingSession:

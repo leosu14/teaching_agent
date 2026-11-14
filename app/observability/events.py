@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from app.schemas.common import new_id
 from app.schemas.events import Event
-from app.schemas.lease import Lease, LeaseLost
+from app.schemas.lease import LearnerDataGone, Lease, LeaseLost
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,8 @@ class EventBus:
             except LeaseLost:  # a stale worker's event: refused; its next state write stops the worker
                 logger.warning("event %s of task %s not stored: lease fence %s lost", type, task_id,
                                fence.fence if fence else None)
+            except LearnerDataGone:  # the learner's data was deleted while the request ran: nothing is stored
+                logger.warning("event %s of task %s not stored: the learner's data was deleted", type, task_id)
             except Exception:  # an observer must never break execution
                 logger.exception("event subscriber failed for %s", type)
         return event

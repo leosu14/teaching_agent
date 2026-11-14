@@ -27,6 +27,7 @@ from app.runtime.workflows.curriculum_planning import WORKFLOW_ID as CURRICULUM_
 from app.runtime.workflows.lesson_generation import FOCUS_KEY, GOAL_KEY
 from app.observability.events import EventBus
 from app.schemas.common import utcnow
+from app.schemas.lease import learner_writes
 from app.schemas.curriculum import (
     LESSON_ACTIONS,
     Curriculum,
@@ -76,6 +77,11 @@ class CurriculumService:
     # --- goals --------------------------------------------------------------------------------------------------
 
     async def create_goal(self, learner_id: str, data: GoalInput) -> tuple[LearningGoal, bool]:
+        # Refused once the learner is deleted, inside each write's own transaction (LearnerDataGone, 404).
+        with learner_writes(learner_id):
+            return await self._create_goal(learner_id, data)
+
+    async def _create_goal(self, learner_id: str, data: GoalInput) -> tuple[LearningGoal, bool]:
         """Returns (goal, created). The same idempotency key (or, without one, the same content) returns the stored
         goal instead of creating a second one."""
         fields = data.model_dump(mode="json", exclude={"idempotency_key", "metadata"})
@@ -130,6 +136,10 @@ class CurriculumService:
         return self._memory.goals(learner_id)
 
     async def update_goal(self, goal_id: str, data: GoalUpdate, *, user_id: str) -> tuple[LearningGoal, Task | None]:
+        with learner_writes(self._memory.goal(goal_id).learner_id):  # as in `create_goal`
+            return await self._update_goal(goal_id, data, user_id=user_id)
+
+    async def _update_goal(self, goal_id: str, data: GoalUpdate, *, user_id: str) -> tuple[LearningGoal, Task | None]:
         """Apply the change; a changed definition or target date replans an existing curriculum (a new version)."""
         goal = self._memory.goal(goal_id)
         if goal.status == GoalStatus.COMPLETED and data.status is None:
@@ -166,6 +176,10 @@ class CurriculumService:
     # --- curricula ----------------------------------------------------------------------------------------------
 
     async def build_curriculum(self, goal_id: str, *, user_id: str, reason: ReplanReason | None = None) -> Task:
+        with learner_writes(self._memory.goal(goal_id).learner_id):  # as in `create_goal`
+            return await self._build_curriculum(goal_id, user_id=user_id, reason=reason)
+
+    async def _build_curriculum(self, goal_id: str, *, user_id: str, reason: ReplanReason | None = None) -> Task:
         """Run (or reuse) the planning task for the goal's curriculum. Idempotent: the same goal, definition,
         current version and reason reuse the same task; an unfinished one is resumed, never duplicated."""
         goal = self._memory.goal(goal_id)

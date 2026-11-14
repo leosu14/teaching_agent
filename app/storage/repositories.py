@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -35,7 +36,8 @@ from app.schemas.curriculum import (
 )
 from app.schemas.common import utcnow
 from app.schemas.events import Event
-from app.schemas.lease import Lease, LeaseLost, WriteConflict, write_fence
+from app.schemas.privacy import RETAINED_RECORDS, LearnerDataBusy
+from app.schemas.lease import Lease, LearnerDataGone, LeaseLost, WriteConflict, learner_guard, write_fence
 from app.schemas.learning_cycle import (
     TERMINAL_CYCLE_STATUSES,
     CycleConflict,
@@ -135,6 +137,25 @@ def _fence_current(s: Session, clock: Clock) -> None:
     lease = write_fence()
     if lease is not None:
         _require_fence(s, lease, clock())
+    _guard(s)
+
+
+def _guard(s: Session) -> None:
+    """Inside the caller's write transaction, before anything else it writes: when the write is made for a learner
+    (`learner_writes`), refuse it (LearnerDataGone) unless the lesson task and the learner rows still exist. The
+    checks are no-op UPDATEs, so they take those rows' write locks in the order a learner's data deletion takes them
+    (task rows, then the learner row): a deletion either committed before (the rows are gone) or waits until this
+    write commits, and then deletes it. On SQLite the first UPDATE takes the database's write lock instead."""
+    guard = learner_guard()
+    if guard is None:
+        return
+    learner_id, task_id = guard
+    if task_id is not None and s.execute(update(TaskRow).where(TaskRow.task_id == task_id)
+                                         .values(lease_fence=TaskRow.lease_fence)).rowcount != 1:
+        raise LearnerDataGone()
+    if s.execute(update(LearnerRow).where(LearnerRow.learner_id == learner_id)
+                 .values(version=LearnerRow.version)).rowcount != 1:
+        raise LearnerDataGone()
 
 
 def _versioned_save(s: Session, row_type, key_column, key: str, stored: int | None, values: dict, conflict) -> int:
@@ -172,6 +193,7 @@ class SqlTaskRepository:
         """Insert a new task; False (nothing written) when the id exists."""
         try:
             with self._sessions.begin() as s:
+                _guard(s)
                 if s.get(TaskRow, task.task_id) is not None:
                     return False
                 task.version = 1
@@ -201,6 +223,7 @@ class SqlTaskRepository:
                 if done.rowcount != 1:
                     raise LeaseLost(lease)
             elif s.get(TaskRow, task.task_id) is None:
+                _guard(s)
                 task.version = 1
                 s.add(self._row(task))
                 return
@@ -211,6 +234,7 @@ class SqlTaskRepository:
                 if done.rowcount != 1:
                     raise WriteConflict(f"task {task.task_id} changed concurrently or is being executed "
                                         f"(expected version {task.version})")
+            _guard(s)  # after the task row: task rows are always locked before the learner row (see `_guard`)
         task.version += 1
 
     def get(self, task_id: str) -> Task:
@@ -339,6 +363,7 @@ class SqlEventRepository:
         with self._sessions.begin() as s:
             if fence is not None:
                 _require_fence(s, fence, self._clock())
+            _guard(s)
             if s.scalar(select(EventRow.seq).where(EventRow.event_id == event.event_id)) is not None:
                 return  # an event with a stable id published again (e.g. after a restart) is stored once
             s.add(EventRow(event_id=event.event_id, task_id=event.task_id, type=event.type, at=event.at,
@@ -362,6 +387,7 @@ class SqlArtifactRepository:
             with self._sessions.begin() as s:
                 if fence is not None:
                     _require_fence(s, fence, self._clock())
+                _guard(s)
                 self._insert(s, artifact)
         except IntegrityError as exc:
             raise WriteConflict(f"artifact {artifact.task_id}/{artifact.name} v{artifact.version} already exists") \
@@ -585,6 +611,7 @@ class SqlTeachingRepository:
     def create(self, change: SessionChange) -> bool:
         try:
             with self._sessions.begin() as s:
+                _guard(s)
                 if s.get(TeachingSessionRow, change.session.session_id) is not None:
                     return False
                 s.add(self._session_row(change.session))
@@ -597,6 +624,7 @@ class SqlTeachingRepository:
         session = change.session
         try:
             with self._sessions.begin() as s:
+                _guard(s)
                 updated = s.execute(
                     update(TeachingSessionRow)
                     .where(TeachingSessionRow.session_id == session.session_id,
@@ -668,6 +696,7 @@ class SqlTeachingRepository:
 
     def mark_published(self, item_id: str) -> None:
         with self._sessions.begin() as s:
+            _guard(s)
             s.execute(update(TeachingOutboxRow).where(TeachingOutboxRow.item_id == item_id).values(published=True))
 
 
@@ -684,6 +713,7 @@ class SqlAssessmentRepository:
         digest = value.content_hash()
         try:
             with self._sessions.begin() as s:
+                _guard(s)
                 current = s.get(row_type, key)
                 if current is None:
                     s.add(row_type(**columns, content_hash=digest, body=value.model_dump_json()))
@@ -729,6 +759,7 @@ class SqlAssessmentRepository:
                 with self._sessions.begin() as s:
                     if fence is not None:
                         _require_fence(s, fence, self._clock())
+                    _guard(s)
                     if s.get(AssessmentAttemptRow, attempt.attempt_id) is not None:
                         raise AttemptExists(attempt.attempt_id)
                     count = s.scalar(select(func.count()).select_from(AssessmentAttemptRow).where(
@@ -782,6 +813,7 @@ class SqlAssessmentRepository:
         with self._sessions.begin() as s:
             if fence is not None:
                 _require_fence(s, fence, self._clock())
+            _guard(s)
             row = s.get(AssessmentAttemptRow, attempt_id)
             if row is None:
                 raise KeyError(attempt_id)
@@ -807,6 +839,7 @@ class SqlLearningCycleRepository:
     def create(self, cycle: LearningCycle) -> bool:
         try:
             with self._sessions.begin() as s:
+                _guard(s)
                 if s.get(LearningCycleRow, cycle.cycle_id) is not None:
                     return False
                 s.add(LearningCycleRow(cycle_id=cycle.cycle_id, learner_id=cycle.learner_id, status=cycle.status.value,
@@ -833,6 +866,7 @@ class SqlLearningCycleRepository:
                       LearningCycleRow.lease_expires_ms > _ms(at or utcnow())]
         try:
             with self._sessions.begin() as s:
+                _guard(s)
                 updated = s.execute(
                     update(LearningCycleRow).where(*where)
                     .values(version=cycle.version, status=cycle.status.value, body=cycle.model_dump_json(),
@@ -877,6 +911,7 @@ class SqlLearningCycleRepository:
 
     def mark_applied(self, cycle_id: str, client_response_id: str) -> None:
         with self._sessions.begin() as s:
+            _guard(s)
             row = s.get(LearningCycleRequestRow, (cycle_id, client_response_id))
             if row is not None:
                 record = CycleRequestRecord.model_validate_json(row.body)
@@ -885,6 +920,7 @@ class SqlLearningCycleRepository:
 
     def forget_request(self, cycle_id: str, client_response_id: str) -> None:
         with self._sessions.begin() as s:
+            _guard(s)
             s.execute(delete(LearningCycleRequestRow).where(LearningCycleRequestRow.cycle_id == cycle_id,
                                                             LearningCycleRequestRow.client_response_id ==
                                                             client_response_id))
@@ -1135,6 +1171,7 @@ class SqlTaskJobRepository:
             return existing, False
         try:
             with self._sessions.begin() as s:
+                _guard(s)
                 s.add(self._row(job))
         except IntegrityError:  # a concurrent enqueue for the same task won
             existing = self.active_for_task(job.task_id)
@@ -1342,6 +1379,7 @@ class SqlClassRepository:
                 row = s.scalars(by_code.with_for_update()).first()
                 if row is None:
                     return None
+                _guard(s)
                 classroom = self._class(row)
                 existing = s.get(ClassMemberRow, (row.class_id, learner_id))
                 if existing is not None:
@@ -1403,3 +1441,259 @@ class SqlClassRepository:
 
 def _tenant_is(tenant_id: str | None):
     return ClassRow.tenant_id.is_(None) if tenant_id is None else ClassRow.tenant_id == tenant_id
+
+
+# --- learner data deletion (MVP item 9) ------------------------------------------------------------------------------
+
+# Every table, by what a learner's deletion does with it. A new table must be added to one of the two
+# (tests/unit/test_learner_deletion.py checks that together they are exactly the schema), so learner data cannot be
+# added without deciding how it is deleted.
+ERASED_TABLES = (
+    "learners", "learning_evidence", "learning_events", "learning_goals", "curricula", "curriculum_versions",
+    "curriculum_progress", "tasks", "task_jobs", "events", "artifacts", "teaching_sessions", "teaching_turns",
+    "interaction_evidence", "teaching_requests", "teaching_outbox", "assessment_items", "assessment_attempts",
+    "assessment_grades", "learning_cycles", "learning_cycle_slots", "learning_cycle_requests", "class_members",
+)
+# Not learner data, or kept on purpose: classes and rubrics belong to teachers and authors; the spend ledger holds ids
+# and amounts only and is what the budgets and daily caps count, so a deletion must not reset them.
+KEPT_TABLES = ("classes", "assessment_rubrics") + RETAINED_RECORDS
+CONTENT_ADDRESSED = "objects/sha256/"  # app/artifacts/service.py: media stored once and shared by identical bytes
+_CHUNK = 500  # ids per IN list
+
+
+@dataclass(frozen=True)
+class LearnerObjects:
+    """The stored objects of a learner's artifacts: the ones to delete, and how many are kept because an artifact of
+    someone else points at identical (content-addressed) bytes."""
+
+    delete: tuple[str, ...]
+    shared: int
+
+
+@dataclass(frozen=True)
+class _LearnerIds:
+    tasks: list[str]
+    cycles: list[str]
+    sessions: list[str]
+    curricula: list[str]
+    goals: list[str]
+    items: list[str]
+    attempts: list[str]
+
+    @property
+    def owners(self) -> list[str]:
+        """What artifacts and events record as their `task_id`: the learner's tasks and learning cycles."""
+        return self.tasks + self.cycles
+
+
+class SqlLearnerDataRepository:
+    """Everything stored about one learner, found and deleted together (MVP item 9).
+
+    `erase` deletes the learner's rows from every table in `ERASED_TABLES`, and the stored objects only they point
+    at, in one transaction. It first locks the learner's task rows, then their learner row, then their cycle rows
+    (`FOR UPDATE` on PostgreSQL; on SQLite a first write takes the database's write lock): the same order in which a
+    request writing for the learner (`learner_writes`: grading an answer, a teaching session, queueing a lesson, a
+    cycle, a goal) locks them in each of its write transactions (`_guard`), so the two never wait on each other in a
+    circle. Whichever commits first wins: a write that committed before is seen and deleted; a write that comes
+    after finds the rows gone and is refused (LearnerDataGone), so a deletion that lands while an answer is graded
+    leaves nothing of it behind.
+
+    It refuses (`LearnerDataBusy`, nothing deleted) while a worker may still write for them: a queued or running job
+    of one of their tasks, a task under a live execution lease, or a learning cycle being driven. That check runs
+    under the locks, so a claim either happened before (and is seen as a lease) or waits and then finds nothing to
+    claim. A worker that still holds an old in-memory copy cannot bring anything back: its writes are fenced by the
+    task row (gone)."""
+
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+        self._sessions = sessions
+        self._clock = clock
+
+    def objects(self, learner_id: str) -> LearnerObjects:
+        """The objects a deletion would delete now (LearnerDataBusy while work is in progress); see `_plan`."""
+        with self._sessions() as s:
+            self._refuse_busy(s, learner_id)
+            return self._plan(s, self._ids(s, learner_id))
+
+    def erase(self, learner_id: str,
+              delete_objects: Callable[[tuple[str, ...]], None] | None = None) -> tuple[dict[str, int], LearnerObjects]:
+        """Delete the learner's rows, and (through `delete_objects`, before the commit) the objects only they point
+        at. Returns the number of rows deleted by table (tables with none are left out) and the objects. When
+        `delete_objects` raises, the transaction rolls back and no row is deleted, so a retry finds every object
+        still left through the rows that point at it."""
+        for attempt in range(1, self.TRIES + 1):
+            try:
+                return self._erase(learner_id, delete_objects)
+            except DBAPIError as exc:  # a deadlock victim (PostgreSQL) or a busy database (SQLite): nothing was deleted
+                if attempt < self.TRIES and _retryable(exc):
+                    continue
+                raise
+        raise AssertionError("unreachable")
+
+    TRIES = 3
+
+    def _erase(self, learner_id: str,
+               delete_objects: Callable[[tuple[str, ...]], None] | None) -> tuple[dict[str, int], LearnerObjects]:
+        with self._sessions.begin() as s:
+            self._lock(s, learner_id)
+            self._refuse_busy(s, learner_id)
+            ids = self._ids(s, learner_id)
+            objects = self._plan(s, ids)
+            counts: dict[str, int] = {}
+
+            def run(table: str, statement) -> None:
+                n = s.execute(statement).rowcount or 0
+                if n:
+                    counts[table] = counts.get(table, 0) + n
+
+            def each(table: str, row_type, column, values: list[str]) -> None:
+                for chunk in _chunks(values):
+                    run(table, delete(row_type).where(column.in_(chunk)))
+
+            each("assessment_grades", AssessmentGradeRow, AssessmentGradeRow.attempt_id, ids.attempts)
+            each("assessment_attempts", AssessmentAttemptRow, AssessmentAttemptRow.attempt_id, ids.attempts)
+            each("assessment_items", AssessmentItemRow, AssessmentItemRow.item_id, ids.items)
+            for row_type, table in ((TeachingTurnRow, "teaching_turns"), (InteractionEvidenceRow, "interaction_evidence"),
+                                    (TeachingRequestRow, "teaching_requests"), (TeachingOutboxRow, "teaching_outbox"),
+                                    (TeachingSessionRow, "teaching_sessions")):
+                each(table, row_type, row_type.session_id, ids.sessions)
+            each("learning_cycle_requests", LearningCycleRequestRow, LearningCycleRequestRow.cycle_id, ids.cycles)
+            run("learning_cycle_slots", delete(LearningCycleSlotRow).where(LearningCycleSlotRow.learner_id == learner_id))
+            each("learning_cycles", LearningCycleRow, LearningCycleRow.cycle_id, ids.cycles)
+            each("curriculum_versions", CurriculumVersionRow, CurriculumVersionRow.curriculum_id, ids.curricula)
+            each("curriculum_progress", CurriculumProgressRow, CurriculumProgressRow.curriculum_id, ids.curricula)
+            each("curricula", CurriculumRow, CurriculumRow.curriculum_id, ids.curricula)
+            each("learning_goals", LearningGoalRow, LearningGoalRow.goal_id, ids.goals)
+            each("artifacts", ArtifactRow, ArtifactRow.task_id, ids.owners)
+            each("events", EventRow, EventRow.task_id, ids.owners)
+            # Events outside any task or cycle that name the learner, or one of their goals or curricula (goals
+            # created or changed, objectives started, learning actions selected).
+            for pattern in _event_patterns(learner_id, ids):
+                run("events", delete(EventRow).where(EventRow.body.like(pattern, escape="\\")))
+            each("task_jobs", TaskJobRow, TaskJobRow.task_id, ids.tasks)
+            each("tasks", TaskRow, TaskRow.task_id, ids.tasks)
+            for row_type, table in ((LearningEvidenceRow, "learning_evidence"), (LearningEventRow, "learning_events"),
+                                    (ClassMemberRow, "class_members"), (LearnerRow, "learners")):
+                run(table, delete(row_type).where(row_type.learner_id == learner_id))
+            s.flush()
+            if delete_objects is not None and objects.delete:
+                delete_objects(objects.delete)  # still under the locks: nothing can point at them again meanwhile
+            return counts, objects
+
+    def holds_data(self, learner_id: str) -> bool:
+        """Whether any row of `ERASED_TABLES` is still the learner's (tests and the deletion's own check)."""
+        with self._sessions() as s:
+            ids = self._ids(s, learner_id)
+            if any((ids.tasks, ids.cycles, ids.sessions, ids.curricula, ids.goals, ids.items, ids.attempts)):
+                return True
+            direct = (LearnerRow, LearningEvidenceRow, LearningEventRow, ClassMemberRow, LearningCycleSlotRow)
+            if any(s.scalar(select(func.count()).select_from(r).where(r.learner_id == learner_id)) for r in direct):
+                return True
+            return any(s.scalar(select(func.count()).select_from(EventRow)
+                                .where(EventRow.body.like(pattern, escape="\\")))
+                       for pattern in _event_patterns(learner_id, ids))
+
+    # --- helpers ----------------------------------------------------------------------------------------------------
+
+    @staticmethod
+    def _lock(s: Session, learner_id: str) -> None:
+        """Lock what a request writing for the learner locks, in the same order (see `_guard`): the learner's task
+        rows (by id), then the learner row, then their cycle rows. On SQLite, which locks the whole database, the
+        first statement is a write so that the transaction holds the write lock from the start. On PostgreSQL two
+        deletions of one learner first take a lock of their own, one after the other: otherwise a task queued
+        between the first one's task locks and its learner lock would be locked by the second one first, and each
+        would wait for the other."""
+        dialect = s.get_bind().dialect.name
+        if dialect == "sqlite":
+            s.execute(update(LearnerRow).where(LearnerRow.learner_id == learner_id).values(version=LearnerRow.version))
+        elif dialect == "postgresql":
+            s.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                      {"key": f"learner-data-deletion:{learner_id}"})
+        s.execute(select(TaskRow.task_id).where(TaskRow.learner_id == learner_id).order_by(TaskRow.task_id)
+                  .with_for_update())
+        s.execute(select(LearnerRow.learner_id).where(LearnerRow.learner_id == learner_id).with_for_update())
+        s.execute(select(LearningCycleRow.cycle_id).where(LearningCycleRow.learner_id == learner_id)
+                  .order_by(LearningCycleRow.cycle_id).with_for_update())
+
+    def _refuse_busy(self, s: Session, learner_id: str) -> None:
+        now = _ms(self._clock())
+        leased_task = s.scalar(select(func.count()).select_from(TaskRow).where(
+            TaskRow.learner_id == learner_id, TaskRow.lease_owner.is_not(None), TaskRow.lease_expires_ms > now))
+        active_job = s.scalar(select(func.count()).select_from(TaskJobRow).join(
+            TaskRow, TaskRow.task_id == TaskJobRow.task_id).where(
+            TaskRow.learner_id == learner_id, TaskJobRow.status.in_([j.value for j in ACTIVE_JOB_STATUSES])))
+        driven_cycle = s.scalar(select(func.count()).select_from(LearningCycleRow).where(
+            LearningCycleRow.learner_id == learner_id, LearningCycleRow.lease_token.is_not(None),
+            LearningCycleRow.lease_expires_ms > now))
+        if leased_task or active_job or driven_cycle:
+            raise LearnerDataBusy()
+
+    def _plan(self, s: Session, ids: _LearnerIds) -> LearnerObjects:
+        """The objects to delete with the learner. An object in the content-addressed area is shared by identical
+        bytes: it is kept when an artifact outside the learner's has the same content hash. Any other object is
+        under a key of the learner's own task or cycle."""
+        rows = [(r.content_hash, r.body) for chunk in _chunks(ids.owners)
+                for r in s.execute(select(ArtifactRow.content_hash, ArtifactRow.body)
+                                   .where(ArtifactRow.task_id.in_(chunk)))]
+        found: dict[str, None] = {}
+        shared: set[str] = set()
+        for content_hash, body in rows:
+            uri = json.loads(body).get("uri")
+            if not uri or uri in found or uri in shared:
+                continue
+            if CONTENT_ADDRESSED in uri and self._referenced_elsewhere(s, content_hash, ids.owners):
+                shared.add(uri)
+            else:
+                found[uri] = None
+        return LearnerObjects(delete=tuple(found), shared=len(shared))
+
+    @staticmethod
+    def _ids(s: Session, learner_id: str) -> _LearnerIds:
+        def ids(column, *where) -> list[str]:
+            return list(s.scalars(select(column).where(*where)))
+
+        tasks = ids(TaskRow.task_id, TaskRow.learner_id == learner_id)
+        lessons = [a for chunk in _chunks(tasks) for a in ids(ArtifactRow.artifact_id, ArtifactRow.task_id.in_(chunk),
+                                                              ArtifactRow.type == "LESSON")]
+        # The items registered on the learner's lessons, and every attempt on them or by the learner.
+        items = [i for chunk in _chunks(lessons) for i in ids(AssessmentItemRow.item_id,
+                                                               AssessmentItemRow.lesson_id.in_(chunk))]
+        attempts = dict.fromkeys(ids(AssessmentAttemptRow.attempt_id, AssessmentAttemptRow.learner_id == learner_id))
+        for chunk in _chunks(items):
+            attempts.update(dict.fromkeys(ids(AssessmentAttemptRow.attempt_id, AssessmentAttemptRow.item_id.in_(chunk))))
+        return _LearnerIds(
+            tasks=tasks,
+            cycles=ids(LearningCycleRow.cycle_id, LearningCycleRow.learner_id == learner_id),
+            sessions=ids(TeachingSessionRow.session_id, TeachingSessionRow.learner_id == learner_id),
+            curricula=ids(CurriculumRow.curriculum_id, CurriculumRow.learner_id == learner_id),
+            goals=ids(LearningGoalRow.goal_id, LearningGoalRow.learner_id == learner_id),
+            items=items, attempts=list(attempts))
+
+    @staticmethod
+    def _referenced_elsewhere(s: Session, content_hash: str, owners: list[str]) -> bool:
+        query = select(ArtifactRow.artifact_id).where(ArtifactRow.content_hash == content_hash)
+        for chunk in _chunks(owners):
+            query = query.where(ArtifactRow.task_id.not_in(chunk))
+        return s.execute(query.limit(1)).first() is not None
+
+
+def _chunks(values: list[str]) -> list[list[str]]:
+    return [values[i:i + _CHUNK] for i in range(0, len(values), _CHUNK)]
+
+
+def _learner_pattern(learner_id: str) -> str:
+    """A LIKE pattern for `"learner_id":"<id>"` anywhere in an event's JSON body (as pydantic writes it)."""
+    return _field_pattern("learner_id", learner_id)
+
+
+def _field_pattern(field: str, value: str) -> str:
+    """A LIKE pattern for `"<field>":"<value>"` anywhere in a JSON body, LIKE wildcards in the value escaped."""
+    fragment = json.dumps(field) + ":" + json.dumps(value, ensure_ascii=False)
+    escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _event_patterns(learner_id: str, ids: _LearnerIds) -> list[str]:
+    """The events outside any task or cycle that belong to the learner: naming them, or a goal or curriculum of
+    theirs (goal ids and curriculum ids are derived from the learner's id, so no one else's event names them)."""
+    return ([_learner_pattern(learner_id)] + [_field_pattern("goal_id", g) for g in ids.goals]
+            + [_field_pattern("curriculum_id", c) for c in ids.curricula])

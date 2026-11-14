@@ -166,6 +166,10 @@ schema migrations; `deploy/compose.yaml` is a complete stack on PostgreSQL and a
 `TA_DEPLOYMENT=production` refuses to start without migrations, the bucket, the signed gateway, daily caps and a
 declared cap at each vendor. See [docs/deployment.md](docs/deployment.md).
 
+Learner data and privacy (MVP item 9): a learner deletes everything stored about them from the student app's Progress
+page (`DELETE /learners/{id}`), and both apps link a privacy notice (`/app/privacy.html`) that says what is kept, who
+sees it and how to delete it. See [docs/privacy.md](docs/privacy.md).
+
 Course content is authored as JSON files in [courses/](courses/README.md). `TA_COURSES=spanish-a1-b1` makes the
 bundled Spanish A1 to B1 course (18 units, 46 concepts) the knowledge base; `python -m app.content validate <course>`
 checks a course with the same rules as startup and lists every problem with its field path.
@@ -199,6 +203,7 @@ development tokens and the test mechanism.
 | POST | `/tasks/{id}/pause` · `/resume` · `/cancel` | Task control; resume (202, queued) also recovers crashed or failed tasks; cancel also cancels queued work |
 | GET | `/tasks/{id}/artifacts` · `/events` | Artifacts with parent links; the event log as learner events (type, status, fixed message) |
 | PUT/GET | `/learners/{id}` | Learner profile (subjects with a level framework, preferences) |
+| DELETE | `/learners/{id}` | Delete everything stored about the learner (their own scope only; 409 while a lesson is queued or running): a receipt of counts. The spend ledger is kept. See [docs/privacy.md](docs/privacy.md) |
 | GET | `/learners/{id}/progress` | Mastery, weak concepts, due reviews |
 | POST | `/learners/{id}/assessment` | Submit diagnostic answers for a WAITING task (queued like `/tasks/{id}/answers`: 202) |
 | POST/GET | `/learners/{id}/goals` | Create a learning goal (idempotent per `idempotency_key`) / list the learner's goals |
@@ -229,7 +234,7 @@ development tokens and the test mechanism.
 | POST/GET | `/learners/{id}/classes` | Join a class with its code / the learner's classes |
 | GET | `/classes/{id}/dashboard` | The teacher dashboard: each learner on the roster with mastery, goal and curriculum progress, cycle state and open UNCERTAIN grades (read-only) |
 | GET | `/classes/{id}/uncertain-grades` | The roster's answers the grader could not decide, newest first: question and answer, never the answer key (`?include_resolved=true` adds those a later graded attempt settled) |
-| GET | `/app/` · `/app/teacher.html` | The student web app and the teacher dashboard (static, public; their data comes from the routes above) |
+| GET | `/app/` · `/app/teacher.html` · `/app/privacy.html` | The student web app, the teacher dashboard and the privacy notice (static, public; the apps' data comes from the routes above) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 
 See [docs/architecture.md](docs/architecture.md) for the design and [docs/configuration.md](docs/configuration.md)

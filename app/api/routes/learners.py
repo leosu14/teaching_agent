@@ -6,6 +6,7 @@ from app.api.authorization import Access, access, require_learner
 from app.api.deps import container
 from app.schemas.common import Schema
 from app.schemas.learner import LearnerProfileInput, LearnerProfileView, LearnerProgress
+from app.schemas.privacy import LearnerDataDeletion
 from app.schemas.lesson import DiagnosticAnswers, LearnerAnswer
 from app.schemas.task import TaskView
 from app.services.container import Container
@@ -27,6 +28,17 @@ def upsert_learner(learner_id: str, body: LearnerProfileInput,
 @router.get("/{learner_id}", response_model=LearnerProfileView, dependencies=[Depends(require_learner)])
 def get_learner(learner_id: str, c: Container = Depends(container)) -> LearnerProfileView:
     return LearnerProfileView.of(c.learner_service.get(learner_id))
+
+
+@router.delete("/{learner_id}", response_model=LearnerDataDeletion, dependencies=[Depends(require_learner)])
+def delete_learner(learner_id: str, c: Container = Depends(container)) -> LearnerDataDeletion:
+    """Delete everything stored about the learner (MVP item 9): profile, mastery and evidence, goals and curricula,
+    lessons and their files, sessions, evaluations, answers and grades, learning cycles, events and class
+    memberships. Only the learner's own scope may do this: a teacher of their class gets 403 (they may read, never
+    change), anyone else the uniform 404. The spend ledger (ids and amounts only) is kept so the spending caps still
+    hold. 409 while the learner has a lesson queued or running, or a learning cycle being driven: nothing is deleted
+    then. Deleting a learner that has no data left returns an empty receipt, so a retry is safe."""
+    return c.learner_deletion.delete(learner_id)
 
 
 @router.get("/{learner_id}/progress", response_model=LearnerProgress, dependencies=[Depends(require_learner)])
