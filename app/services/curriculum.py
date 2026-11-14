@@ -260,13 +260,18 @@ class CurriculumService:
         when = as_of or self._clock()
         domains = sorted({g.domain for g in self._memory.goals(learner_id)})
         graphs = {d: await self._knowledge.graph(d) for d in domains}
-        # Replanning needs a task (its artifacts belong to one): evaluations and explicit rebuilds replan.
-        return self._tracker.tracked(learner_id, when, graphs=graphs, replan=False, scope=self._scope())
+        # Replanning needs a task (its artifacts belong to one): evaluations and explicit rebuilds replan. The refresh
+        # writes (progress, transitions, a completed goal): refused once the learner is deleted (LearnerDataGone).
+        with learner_writes(learner_id):
+            return self._tracker.tracked(learner_id, when, graphs=graphs, replan=False, scope=self._scope())
 
     async def next_action(self, learner_id: str, *, as_of: datetime | None = None) -> NextLearningAction:
+        """The learner's next action. A read that writes (the progress refresh, the action's events): each write is
+        refused once the learner is deleted, so a deletion racing it leaves nothing and the request answers 404."""
         self._memory.get(learner_id)  # unknown learners are rejected
-        tracked = await self.tracked(learner_id, as_of=as_of)
-        return self._tracker.next_action(learner_id, tracked, self._scope())
+        with learner_writes(learner_id):
+            tracked = await self.tracked(learner_id, as_of=as_of)
+            return self._tracker.next_action(learner_id, tracked, self._scope())
 
     async def start_lesson(self, action: NextLearningAction, *, user_id: str) -> Task:
         """Start the lesson a LEARN / REVIEW / PRACTICE / EVALUATE action asks for, planned around its objective."""

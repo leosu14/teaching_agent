@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 
 from app.schemas.artifact import Artifact, ArtifactType
 from app.schemas.events import Event
@@ -90,7 +91,7 @@ def test_shared_content_addressed_objects_are_kept_and_the_rest_deleted(sessions
     repo = SqlLearnerDataRepository(sessions, clock=lambda: NOW)
     found = repo.objects("learner-a")
     assert sorted(found.delete) == sorted([own, keyed]) and found.shared == 1
-    assert repo.erase("learner-a")[0] == {"artifacts": 3, "tasks": 1}
+    assert repo.erase("learner-a")[0] == {"artifacts": 3, "object_holds": 2, "tasks": 1}  # holds of its media
     assert repo.objects("learner-b").delete == (shared, "object:t-b/lesson/v1.json")  # B's still all there
 
 
@@ -193,3 +194,35 @@ def test_a_file_put_for_a_refused_artifact_row_is_removed_again(tmp_path, sessio
                         content=b'{"answer": "secret"}', provider="test", parent_ids=[], metadata={},
                         scope=ExecutionScope(events=EventBus(), usage=UsageLedger(), task_id="gone-task"))
     assert [p for p in (tmp_path / "objects").rglob("*") if p.is_file()] == []
+
+
+@pytest.mark.parametrize("when", ["after the listing", "after the task read"])
+def test_the_sweeper_queues_no_recovery_for_a_learner_deleted_meanwhile(sessions, when) -> None:
+    """The sweeper lists a task left mid-run (its worker's lease ran out), then queues a job to continue it. A deletion
+    landing in between, before the recovery's task read or between that read and its write, leaves no job: the read
+    finds the task gone (NotFound), or the write's guard finds its row gone (LearnerDataGone), and the task is
+    skipped."""
+    from app.services.sweeper import TaskSweeper
+    from app.services.tasks import TaskService
+    from app.storage.orm import TaskJobRow
+    from app.storage.repositories import SqlTaskJobRepository, SqlTaskRepository
+
+    from app.schemas.task import Task, TaskStatus
+
+    SqlTaskRepository(sessions, lambda: NOW).create(Task(task_id="t-stranded", user_id="u", learner_id="learner-a",
+                                                         request="r", status=TaskStatus.RUNNING))
+    assert SqlTaskRepository(sessions, lambda: NOW).claim("t-stranded", "dead", timedelta(minutes=1))  # it dies
+    clock = lambda: NOW + timedelta(hours=1)  # noqa: E731
+    tasks, jobs = SqlTaskRepository(sessions, clock), SqlTaskJobRepository(sessions, clock)
+    erase = lambda: SqlLearnerDataRepository(sessions, clock=clock).erase("learner-a")  # noqa: E731
+    service = TaskService(None, tasks, None, None, jobs=jobs)
+    if when == "after the listing":
+        real = service.enqueue_recovery
+        service.enqueue_recovery = lambda task_id: (erase(), real(task_id))[1]
+    else:
+        reader = SqlTaskRepository(sessions, clock)
+        service._tasks = type("Read", (), {"get": lambda self, task_id: (reader.get(task_id), erase())[0]})()
+    report = TaskSweeper(tasks, jobs, service, clock=clock).sweep()
+    assert report.recovered == []
+    with sessions() as s:
+        assert s.scalars(select(TaskJobRow)).all() == [] and s.get(TaskRow, "t-stranded") is None

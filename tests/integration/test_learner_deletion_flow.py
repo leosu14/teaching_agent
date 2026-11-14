@@ -74,8 +74,8 @@ def test_each_learner_deletes_their_lesson_from_the_bucket(s3_container) -> None
 
         r = one.delete(f"/learners/{FIRST}")
         assert r.status_code == 200, r.text
-        assert r.json()["objects_deleted"] == len(mine - shared)
-        assert r.json()["objects_kept_shared"] == len(shared)
+        assert r.json()["objects_deleted"] >= len(mine - shared) and r.json()["objects_pending"] == 0
+        assert r.json()["objects_kept_shared"] >= len(shared)  # the shared media, and image candidates both hold
         assert not (mine - shared) & set(fake.objects)  # the first learner's own objects are gone
         assert theirs <= set(fake.objects)  # the second learner's lesson is whole
         served = [a for a in two.get(f"/tasks/{second}/artifacts").json()
@@ -85,12 +85,10 @@ def test_each_learner_deletes_their_lesson_from_the_bucket(s3_container) -> None
         r = two.delete(f"/learners/{SECOND}")
         assert r.status_code == 200 and r.json()["objects_kept_shared"] == 0, r.text
         assert not (mine | theirs) & set(fake.objects)
-        # Nothing any record of either lesson pointed at is left. What remains is image candidates the visual step
-        # stored but did not select: content-addressed pictures of the topic that no row ties to anyone
-        # (docs/privacy.md, known limits).
-        left = [k for k in fake.objects if not k.startswith("pilot/records/")]
-        assert all(k.startswith("pilot/objects/sha256/") and k.endswith((".png", ".jpg", ".webp", ".svg"))
-                   for k in left), left
+        # Nothing of either lesson is left: every object a lesson put is held by its task, the image candidates the
+        # visual step looked at but did not select included. Only the generated-video ledger's records stay.
+        assert [k for k in fake.objects if not k.startswith("pilot/records/")] == []
+        assert c.learner_deletion.repository.pending_deletions() == 0
 
 
 ANSWER = "respuesta-carrera-s3"  # no object in the bucket may hold it after the deletion
@@ -156,3 +154,73 @@ def test_a_deletion_racing_a_graded_answer_leaves_nothing_in_the_bucket(s3_conta
             assert receipts[0].records["assessment_attempts"] == 1  # the attempt it waited for
     assert left_in_bucket(fake, task_id) == []
     assert not c.learner_deletion.repository.holds_data(FIRST)
+
+
+def dangling(c) -> list[str]:
+    """Artifact rows of anyone whose stored object is missing (none may be, ever)."""
+    from sqlalchemy import select
+
+    from app.storage.orm import ArtifactRow
+    with c._sessions() as s:
+        uris = {json.loads(body)["uri"] for body in s.scalars(select(ArtifactRow.body))}
+    return sorted(u for u in uris if not c.artifacts.object_exists(u))
+
+
+def whole(c, client, task_id: str) -> None:
+    """The lesson is complete and every one of its files serves."""
+    assert client.get(f"/tasks/{task_id}").json()["status"] == "COMPLETED"
+    for a in c.artifacts.list_for_task(task_id):
+        assert c.artifacts.verify(a) is None, (a.name, c.artifacts.verify(a))  # stored, and the bytes match
+    served = [a for a in client.get(f"/tasks/{task_id}/artifacts").json()
+              if client.get(f"/artifacts/{a['artifact_id']}/content").status_code == 200]
+    assert served
+    assert client.get(f"/lessons/{c.artifacts.find(task_id, 'lesson').artifact_id}/reading").status_code == 200
+    assert dangling(c) == []
+
+
+@pytest.mark.parametrize("order", ["reuse first", "deletion first"])
+def test_a_deletion_racing_another_lessons_reuse_of_shared_media(s3_container, monkeypatch, order) -> None:
+    """The second review's B1 (probe_shared_object_race.py): the second learner's lesson stores the same media as
+    the first's, so the bucket has them already (content-addressed, shared). The first learner deletes their data
+    while the second lesson is being made.
+
+    - reuse first: the deletion lands after the second lesson reused an object (its hold is recorded) and before its
+      artifact row, exactly the probe's moment. The deletion sees the hold and keeps the object.
+    - deletion first: the deletion lands just before the second lesson records its hold on an object only the first
+      learner held. It deletes the object; the second lesson's put then finds it gone and writes it afresh.
+
+    Either way the second lesson completes, every file of it serves, and no artifact row points at a missing file."""
+    c, fake = s3_container
+    with client_for(c, FIRST) as one, client_for(c, SECOND) as two:
+        first = lesson(c, one, FIRST)
+        first_keys = keys(c, first)
+        fired = []
+        if order == "reuse first":
+            real = c.artifacts.store_object
+
+            def delete_first_then_add_row(**kwargs):
+                obj = kwargs["obj"]  # put (reused: the bytes were in the bucket), its row not added yet
+                if obj.reused and f"pilot/{obj.uri.removeprefix('object:')}" in first_keys and not fired:
+                    fired.append(c.learner_deletion.delete(FIRST))
+                return real(**kwargs)
+
+            monkeypatch.setattr(c.artifacts, "store_object", delete_first_then_add_row)
+        else:
+            real_hold = repositories.SqlArtifactRepository.hold
+
+            def delete_first_then_hold(self, uri, owner_id):
+                if not fired and f"pilot/{uri.removeprefix('object:')}" in first_keys:
+                    fired.append(c.learner_deletion.delete(FIRST))  # nothing else holds it: it is deleted
+                    assert f"pilot/{uri.removeprefix('object:')}" not in fake.objects
+                return real_hold(self, uri, owner_id)
+
+            monkeypatch.setattr(repositories.SqlArtifactRepository, "hold", delete_first_then_hold)
+        second = lesson(c, two, SECOND)
+        assert fired and fired[0].objects_pending == 0
+        if order == "reuse first":
+            assert fired[0].objects_kept_shared > 0  # the object the second lesson had just reused was kept
+        whole(c, two, second)
+        assert not c.learner_deletion.repository.holds_data(FIRST)
+        # and the second learner's own deletion still removes everything
+        assert two.delete(f"/learners/{SECOND}").status_code == 200
+    assert [k for k in fake.objects if not k.startswith("pilot/records/")] == []

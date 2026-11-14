@@ -8,6 +8,8 @@ gets 403, anyone else 404, and neither changes anything."""
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from app.api.auth import TEACHER
@@ -153,11 +155,13 @@ def test_work_in_progress_blocks_the_deletion_and_nothing_is_deleted(world) -> N
         assert not env.container.learner_deletion.repository.holds_data(LEARNER)
 
 
-def test_a_failed_file_deletion_deletes_no_record_and_a_retry_finishes(world, monkeypatch) -> None:
+def test_a_file_the_store_refuses_is_deleted_later_by_the_sweeper(world, monkeypatch) -> None:
+    """The rows go in one transaction that also queues the files; the files are deleted after it commits. One the
+    store refuses stays queued (the receipt says so), and the sweeper deletes it once it is due again."""
     env, ids, auth = world
     c = env.container
-    real = c.artifacts.delete_object
-    calls = []
+    objects = stored_objects(env, ids)
+    real, calls = c.artifacts.delete_object, []
 
     def failing(uri: str) -> None:
         calls.append(uri)
@@ -166,15 +170,42 @@ def test_a_failed_file_deletion_deletes_no_record_and_a_retry_finishes(world, mo
         real(uri)
 
     monkeypatch.setattr(c.artifacts, "delete_object", failing)
+    repo = c.learner_deletion.repository
+    with client_for(c, LEARNER, auth=auth) as a:
+        r = a.delete(f"/learners/{LEARNER}")
+        assert r.status_code == 200 and r.json()["objects_pending"] == 1, r.text
+        assert "disk" not in r.text  # the store's error is logged, not returned
+        assert not repo.holds_data(LEARNER) and a.get(f"/learners/{LEARNER}").status_code == 404
+    refused = calls[1]
+    assert c.artifacts.object_exists(refused) and repo.pending_deletions() == 1
+    assert c.task_worker.sweep().objects_deleted == 0  # not due yet: retried after a pause
+    later = repo._clock() + timedelta(minutes=1)
+    monkeypatch.setattr(repo, "_clock", lambda: later)
+    swept = c.task_worker.sweep()
+    assert (swept.objects_deleted, swept.objects_pending) == (1, 0)
+    assert repo.pending_deletions() == 0 and not any(c.artifacts.object_exists(u) for u in objects)
+
+
+def test_a_deletion_that_fails_before_its_commit_deletes_no_row_and_no_file(world, monkeypatch) -> None:
+    """Files are deleted only after the rows' transaction commits: a failure inside it leaves both as they were, and
+    a retry deletes everything."""
+    env, ids, auth = world
+    c = env.container
+    objects = stored_objects(env, ids)
+    from app.storage import repositories
+
+    def broken(prefix: str) -> str:
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(repositories, "new_id", broken)  # fails after every row's delete, before the commit
     with client_for(c, LEARNER, auth=auth) as a:
         before = a.get(f"/learners/{LEARNER}").json()
-        r = a.delete(f"/learners/{LEARNER}")
-        assert r.status_code == 503 and r.json()["error"] == "ObjectDeletionFailed", r.text
-        assert "disk" not in r.text  # the store's error is logged, not returned
+        with pytest.raises(RuntimeError):
+            a.delete(f"/learners/{LEARNER}")
         assert a.get(f"/learners/{LEARNER}").json() == before  # no row was deleted
-        assert c.learner_deletion.repository.holds_data(LEARNER)
+        assert all(c.artifacts.object_exists(u) for u in objects)  # and no file
+        monkeypatch.undo()
         retried = a.delete(f"/learners/{LEARNER}")
-        assert retried.status_code == 200, retried.text
-        assert not c.learner_deletion.repository.holds_data(LEARNER)
-        for uri in stored_objects(env, ids):
-            pytest.fail(f"an artifact of A is still stored: {uri}")
+        assert retried.status_code == 200 and retried.json()["objects_pending"] == 0, retried.text
+    assert not c.learner_deletion.repository.holds_data(LEARNER)
+    assert not any(c.artifacts.object_exists(u) for u in objects)

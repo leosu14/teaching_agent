@@ -93,6 +93,7 @@ def compose(*args: str, check: bool = True, capture: bool = False, stdin: str | 
 
 
 # The tables a learner's deletion keeps on purpose (app/storage/repositories.py, KEPT_TABLES), and the migration's own.
+# `object_deletions` (the queue of files still to delete) is checked too: it must hold nothing once the request is done.
 KEPT_TABLES = {"classes", "assessment_rubrics", "spend_entries", "spend_counters", "alembic_version"}
 
 
@@ -252,6 +253,8 @@ def run(port: str, build: bool = True) -> None:
         assert deleted.status_code == 200, deleted.text
         assert deleted.json()["records"].get("tasks") and deleted.json()["objects_deleted"] > 0, deleted.text
         assert deleted.json()["objects_kept_shared"] == 0, deleted.text  # no other learner shares the media here
+        assert deleted.json()["objects_pending"] == 0, deleted.text  # every file went in the request, none is queued
+        assert sql("SELECT count(*) FROM object_deletions;") == ["0"]  # the deletion queue (kept table) is empty
         # In the database itself: no row of any erased table names the learner or one of their tasks.
         assert rows_naming({lid} | tasks) == {}, rows_naming({lid} | tasks)
         # In the bucket itself: none of their files is left, nor anything under a key of one of their tasks.

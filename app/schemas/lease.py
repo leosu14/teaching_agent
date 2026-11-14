@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime
 
 from pydantic import Field
@@ -82,21 +83,31 @@ class LearnerDataGone(LookupError):
 
 
 # The learner (and, optionally, the lesson task) whose data the request running in this context writes: grading an
-# answer, a teaching session, queueing a lesson, a learning cycle, a goal. Every repository write made inside checks,
-# in its own transaction and before anything else, that the task and the learner rows still exist, and takes their
-# row locks (a no-op UPDATE), so a learner's data deletion, which locks the same rows first, either commits before
-# (the write is refused: LearnerDataGone) or waits for the write to commit (and deletes what it wrote).
-_learner_guard: ContextVar[tuple[str, str | None] | None] = ContextVar("learner_guard", default=None)
+# answer, a teaching session, queueing a lesson, a learning cycle, a goal, an assessment item, the next action. Every
+# repository write made inside first takes the learner's deletion lock in shared mode (PostgreSQL), then checks, in
+# its own transaction and before anything else it writes, that the task and the learner rows still exist, and locks
+# them (a no-op UPDATE). A learner's data deletion takes that lock exclusively before anything else, so it either
+# commits before (the write is refused: LearnerDataGone) or waits for the write to commit (and deletes what it wrote).
+# `profile=False`: the learner had no profile when the request started (one may queue a lesson before onboarding), so
+# a missing learner row is not a deletion; the lock and the task check still apply.
+@dataclass(frozen=True)
+class LearnerGuard:
+    learner_id: str
+    task_id: str | None = None
+    profile: bool = True
 
 
-def learner_guard() -> tuple[str, str | None] | None:
+_learner_guard: ContextVar[LearnerGuard | None] = ContextVar("learner_guard", default=None)
+
+
+def learner_guard() -> LearnerGuard | None:
     return _learner_guard.get()
 
 
 @contextmanager
-def learner_writes(learner_id: str, task_id: str | None = None) -> Iterator[None]:
+def learner_writes(learner_id: str, task_id: str | None = None, *, profile: bool = True) -> Iterator[None]:
     """Refuse every write made inside the block once `learner_id` (or the lesson task `task_id`) is deleted."""
-    token = _learner_guard.set((learner_id, task_id))
+    token = _learner_guard.set(LearnerGuard(learner_id, task_id, profile))
     try:
         yield
     finally:

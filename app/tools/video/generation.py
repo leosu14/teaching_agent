@@ -109,8 +109,8 @@ class GeneratedVideoService:
         record = self._record(key)
         job = VideoGenerationJob.model_validate(record["job"]) if record.get("job") else None
         raw = StoredObject.model_validate(record["raw"]) if record.get("raw") else None
-        if raw is not None and not self.artifacts.object_exists(raw.uri):
-            raw = None
+        if raw is not None:  # held for this task first, so that a deletion cannot remove it before it is used
+            raw = self.artifacts.reuse_object(raw)
         return GenerationLookup(generation_key=key, job=job, raw=raw)
 
     def remember(self, job: VideoGenerationJob, **fields: object) -> None:
@@ -217,7 +217,7 @@ class GeneratedVideoService:
         if not found:
             return None
         obj = StoredObject.model_validate(found)
-        return obj if self.artifacts.object_exists(obj.uri) else None
+        return self.artifacts.reuse_object(obj)  # held first (see `lookup`); None when it is gone
 
     def store(self, task_id: str, data: ClipAssetRequest, raw: StoredObject, reused: bool, claims: dict,
               scope: ExecutionScope) -> ClipAssetResult:

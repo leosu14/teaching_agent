@@ -1,16 +1,20 @@
 """Learner data deletion (MVP item 9): `DELETE /learners/{id}` removes everything stored about a learner.
 
-Everything happens in one database transaction (`SqlLearnerDataRepository.erase`). It locks the learner's rows, refuses
+Two steps. First one database transaction (`SqlLearnerDataRepository.erase`): it locks the learner's rows, refuses
 while the learner has work in progress (`LearnerDataBusy`, 409, nothing deleted: a worker writing their lesson at
-that moment would keep producing data), deletes every row of the learner, then, still under the locks, the stored
-objects only this learner's artifacts point at (lesson text, images, narration, slides, video), and commits. If the
-store refuses one object, the transaction rolls back: no row is deleted and the request fails (503), so a retry finds
-every object still left through the rows that point at it. A request writing for the learner at the same time
-(grading an answer, queueing a lesson) either committed before the locks, and is deleted with the rest, or is refused
-after (`learner_writes`).
+that moment would keep producing data), deletes every row of the learner and queues the stored objects their
+artifacts and holds point at (lesson text, images, narration, slides, video), and commits. A request writing for the
+learner at the same time (grading an answer, queueing a lesson) either committed before the locks, and is deleted
+with the rest, or is refused after (`learner_writes`). If anything fails before the commit, nothing is deleted, no
+row and no file.
 
-Kept on purpose: the spend ledger (ids and amounts, never content),
-so budgets and daily caps still count what was spent (app/schemas/privacy.py)."""
+Then, after the commit, the queued objects (`SqlLearnerDataRepository.purge`), each under its own lock: one that
+someone else's artifact or hold still points at (shared media) is kept, every other one is deleted. One the store
+refuses stays queued and the sweeper tries it again until it is done, so the deletion completes without the learner
+having to retry; the receipt says how many are still pending.
+
+Kept on purpose: the spend ledger (ids and amounts, never content), so budgets and daily caps still count what was
+spent (app/schemas/privacy.py)."""
 
 from __future__ import annotations
 
@@ -20,8 +24,8 @@ from datetime import datetime
 
 from app.artifacts.service import ArtifactService
 from app.schemas.common import utcnow
-from app.schemas.privacy import LearnerDataDeletion, ObjectDeletionFailed
-from app.storage.repositories import SqlLearnerDataRepository
+from app.schemas.privacy import LearnerDataDeletion
+from app.storage.repositories import ObjectPurge, SqlLearnerDataRepository
 
 logger = logging.getLogger(__name__)
 
@@ -34,20 +38,21 @@ class LearnerDeletionService:
         self._clock = clock
 
     def delete(self, learner_id: str) -> LearnerDataDeletion:
-        """Delete the learner's data; LearnerDataBusy (nothing deleted) while they have work in progress,
-        ObjectDeletionFailed (no row deleted) when the object store refuses a deletion. Deleting a learner with no
-        data succeeds with nothing to report, so a retry after a lost response is safe."""
-        records, objects = self.repository.erase(learner_id, self._delete_objects)
+        """Delete the learner's data; LearnerDataBusy (nothing deleted) while they have work in progress. Deleting a
+        learner with no data succeeds with nothing to report, so a retry after a lost response is safe."""
+        records, queued = self.repository.erase(learner_id)
+        objects = self.repository.purge(self._artifacts.delete_object, queued)
         # The learner id is not logged: the log line records that a deletion happened, not whose data it was.
-        logger.info("learner data deleted: %d records, %d objects, %d shared objects kept",
-                    sum(records.values()), len(objects.delete), objects.shared)
+        logger.info("learner data deleted: %d records, %d objects, %d shared objects kept, %d objects pending",
+                    sum(records.values()), objects.deleted, objects.kept_shared, objects.pending)
         return LearnerDataDeletion(learner_id=learner_id, deleted_at=self._clock(), records=records,
-                                   objects_deleted=len(objects.delete), objects_kept_shared=objects.shared)
+                                   objects_deleted=objects.deleted, objects_kept_shared=objects.kept_shared,
+                                   objects_pending=objects.pending)
 
-    def _delete_objects(self, uris: tuple[str, ...]) -> None:
-        for uri in uris:
-            try:
-                self._artifacts.delete_object(uri)
-            except Exception:  # the store's own error types differ (OSError, S3 errors): any of them stops here
-                logger.exception("learner data deletion: an object could not be deleted; no rows were deleted")
-                raise ObjectDeletionFailed() from None
+    def purge_due(self) -> ObjectPurge:
+        """The sweeper's step: the queued object deletions that are due (a store failure earlier)."""
+        result = self.repository.purge(self._artifacts.delete_object)
+        if result.deleted or result.pending:
+            logger.info("learner data deletion: %d queued objects deleted, %d kept shared, %d still pending",
+                        result.deleted, result.kept_shared, result.pending)
+        return result

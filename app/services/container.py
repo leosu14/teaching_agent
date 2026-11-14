@@ -602,13 +602,17 @@ def build_container(
                                 agents=agents, tools=tools, router=router, events=events, observers=observers,
                                 spend=spend, budgets=budgets, clock=clock)
     jobs = SqlTaskJobRepository(sessions, clock)
+    learner_repo = SqlLearnerRepository(sessions, clock)
     task_service = TaskService(orchestrator, task_repo, event_repo, artifacts, jobs=jobs,
-                               job_max_attempts=settings.job_max_attempts)
+                               job_max_attempts=settings.job_max_attempts,
+                               has_profile=lambda learner_id: learner_repo.get(learner_id) is not None)
+    learner_deletion = LearnerDeletionService(SqlLearnerDataRepository(sessions, clock), artifacts, clock)
     task_worker = TaskWorker(jobs, task_service, poll_seconds=settings.worker_poll_seconds,
                              retry_backoff_seconds=settings.job_retry_backoff_seconds,
                              retry_max_backoff_seconds=settings.job_retry_max_backoff_seconds,
                              busy_retry_seconds=settings.job_busy_retry_seconds, clock=clock,
-                             sweeper=TaskSweeper(task_repo, jobs, task_service, clock=clock),
+                             sweeper=TaskSweeper(task_repo, jobs, task_service, clock=clock,
+                                                 purge_objects=learner_deletion.purge_due),
                              sweep_seconds=settings.worker_sweep_seconds)
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
     curriculum_service = CurriculumService(memory, RetrieverKnowledgeBase(retriever), curriculum, task_service, events)
@@ -645,7 +649,7 @@ def build_container(
         artifact_content=artifact_content,
         lesson_reading=LessonReadingService(artifacts=artifacts, tasks=task_service, teaching=teaching_service,
                                             assessment=assessment_service, content=artifact_content),
-        learner_deletion=LearnerDeletionService(SqlLearnerDataRepository(sessions, clock), artifacts, clock),
+        learner_deletion=learner_deletion,
         courses=courses,
         catalog=CatalogService(agents, registry, router, planner, frameworks, providers.registry, providers.selector),
         production=ProductionService(settings=settings, events=events, registry=providers.registry,

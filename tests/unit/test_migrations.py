@@ -42,15 +42,18 @@ def diffs(u: str) -> list:
         engine.dispose()
 
 
-def test_one_head_and_the_baseline_is_it() -> None:
-    assert head_revision() == BASELINE
+HEAD = "0002_object_holds"  # the newest revision: object holds and the object-deletion queue (MVP item 9)
+
+
+def test_one_head_on_top_of_the_baseline() -> None:
+    assert head_revision() == HEAD
 
 
 def test_upgrade_of_an_empty_database_is_exactly_the_orm_schema(tmp_path) -> None:
     u = url(tmp_path)
     report = upgrade(u)
-    assert (report.before, report.after, report.adopted) == (None, BASELINE, False)
-    assert revision(u) == BASELINE
+    assert (report.before, report.after, report.adopted) == (None, HEAD, False)
+    assert revision(u) == HEAD
     # A model change without a revision fails here: the migrated schema must equal the ORM's, table by table.
     assert diffs(u) == []
     engine = create_engine(u)
@@ -62,7 +65,7 @@ def test_upgrade_again_changes_nothing(tmp_path) -> None:
     u = url(tmp_path)
     upgrade(u)
     report = upgrade(u)
-    assert report.describe() == f"already at {BASELINE}" and not report.adopted
+    assert report.describe() == f"already at {HEAD}" and not report.adopted
 
 
 def test_a_create_all_database_is_adopted_with_its_missing_columns(tmp_path) -> None:
@@ -76,9 +79,9 @@ def test_a_create_all_database_is_adopted_with_its_missing_columns(tmp_path) -> 
                           "VALUES ('kept', '2026-01-01', '{}')"))
     engine.dispose()
     report = upgrade(u)
-    assert report.adopted and report.after == BASELINE
-    assert "adopted" in report.describe()
-    assert diffs(u) == [] and revision(u) == BASELINE
+    assert report.adopted and report.after == HEAD
+    assert f"adopted an existing database at {BASELINE}, then upgraded to {HEAD}" == report.describe()
+    assert diffs(u) == [] and revision(u) == HEAD
     engine = create_engine(u)
     with engine.connect() as conn:  # the data is kept, the new column has its default
         assert conn.execute(text("SELECT version FROM learners WHERE learner_id = 'kept'")).scalar() == 1
@@ -118,9 +121,23 @@ def test_migrations_mode_runs_on_a_migrated_database(tmp_path) -> None:
     sessions = create_db(u, "migrations")
     try:
         engine = sessions.kw["bind"]
-        assert check(engine) == BASELINE
+        assert check(engine) == HEAD
     finally:
         dispose(sessions)
+
+
+def test_a_database_at_the_baseline_is_upgraded_to_the_object_tables(tmp_path) -> None:
+    u = url(tmp_path)
+    from alembic import command
+
+    from app.storage.migrate import alembic_config
+    command.upgrade(alembic_config(u), BASELINE)
+    assert revision(u) == BASELINE
+    report = upgrade(u)
+    assert (report.before, report.after) == (BASELINE, HEAD) and diffs(u) == []
+    engine = create_engine(u)
+    assert {"object_holds", "object_deletions"} <= set(inspect(engine).get_table_names())
+    engine.dispose()
 
 
 def test_a_stamped_but_older_revision_is_refused(tmp_path) -> None:

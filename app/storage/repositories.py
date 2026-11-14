@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.observability.spend import abandoned
 
-from app.schemas.artifact import Artifact
+from app.schemas.artifact import Artifact, ObjectMissing
 from app.schemas.assessment import (
     AssessmentAttempt,
     AssessmentGrade,
@@ -34,7 +34,7 @@ from app.schemas.curriculum import (
     RecordConflict,
     VersionConflict,
 )
-from app.schemas.common import utcnow
+from app.schemas.common import new_id, utcnow
 from app.schemas.events import Event
 from app.schemas.privacy import RETAINED_RECORDS, LearnerDataBusy
 from app.schemas.lease import Lease, LearnerDataGone, LeaseLost, WriteConflict, learner_guard, write_fence
@@ -75,6 +75,8 @@ from app.schemas.teaching import (
     TeachingTurn,
 )
 from app.storage.orm import (
+    ObjectDeletionRow,
+    ObjectHoldRow,
     ArtifactRow,
     AssessmentAttemptRow,
     AssessmentGradeRow,
@@ -124,6 +126,7 @@ def _require_fence(s: Session, lease: Lease, now: datetime) -> None:
     task between this check and the caller's commit."""
     if lease.resource != "task":
         raise ValueError(f"no fence check for resource {lease.resource}")
+    _guard_lock(s)  # a write for a learner takes their deletion lock before any row lock (see `_guard`)
     checked = s.execute(update(TaskRow).where(
         TaskRow.task_id == lease.resource_id, TaskRow.lease_fence == lease.fence, TaskRow.lease_owner == lease.owner,
         TaskRow.lease_expires_ms > _ms(now)).values(lease_fence=TaskRow.lease_fence))
@@ -142,20 +145,57 @@ def _fence_current(s: Session, clock: Clock) -> None:
 
 def _guard(s: Session) -> None:
     """Inside the caller's write transaction, before anything else it writes: when the write is made for a learner
-    (`learner_writes`), refuse it (LearnerDataGone) unless the lesson task and the learner rows still exist. The
-    checks are no-op UPDATEs, so they take those rows' write locks in the order a learner's data deletion takes them
-    (task rows, then the learner row): a deletion either committed before (the rows are gone) or waits until this
-    write commits, and then deletes it. On SQLite the first UPDATE takes the database's write lock instead."""
+    (`learner_writes`), refuse it (LearnerDataGone) unless the lesson task and the learner rows still exist.
+
+    Locks, in this order, which is the deletion's: the learner's deletion lock in shared mode (PostgreSQL; a learner's
+    data deletion takes it exclusively before anything else, see `SqlLearnerDataRepository._lock`), then the task
+    row, then the learner row (no-op UPDATEs). So a deletion either committed before (the rows are gone) or waits
+    until this write commits, and then deletes it; and as the deletion lock comes first on both sides, no other order
+    of row locks inside a write can make the two wait on each other. On SQLite the first write takes the database's
+    write lock instead. A guard made for a learner who had no profile when the request started (`profile=False`)
+    does not require the learner row."""
     guard = learner_guard()
     if guard is None:
         return
-    learner_id, task_id = guard
-    if task_id is not None and s.execute(update(TaskRow).where(TaskRow.task_id == task_id)
-                                         .values(lease_fence=TaskRow.lease_fence)).rowcount != 1:
+    _guard_lock(s)
+    if guard.task_id is not None and s.execute(update(TaskRow).where(TaskRow.task_id == guard.task_id)
+                                               .values(lease_fence=TaskRow.lease_fence)).rowcount != 1:
         raise LearnerDataGone()
-    if s.execute(update(LearnerRow).where(LearnerRow.learner_id == learner_id)
-                 .values(version=LearnerRow.version)).rowcount != 1:
+    found = s.execute(update(LearnerRow).where(LearnerRow.learner_id == guard.learner_id)
+                      .values(version=LearnerRow.version)).rowcount
+    if guard.profile and found != 1:
         raise LearnerDataGone()
+
+
+def _deletion_lock_key(learner_id: str) -> str:
+    return f"learner-data-deletion:{learner_id}"
+
+
+def _guard_lock(s: Session) -> None:
+    """The learner's deletion lock, shared, for a write made for them (PostgreSQL; a no-op without a guard). Taken
+    again in the same transaction it is simply held twice, until the commit."""
+    guard = learner_guard()
+    if guard is not None and s.get_bind().dialect.name == "postgresql":
+        s.execute(text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                  {"key": _deletion_lock_key(guard.learner_id)})
+
+
+def _lock_object(s: Session, uri: str) -> None:
+    """The lock of one stored object, until the caller's transaction ends: taken to add a reference to it (a hold, an
+    artifact row) and to check that nothing references it before it is deleted (`SqlLearnerDataRepository.purge`).
+    PostgreSQL: an advisory lock on the object's uri, the same for every process and instance. SQLite: the first write
+    takes the database's write lock, which every other writer waits for."""
+    if s.get_bind().dialect.name == "postgresql":
+        s.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": f"object:{uri}"})
+    else:
+        s.execute(update(ObjectHoldRow).where(ObjectHoldRow.uri == uri).values(owner_id=ObjectHoldRow.owner_id))
+
+
+def _hold(s: Session, uri: str, owner_id: str, now: datetime) -> None:
+    """Record `owner_id`'s reference to the object (once); the caller holds the object's lock."""
+    if s.get(ObjectHoldRow, (uri, owner_id)) is None:
+        s.add(ObjectHoldRow(uri=uri, owner_id=owner_id, created_at=now))
+        s.flush()
 
 
 def _versioned_save(s: Session, row_type, key_column, key: str, stored: int | None, values: dict, conflict) -> int:
@@ -214,6 +254,7 @@ class SqlTaskRepository:
         for name in clear_control:
             values[{"pause": "pause_requested", "cancel": "cancel_requested"}[name]] = False
         with self._sessions.begin() as s:
+            _guard_lock(s)
             if lease is not None:
                 if lease.resource_id != task.task_id:
                     raise ValueError("the lease is for another task")
@@ -380,18 +421,38 @@ class SqlArtifactRepository:
         self._sessions = sessions
         self._clock = clock
 
-    def add(self, artifact: Artifact, fence: Lease | None = None) -> None:
+    def add(self, artifact: Artifact, fence: Lease | None = None,
+            object_exists: Callable[[], bool] | None = None) -> None:
         """Record an artifact version. With `fence` (stored by a task's worker) only while that worker's lease is
-        current: LeaseLost otherwise. A version another writer already recorded is a WriteConflict."""
+        current: LeaseLost otherwise. A version another writer already recorded is a WriteConflict.
+
+        An artifact of a shared (content-addressed) object takes the object's lock, records its task's hold on it and,
+        with `object_exists`, checks that the object is still stored, all in this transaction: a deletion of the
+        object checks for references under the same lock, so it either sees this row (and keeps the object) or
+        deleted the object before, and this row is refused (ObjectMissing) instead of pointing at nothing."""
         try:
             with self._sessions.begin() as s:
                 if fence is not None:
                     _require_fence(s, fence, self._clock())
                 _guard(s)
+                if CONTENT_ADDRESSED in artifact.uri:
+                    _lock_object(s, artifact.uri)
+                    _hold(s, artifact.uri, artifact.task_id, self._clock())
+                    if object_exists is not None and not object_exists():
+                        raise ObjectMissing(artifact.uri)
                 self._insert(s, artifact)
         except IntegrityError as exc:
             raise WriteConflict(f"artifact {artifact.task_id}/{artifact.name} v{artifact.version} already exists") \
                 from exc
+
+    def hold(self, uri: str, owner_id: str) -> None:
+        """Record `owner_id`'s reference to a stored object before it is put or reused, under the object's lock and
+        in its own transaction (fenced by the worker's lease, refused for a deleted learner like any write): from its
+        commit on, the object is not deleted until the owner's own data is."""
+        with self._sessions.begin() as s:
+            _fence_current(s, self._clock)  # the worker's lease (`fenced_writes`) and the learner (`learner_writes`)
+            _lock_object(s, uri)
+            _hold(s, uri, owner_id, self._clock())
 
     @staticmethod
     def _insert(s: Session, artifact: Artifact) -> None:
@@ -1453,21 +1514,35 @@ ERASED_TABLES = (
     "curriculum_progress", "tasks", "task_jobs", "events", "artifacts", "teaching_sessions", "teaching_turns",
     "interaction_evidence", "teaching_requests", "teaching_outbox", "assessment_items", "assessment_attempts",
     "assessment_grades", "learning_cycles", "learning_cycle_slots", "learning_cycle_requests", "class_members",
+    "object_holds",
 )
 # Not learner data, or kept on purpose: classes and rubrics belong to teachers and authors; the spend ledger holds ids
-# and amounts only and is what the budgets and daily caps count, so a deletion must not reset them.
-KEPT_TABLES = ("classes", "assessment_rubrics") + RETAINED_RECORDS
+# and amounts only and is what the budgets and daily caps count, so a deletion must not reset them. The object
+# deletion queue holds the references of objects still to delete, each removed as soon as its object is.
+KEPT_TABLES = ("classes", "assessment_rubrics", "object_deletions") + RETAINED_RECORDS
 CONTENT_ADDRESSED = "objects/sha256/"  # app/artifacts/service.py: media stored once and shared by identical bytes
 _CHUNK = 500  # ids per IN list
+OBJECT_RETRY = timedelta(seconds=30)  # the first wait before an object deletion that failed is tried again
+OBJECT_RETRY_MAX = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
 class LearnerObjects:
-    """The stored objects of a learner's artifacts: the ones to delete, and how many are kept because an artifact of
-    someone else points at identical (content-addressed) bytes."""
+    """The stored objects of a learner's artifacts and holds: the ones that would be deleted now, and how many would
+    be kept because someone else's artifact or hold points at the same (content-addressed) object."""
 
     delete: tuple[str, ...]
     shared: int
+
+
+@dataclass
+class ObjectPurge:
+    """What happened to queued object deletions: deleted, kept (someone else references the object) or left for a
+    retry (the store refused; the sweeper tries again)."""
+
+    deleted: int = 0
+    kept_shared: int = 0
+    pending: int = 0
 
 
 @dataclass(frozen=True)
@@ -1482,62 +1557,69 @@ class _LearnerIds:
 
     @property
     def owners(self) -> list[str]:
-        """What artifacts and events record as their `task_id`: the learner's tasks and learning cycles."""
+        """What artifacts, events and object holds record as their owner: the learner's tasks and learning cycles."""
         return self.tasks + self.cycles
 
 
 class SqlLearnerDataRepository:
     """Everything stored about one learner, found and deleted together (MVP item 9).
 
-    `erase` deletes the learner's rows from every table in `ERASED_TABLES`, and the stored objects only they point
-    at, in one transaction. It first locks the learner's task rows, then their learner row, then their cycle rows
-    (`FOR UPDATE` on PostgreSQL; on SQLite a first write takes the database's write lock): the same order in which a
-    request writing for the learner (`learner_writes`: grading an answer, a teaching session, queueing a lesson, a
-    cycle, a goal) locks them in each of its write transactions (`_guard`), so the two never wait on each other in a
-    circle. Whichever commits first wins: a write that committed before is seen and deleted; a write that comes
-    after finds the rows gone and is refused (LearnerDataGone), so a deletion that lands while an answer is graded
-    leaves nothing of it behind.
+    `erase` deletes the learner's rows from every table in `ERASED_TABLES` in one transaction, and in the same
+    transaction queues the stored objects their artifacts and holds point at (`object_deletions`). The objects are
+    deleted only after that commits (`purge`: at once by the deletion request, and again by the sweeper for any the
+    store refused), so a deletion that rolls back never deletes a file, and one that commits gets every file deleted
+    even if the store fails for a while.
+
+    Concurrent writes: `erase` first takes the learner's deletion lock exclusively (PostgreSQL), then locks the task
+    rows, the learner row and the cycle rows. A request writing for the learner (`learner_writes`) takes the same
+    deletion lock in shared mode first (`_guard`), so whichever commits first wins: a write that committed before is
+    seen and deleted; a write that comes after finds the rows gone and is refused (LearnerDataGone).
+
+    Shared objects: `purge` deletes an object under the object's own lock (`_lock_object`), after checking that no
+    hold and no artifact row of anyone else still points at it. A worker that puts or reuses a content-addressed object
+    first records its hold under the same lock (`SqlArtifactRepository.hold`), so the deletion either sees the hold
+    and keeps the object, or deleted it before, and the worker's put writes it afresh.
 
     It refuses (`LearnerDataBusy`, nothing deleted) while a worker may still write for them: a queued or running job
-    of one of their tasks, a task under a live execution lease, or a learning cycle being driven. That check runs
-    under the locks, so a claim either happened before (and is seen as a lease) or waits and then finds nothing to
-    claim. A worker that still holds an old in-memory copy cannot bring anything back: its writes are fenced by the
-    task row (gone)."""
+    of one of their tasks, a task under a live execution lease, or a learning cycle being driven."""
+
+    TRIES = 3
 
     def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
         self._sessions = sessions
         self._clock = clock
 
     def objects(self, learner_id: str) -> LearnerObjects:
-        """The objects a deletion would delete now (LearnerDataBusy while work is in progress); see `_plan`."""
+        """The objects a deletion would delete now (LearnerDataBusy while work is in progress)."""
         with self._sessions() as s:
             self._refuse_busy(s, learner_id)
-            return self._plan(s, self._ids(s, learner_id))
+            ids = self._ids(s, learner_id)
+            delete, shared = [], 0
+            for uri, content_hash in self._uris(s, ids).items():
+                if self._referenced(s, uri, content_hash, exclude=ids.owners):
+                    shared += 1
+                else:
+                    delete.append(uri)
+            return LearnerObjects(delete=tuple(delete), shared=shared)
 
-    def erase(self, learner_id: str,
-              delete_objects: Callable[[tuple[str, ...]], None] | None = None) -> tuple[dict[str, int], LearnerObjects]:
-        """Delete the learner's rows, and (through `delete_objects`, before the commit) the objects only they point
-        at. Returns the number of rows deleted by table (tables with none are left out) and the objects. When
-        `delete_objects` raises, the transaction rolls back and no row is deleted, so a retry finds every object
-        still left through the rows that point at it."""
+    def erase(self, learner_id: str) -> tuple[dict[str, int], list[str]]:
+        """Delete the learner's rows and queue their objects for deletion, in one transaction. Returns the rows
+        deleted by table (tables with none are left out) and the ids of the queued object deletions (see `purge`)."""
         for attempt in range(1, self.TRIES + 1):
             try:
-                return self._erase(learner_id, delete_objects)
+                return self._erase(learner_id)
             except DBAPIError as exc:  # a deadlock victim (PostgreSQL) or a busy database (SQLite): nothing was deleted
                 if attempt < self.TRIES and _retryable(exc):
                     continue
                 raise
         raise AssertionError("unreachable")
 
-    TRIES = 3
-
-    def _erase(self, learner_id: str,
-               delete_objects: Callable[[tuple[str, ...]], None] | None) -> tuple[dict[str, int], LearnerObjects]:
+    def _erase(self, learner_id: str) -> tuple[dict[str, int], list[str]]:
         with self._sessions.begin() as s:
             self._lock(s, learner_id)
             self._refuse_busy(s, learner_id)
             ids = self._ids(s, learner_id)
-            objects = self._plan(s, ids)
+            uris = self._uris(s, ids)
             counts: dict[str, int] = {}
 
             def run(table: str, statement) -> None:
@@ -1564,6 +1646,7 @@ class SqlLearnerDataRepository:
             each("curricula", CurriculumRow, CurriculumRow.curriculum_id, ids.curricula)
             each("learning_goals", LearningGoalRow, LearningGoalRow.goal_id, ids.goals)
             each("artifacts", ArtifactRow, ArtifactRow.task_id, ids.owners)
+            each("object_holds", ObjectHoldRow, ObjectHoldRow.owner_id, ids.owners)
             each("events", EventRow, EventRow.task_id, ids.owners)
             # Events outside any task or cycle that name the learner, or one of their goals or curricula (goals
             # created or changed, objectives started, learning actions selected).
@@ -1574,10 +1657,70 @@ class SqlLearnerDataRepository:
             for row_type, table in ((LearningEvidenceRow, "learning_evidence"), (LearningEventRow, "learning_events"),
                                     (ClassMemberRow, "class_members"), (LearnerRow, "learners")):
                 run(table, delete(row_type).where(row_type.learner_id == learner_id))
-            s.flush()
-            if delete_objects is not None and objects.delete:
-                delete_objects(objects.delete)  # still under the locks: nothing can point at them again meanwhile
-            return counts, objects
+            now = self._clock()
+            queued = []
+            for uri, content_hash in uris.items():  # deleted after the commit, once nothing points at them
+                deletion_id = new_id("objdel")
+                s.add(ObjectDeletionRow(deletion_id=deletion_id, uri=uri, content_hash=content_hash, queued_at=now,
+                                        attempts=0, next_attempt_at=now))
+                queued.append(deletion_id)
+            return counts, queued
+
+    def purge(self, delete_object: Callable[[str], None], deletion_ids: Iterable[str] | None = None, *,
+              limit: int = 500) -> ObjectPurge:
+        """Do queued object deletions: the given ones, or (the sweeper) the ones due. Each in a transaction of its own,
+        under the object's lock: when a hold or an artifact row still points at the object (shared media, or a lesson
+        that stored the same bytes since), it is kept; otherwise it is deleted from the store and its queue row goes.
+        A store failure leaves the row, to be tried again later (`OBJECT_RETRY`, doubling up to `OBJECT_RETRY_MAX`).
+        Deleting an object that is already gone is not an error, so a retry after a lost commit is safe."""
+        result = ObjectPurge()
+        ids = list(deletion_ids) if deletion_ids is not None else self.due_deletions(limit=limit)
+        for deletion_id in ids:
+            outcome = self._purge_one(deletion_id, delete_object)
+            if outcome == "deleted":
+                result.deleted += 1
+            elif outcome == "kept":
+                result.kept_shared += 1
+            elif outcome == "pending":
+                result.pending += 1
+        return result
+
+    def due_deletions(self, *, limit: int = 500) -> list[str]:
+        with self._sessions() as s:
+            return list(s.scalars(select(ObjectDeletionRow.deletion_id)
+                                  .where(ObjectDeletionRow.next_attempt_at <= self._clock())
+                                  .order_by(ObjectDeletionRow.next_attempt_at).limit(limit)))
+
+    def pending_deletions(self) -> int:
+        with self._sessions() as s:
+            return s.scalar(select(func.count()).select_from(ObjectDeletionRow)) or 0
+
+    def _purge_one(self, deletion_id: str, delete_object: Callable[[str], None]) -> str:
+        with self._sessions() as s:
+            row = s.get(ObjectDeletionRow, deletion_id)
+            if row is None:
+                return "gone"  # done by another process
+            uri = row.uri
+        try:
+            with self._sessions.begin() as s:
+                _lock_object(s, uri)
+                row = s.get(ObjectDeletionRow, deletion_id)
+                if row is None:
+                    return "gone"
+                kept = self._referenced(s, uri, row.content_hash, exclude=[])
+                if not kept:
+                    delete_object(uri)  # still under the lock: no reference can be added meanwhile
+                s.delete(row)
+                return "kept" if kept else "deleted"
+        except Exception:  # the store's own error types differ (OSError, S3 errors): any of them is retried later
+            logger.exception("learner data deletion: an object could not be deleted; it will be tried again")
+            with self._sessions.begin() as s:
+                row = s.get(ObjectDeletionRow, deletion_id)
+                if row is not None:
+                    row.attempts += 1
+                    wait = min(OBJECT_RETRY * (2 ** (row.attempts - 1)), OBJECT_RETRY_MAX)
+                    row.next_attempt_at = self._clock() + wait
+            return "pending"
 
     def holds_data(self, learner_id: str) -> bool:
         """Whether any row of `ERASED_TABLES` is still the learner's (tests and the deletion's own check)."""
@@ -1596,18 +1739,17 @@ class SqlLearnerDataRepository:
 
     @staticmethod
     def _lock(s: Session, learner_id: str) -> None:
-        """Lock what a request writing for the learner locks, in the same order (see `_guard`): the learner's task
-        rows (by id), then the learner row, then their cycle rows. On SQLite, which locks the whole database, the
-        first statement is a write so that the transaction holds the write lock from the start. On PostgreSQL two
-        deletions of one learner first take a lock of their own, one after the other: otherwise a task queued
-        between the first one's task locks and its learner lock would be locked by the second one first, and each
-        would wait for the other."""
+        """Lock what a request writing for the learner locks, in the same order (see `_guard`): on PostgreSQL first
+        the learner's deletion lock, exclusively (every guarded write holds it shared, so the deletion waits for the
+        writes in flight and the later ones wait for it; two deletions of one learner take turns), then the task
+        rows (by id), the learner row and the cycle rows. On SQLite, which locks the whole database, the first
+        statement is a write so that the transaction holds the write lock from the start."""
         dialect = s.get_bind().dialect.name
         if dialect == "sqlite":
             s.execute(update(LearnerRow).where(LearnerRow.learner_id == learner_id).values(version=LearnerRow.version))
         elif dialect == "postgresql":
             s.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                      {"key": f"learner-data-deletion:{learner_id}"})
+                      {"key": _deletion_lock_key(learner_id)})
         s.execute(select(TaskRow.task_id).where(TaskRow.learner_id == learner_id).order_by(TaskRow.task_id)
                   .with_for_update())
         s.execute(select(LearnerRow.learner_id).where(LearnerRow.learner_id == learner_id).with_for_update())
@@ -1627,24 +1769,32 @@ class SqlLearnerDataRepository:
         if leased_task or active_job or driven_cycle:
             raise LearnerDataBusy()
 
-    def _plan(self, s: Session, ids: _LearnerIds) -> LearnerObjects:
-        """The objects to delete with the learner. An object in the content-addressed area is shared by identical
-        bytes: it is kept when an artifact outside the learner's has the same content hash. Any other object is
-        under a key of the learner's own task or cycle."""
-        rows = [(r.content_hash, r.body) for chunk in _chunks(ids.owners)
-                for r in s.execute(select(ArtifactRow.content_hash, ArtifactRow.body)
-                                   .where(ArtifactRow.task_id.in_(chunk)))]
-        found: dict[str, None] = {}
-        shared: set[str] = set()
-        for content_hash, body in rows:
-            uri = json.loads(body).get("uri")
-            if not uri or uri in found or uri in shared:
-                continue
-            if CONTENT_ADDRESSED in uri and self._referenced_elsewhere(s, content_hash, ids.owners):
-                shared.add(uri)
-            else:
-                found[uri] = None
-        return LearnerObjects(delete=tuple(found), shared=len(shared))
+    @staticmethod
+    def _uris(s: Session, ids: _LearnerIds) -> dict[str, str]:
+        """Every object the learner's artifacts and holds point at, with its content hash ("" when only a hold names
+        it and it is not content-addressed)."""
+        found: dict[str, str] = {}
+        for chunk in _chunks(ids.owners):
+            for content_hash, body in s.execute(select(ArtifactRow.content_hash, ArtifactRow.body)
+                                                .where(ArtifactRow.task_id.in_(chunk))):
+                uri = json.loads(body).get("uri")
+                if uri:
+                    found.setdefault(uri, content_hash)
+            for uri in s.scalars(select(ObjectHoldRow.uri).where(ObjectHoldRow.owner_id.in_(chunk))):
+                found.setdefault(uri, _hash_of(uri))
+        return found
+
+    @staticmethod
+    def _referenced(s: Session, uri: str, content_hash: str, *, exclude: list[str]) -> bool:
+        """Whether a hold or an artifact row of an owner not in `exclude` points at `uri`."""
+        holds = select(ObjectHoldRow.owner_id).where(ObjectHoldRow.uri == uri)
+        rows = select(ArtifactRow.artifact_id).where(ArtifactRow.body.like(_field_pattern("uri", uri), escape="\\"))
+        if content_hash:
+            rows = rows.where(ArtifactRow.content_hash == content_hash)  # the index narrows the scan
+        for chunk in _chunks(exclude):
+            holds = holds.where(ObjectHoldRow.owner_id.not_in(chunk))
+            rows = rows.where(ArtifactRow.task_id.not_in(chunk))
+        return (s.execute(holds.limit(1)).first() is not None) or (s.execute(rows.limit(1)).first() is not None)
 
     @staticmethod
     def _ids(s: Session, learner_id: str) -> _LearnerIds:
@@ -1668,12 +1818,13 @@ class SqlLearnerDataRepository:
             goals=ids(LearningGoalRow.goal_id, LearningGoalRow.learner_id == learner_id),
             items=items, attempts=list(attempts))
 
-    @staticmethod
-    def _referenced_elsewhere(s: Session, content_hash: str, owners: list[str]) -> bool:
-        query = select(ArtifactRow.artifact_id).where(ArtifactRow.content_hash == content_hash)
-        for chunk in _chunks(owners):
-            query = query.where(ArtifactRow.task_id.not_in(chunk))
-        return s.execute(query.limit(1)).first() is not None
+
+def _hash_of(uri: str) -> str:
+    """The content hash in a content-addressed object's key (objects/sha256/ab/<sha256>.ext), else ""."""
+    if CONTENT_ADDRESSED not in uri:
+        return ""
+    name = uri.rsplit("/", 1)[-1]
+    return name.split(".", 1)[0]
 
 
 def _chunks(values: list[str]) -> list[list[str]]:

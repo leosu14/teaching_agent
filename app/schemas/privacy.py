@@ -26,14 +26,6 @@ class LearnerDataBusy(Exception):
         super().__init__("the learner has work in progress; wait for it to finish or cancel it, then delete again")
 
 
-class ObjectDeletionFailed(Exception):
-    """A stored object could not be deleted (503). Nothing was removed from the database, so a retry finds every
-    object again; the objects already deleted stay deleted."""
-
-    def __init__(self) -> None:
-        super().__init__("the stored files could not all be deleted; nothing else was deleted, try again")
-
-
 class LearnerDataDeletion(Schema):
     """The receipt of a deletion: counts only, nothing of the deleted data."""
 
@@ -43,4 +35,6 @@ class LearnerDataDeletion(Schema):
     objects_deleted: int = Field(ge=0, description="Stored files (lesson text, images, audio, slides, video) deleted.")
     objects_kept_shared: int = Field(
         ge=0, description="Files left in place because another learner's lesson holds the identical bytes.")
+    objects_pending: int = Field(
+        default=0, ge=0, description="Files the store could not delete yet: they are retried until they are deleted.")
     retained: list[str] = Field(default_factory=lambda: list(RETAINED_RECORDS))

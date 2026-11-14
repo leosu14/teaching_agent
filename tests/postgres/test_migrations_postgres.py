@@ -11,11 +11,9 @@ PostgreSQL's spelling); and the application runs in `migrations` mode on the mig
 from __future__ import annotations
 
 import os
-import uuid
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import make_url
 
 from app.config.settings import Settings
 from app.providers.llm.mock import MockLLMProvider
@@ -23,26 +21,14 @@ from app.providers.llm.mock_responders import default_responders
 from app.schemas.learner import LearnerProfileInput
 from app.services.container import build_container
 from app.storage.db import create_db, dispose
-from app.storage.migrate import BASELINE, SchemaNotCurrent, current_revision, schema_differences, upgrade
+from app.storage.migrate import SchemaNotCurrent, current_revision, schema_differences, upgrade
+
 from app.storage.orm import Base
 from tests.conftest import LEARNER
 
 URL = os.environ.get("TA_TEST_POSTGRES_URL")
+HEAD = "0002_object_holds"  # the newest revision: object holds and the object-deletion queue (MVP item 9)
 pytestmark = pytest.mark.skipif(not URL, reason="set TA_TEST_POSTGRES_URL to run the PostgreSQL migration tests")
-
-
-@pytest.fixture
-def fresh_db():
-    """The URL of a new, empty database, dropped after the test."""
-    name = f"ta_mig_{uuid.uuid4().hex[:12]}"
-    admin = create_engine(URL, isolation_level="AUTOCOMMIT")
-    with admin.connect() as conn:
-        conn.execute(text(f'CREATE DATABASE "{name}"'))
-    url = make_url(URL).set(database=name).render_as_string(hide_password=False)
-    yield url
-    with admin.connect() as conn:
-        conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-    admin.dispose()
 
 
 def state(url: str) -> tuple[str | None, list]:
@@ -56,8 +42,8 @@ def state(url: str) -> tuple[str | None, list]:
 
 def test_the_baseline_on_postgresql_is_exactly_the_orm_schema(fresh_db) -> None:
     report = upgrade(fresh_db)
-    assert (report.after, report.adopted) == (BASELINE, False)
-    assert state(fresh_db) == (BASELINE, [])
+    assert (report.after, report.adopted) == (HEAD, False)
+    assert state(fresh_db) == (HEAD, [])
     engine = create_engine(fresh_db)
     indexes = {i["name"]: i for i in inspect(engine).get_indexes("task_jobs")}
     assert indexes["uq_task_jobs_active"]["unique"]  # the partial unique index the job queue relies on
@@ -65,7 +51,7 @@ def test_the_baseline_on_postgresql_is_exactly_the_orm_schema(fresh_db) -> None:
         where = conn.execute(text("SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_task_jobs_active'")).scalar()
     assert "WHERE" in where and "QUEUED" in where
     engine.dispose()
-    assert upgrade(fresh_db).describe() == f"already at {BASELINE}"
+    assert upgrade(fresh_db).describe() == f"already at {HEAD}"
 
 
 def test_a_create_all_database_from_before_item_2_is_adopted(fresh_db) -> None:
@@ -78,7 +64,7 @@ def test_a_create_all_database_from_before_item_2_is_adopted(fresh_db) -> None:
         conn.execute(text("INSERT INTO learners (learner_id, updated_at, body) VALUES ('kept', now(), '{}')"))
     engine.dispose()
     report = upgrade(fresh_db)
-    assert report.adopted and state(fresh_db) == (BASELINE, [])
+    assert report.adopted and state(fresh_db) == (HEAD, [])
     engine = create_engine(fresh_db)
     with engine.connect() as conn:
         assert conn.execute(text("SELECT version FROM learners WHERE learner_id = 'kept'")).scalar() == 1

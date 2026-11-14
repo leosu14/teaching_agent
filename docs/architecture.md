@@ -1021,10 +1021,15 @@ and may use httpx, which the architecture test otherwise keeps in the provider l
 ## Learner data deletion
 
 MVP item 9 ([privacy](privacy.md)). `LearnerDeletionService` (`app/services/learner_deletion.py`) deletes a
-learner's rows through `SqlLearnerDataRepository` (`app/storage/repositories.py`) and, before that transaction
-commits, their stored objects through the artifact service; it refuses while a job, a task lease or a cycle drive is
-live. Requests that write for a learner run under `learner_writes(learner_id, task_id)` (`app/schemas/lease.py`):
-each repository write checks and locks the task and learner rows first (`_guard`), in the deletion's lock order. Every table is listed in `ERASED_TABLES` or `KEPT_TABLES` (a unit test checks they cover the schema). The
+learner's rows through `SqlLearnerDataRepository` (`app/storage/repositories.py`), queueing their stored objects in
+`object_deletions` in the same transaction, then deletes the objects after the commit (`purge`), each under its
+object lock with the references re-checked; one the store refuses stays queued for the sweeper (`purge_due`). It
+refuses while a job, a task lease or a cycle drive is live. Requests that write for a learner run under
+`learner_writes(learner_id, task_id)` (`app/schemas/lease.py`): each repository write takes the learner's id lock
+(shared; the deletion's is exclusive) and checks and locks the task and learner rows first (`_guard`), in the
+deletion's lock order. A content-addressed object is held (`object_holds`) under its object lock (`_lock_object`, a
+PostgreSQL advisory lock) before it is put or reused, and its artifact row is added under that lock only once the
+object is there. Every table is listed in `ERASED_TABLES` or `KEPT_TABLES` (a unit test checks they cover the schema). The
 student app's Progress page has the "Delete my data" card; `/app/privacy.html` is the privacy notice.
 
 ## Not in this release

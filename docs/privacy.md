@@ -49,8 +49,8 @@ when a table is in neither, so a new table cannot hold learner data without deci
 ## Deleting a learner
 
 `DELETE /learners/{learner_id}` deletes everything in the table above except the spend ledger, and answers `200` with
-a receipt: rows deleted by table, objects deleted, objects kept because another learner shares them, and what was
-retained. The receipt holds counts only.
+a receipt: rows deleted by table, objects deleted, objects kept because another learner shares them, objects left
+for the sweeper to retry, and what was retained. The receipt holds counts only.
 
 | Caller | Answer |
 |---|---|
@@ -65,23 +65,36 @@ learner; signing in again starts from the welcome screen, as a new learner.
 
 `LearnerDeletionService` (`app/services/learner_deletion.py`) over `SqlLearnerDataRepository`:
 
-Everything below is one database transaction:
+The rows go in one database transaction, the files after it commits:
 
-1. **Lock.** The learner's task rows, then their learner row, then their cycle rows (`SELECT ... FOR UPDATE` on
-   PostgreSQL, after a lock that makes two deletions of one learner take turns; on SQLite the first statement is a
-   write, which holds the database's write lock).
+1. **Lock.** First a lock on the learner's id that every write for the learner takes too (shared) and the deletion
+   takes alone (exclusive), so the two take turns and two deletions of one learner wait for each other (a PostgreSQL
+   advisory lock; on SQLite the first statement is a write, which holds the database's write lock). Then the
+   learner's task rows, their learner row and their cycle rows (`SELECT ... FOR UPDATE`).
 2. **Refuse while work is in progress.** A queued or running job of one of the learner's tasks, a task under a live
    execution lease, or a learning cycle being driven: `409 LearnerDataBusy`, and nothing is deleted, no row and no
    file. A worker writing the learner's lesson at that moment would keep producing data. The learner waits, or
    cancels the task, and deletes again.
 3. **Delete the rows** of every table above but the spend ledger, including the events outside any task that name
-   the learner, one of their goals or one of their curricula (objective started, learning action selected).
-4. **Delete the objects**, still under the locks: every object an artifact of the learner's tasks and cycles points
-   at, except a content-addressed object (`objects/sha256/...`) that an artifact of someone else also holds
-   (identical bytes are stored once and shared: the same picture in two lessons). If the store refuses one, the
-   transaction rolls back and the request fails with `503 ObjectDeletionFailed`: no row is deleted, so a retry finds
-   every remaining object again through the rows (the objects already deleted stay deleted).
-5. **Commit.**
+   the learner, one of their goals or one of their curricula (objective started, learning action selected), and the
+   learner's object holds (below).
+4. **Queue the files**: every object the learner's artifacts and holds point at goes in `object_deletions`, in the
+   same transaction. Then **commit**. If anything fails before the commit, nothing is deleted, no row and no file.
+5. **Delete the files**, after the commit, one by one, each in a transaction of its own under that object's lock
+   (below): if nothing references the object any more, it is deleted and its queue entry removed; if something does
+   (another learner's lesson uses the same bytes), it is kept and the entry removed. If the store refuses one, the
+   entry stays and the request still answers `200`, with `objects_pending` in the receipt; the worker's sweeper
+   retries it (after 30 s, then doubling up to an hour) until it goes. Deleting an object that is already gone counts
+   as done, so a retry is safe.
+
+**Shared objects.** Lesson media are content-addressed (`objects/sha256/...`): identical bytes are stored once and
+shared, the same picture in two lessons. A lesson records a hold on such an object (`object_holds`: the object and
+the task) before it puts or reuses it, and adds the artifact row only after checking that the object is there; both
+under the object's lock, the same lock the file deletion takes to re-check the references (a PostgreSQL advisory lock
+on the object's uri, shared by every API and worker process and every app instance; on SQLite the database's write
+lock). So a deletion and another learner's lesson using the same object take turns: either the hold commits first,
+and the deletion sees it and keeps the object, or the deletion's check and delete commit first, and the lesson's put
+then finds the object gone and writes it again. No artifact row points at a deleted object.
 
 **Requests at the same moment.** Grading an answer, a teaching session, queueing a lesson, a learning cycle, a goal
 and joining a class write for the learner without a task lease, so the in-progress check cannot see them. Each of
@@ -91,7 +104,18 @@ in `app/storage/repositories.py`). So either the write commits first, and the de
 with the rest, or the deletion commits first, and the write and every later one of that request are refused: the
 request answers the uniform `404` and stores nothing. A file the request had already put for an artifact whose row
 is then refused is deleted again at once, so no file holds what the learner wrote. A lesson queued at the same moment
-is either seen (the deletion answers `409` and deletes nothing) or refused after it (`404`).
+is either seen (the deletion answers `409` and deletes nothing) or refused after it (`404`). The same holds for
+registering an assessment item, for the next action (which stores curriculum progress and publishes events naming
+the goal), and for the sweeper's recovery of a task left mid-run: none writes once the deletion has committed.
+
+A lesson may be queued for a learner who has not sent their profile yet (no learner row); its writes are then checked
+against its task row only, which the deletion deletes with the rest.
+
+**Lock order.** Every write for a learner takes the learner's id lock first (shared), then the task row and the
+learner row, then, for an object, the object's lock; the deletion takes the id lock (exclusive) first, then the same
+rows. The file deletion takes only the object's lock, after the rows' transaction has committed. Because everyone
+takes the locks in that order, two of them cannot wait for each other (no deadlock); a change that takes a lock out
+of this order must say why it cannot deadlock.
 
 A worker that still has the learner's task in memory cannot bring data back: its writes are fenced by the task row,
 which is gone (`LeaseLost`), and profile and curriculum saves are version-checked against rows that no longer exist.
@@ -107,19 +131,16 @@ The deletion's log line records counts, not the learner id.
 
 ### Known limits
 
-- **Unused image candidates.** The visual step stores the images it fetches or generates before it chooses one; the
-  ones it does not choose are content-addressed pictures of the topic that no row ties to anyone, so a deletion
-  cannot find them. They are not linked to the learner.
 - **The generated-video ledger** (`records/video-generations/`, only when generated clips are on) is keyed by the
-  clip request, not by learner, and is reused across lessons so a paid clip is not generated twice. The ledger and
-  the provider's original clip files it records are not deleted with a learner; the learner's own artifacts (the
-  lesson video, the clips in it) are, and a ledger entry whose object is gone is generated again when next needed.
-- **Reads during the deletion.** A page of the learner's open in another tab while the deletion runs can find a file
-  gone a moment before its record (the files go just before the commit); it then answers that the lesson is not
-  found, as it will once the deletion has committed.
-- **A shared object deleted at the moment another lesson stores the same bytes** could leave that lesson's artifact
-  pointing at a missing object; the artifact service then reports it missing. Identical bytes are rare outside the
-  mock providers.
+  clip request, not by learner, and is reused across lessons so a paid clip is not generated twice. Its entries are
+  not deleted with a learner. The provider's clip files it records are held by every lesson that used them (as are
+  the image candidates the visual step stores before it chooses one), and deleted with the last learner holding them;
+  a ledger entry whose object is gone is generated again when next needed.
+- **Files after the commit.** The files go just after the rows, so for a moment (or, when the store refuses, until
+  the sweeper's retry succeeds) a file can still be in the store although nothing leads to it: every request for it
+  already answers `404`. The receipt's `objects_pending` says how many are left to the sweeper.
+- **Reads during the deletion.** A page of the learner's open in another tab while the deletion runs reads the rows
+  until the deletion commits, and the uniform `404` after it.
 - **No export and no automatic retention.** Data is kept until the learner deletes it. Backups and object-store
   versions are the operator's to manage (above).
 - **The sign-in account** belongs to the identity provider; deleting a learner's data does not touch it.

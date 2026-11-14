@@ -242,7 +242,8 @@ counts), a teacher of their class gets `403`, anyone else the uniform `404` (the
 and `tests/e2e/test_learner_deletion_api.py` checks each case leaves the learner's data as it was).
 
 - **Nothing of the deleted data in the answer.** The receipt carries table names and counts; the store's error on a
-  failed object deletion is logged, never returned (`503` with a fixed message). The log line has no learner id.
+  failed object deletion is logged, never returned (the object stays queued and the sweeper retries it; the receipt
+  counts it in `objects_pending`). The log line has no learner id.
 - **No resurrection.** The deletion refuses (`409`) while a worker may write for the learner, and a worker's later
   fenced writes fail because the task row they are fenced by is gone (`tests/postgres/test_learner_deletion_postgres.py`).
   A request that writes for the learner without a lease (grading an answer, a teaching session, queueing a lesson, a
@@ -250,7 +251,13 @@ and `tests/e2e/test_learner_deletion_api.py` checks each case leaves the learner
   the learner rows still exist, and locks them in the order the deletion does; a deletion that committed first makes
   every later write fail (`LearnerDataGone`, the uniform `404`), and one that came second waits and deletes what the
   write committed. A file put for a refused artifact row is removed again (`tests/e2e/test_learner_deletion_race.py`,
-  `tests/postgres/test_learner_deletion_race_postgres.py`).
+  `tests/postgres/test_learner_deletion_race_postgres.py`). The same check guards registering an assessment item, the
+  next action and the sweeper's recovery jobs (`tests/e2e/test_learner_deletion_write_window.py` lands a deletion
+  before each write of every protected route).
+- **Shared objects stay whole.** A content-addressed object another learner's lesson uses is never deleted under it:
+  holds and the file deletion's re-check take the object's lock (a PostgreSQL advisory lock, across processes and
+  instances), and files are deleted only after the rows' commit (`tests/postgres/test_shared_object_race_postgres.py`,
+  `tests/integration/test_learner_deletion_flow.py`).
 - **Exact matching.** Events outside a task are found by `"learner_id":"<id>"`, or the id of one of the learner's
   goals or curricula, in their JSON with LIKE wildcards escaped, so a learner id with `_` or `%` never takes another
   learner's events with it (tested on SQLite and PostgreSQL).

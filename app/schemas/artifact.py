@@ -54,6 +54,16 @@ class ArtifactType(str, Enum):
     LEARNING_CYCLE = "LEARNING_CYCLE"
 
 
+class ObjectMissing(RuntimeError):
+    """An artifact row was refused because the stored object it would point at is gone (a shared object deleted with
+    the last learner holding it, between this writer's put and its row). Nothing was written; storing the content again
+    writes it afresh."""
+
+    def __init__(self, uri: str) -> None:
+        super().__init__(f"the stored object for this artifact is gone: {uri}")
+        self.uri = uri
+
+
 class Artifact(Schema):
     artifact_id: str
     task_id: str

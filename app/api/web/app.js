@@ -790,8 +790,7 @@ function dataCard() {
           renderDeleted();
         } catch (err) {
           const text = err.status === 409
-            ? "A lesson is being prepared right now. Wait until it is ready, or stop it, then try again."
-            : err.status === 503 ? "Not everything could be deleted, so nothing was. Try again in a moment." : null;
+            ? "A lesson is being prepared right now. Wait until it is ready, or stop it, then try again." : null;
           feedback.replaceChildren(text ? h("div", { class: "error", role: "alert", "data-testid": "error" }, text) : errorBox(err));
           button.disabled = false;
         }

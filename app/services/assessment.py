@@ -134,6 +134,13 @@ class AssessmentService:
         m = self._material(item.lesson_id)
         if not any(s.concept_id == item.concept_id for s in m.lesson.sections):
             raise InvalidAssessmentRequest(f"the lesson does not teach concept {item.concept_id}")
+        # The item, its definition artifact (a row and a file) and its events belong to the lesson: refused once the
+        # lesson is deleted, checked inside each write's own transaction (LearnerDataGone, 404). The lesson task is
+        # what matters here, so a learner without a profile row is no deletion.
+        with learner_writes(m.task.learner_id, m.task.task_id, profile=False):
+            return self._register(data, item, m)
+
+    def _register(self, data: RegisterAssessmentItem, item: AssessmentItem, m: LessonMaterial) -> AssessmentItem:
         rubric = data.rubric
         if rubric is None and item.rubric_id is not None:
             rubric = self._repo.rubric(item.rubric_id)
