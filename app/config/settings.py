@@ -324,8 +324,18 @@ class Settings(BaseSettings):
             gaps = self.pricing_gaps()
         except ConfigError as exc:
             return [f"TA_BUDGET_TOTAL_MAX_COST_USD: the prices cannot be checked: {exc}"]
-        return [f"TA_BUDGET_TOTAL_MAX_COST_USD needs a price for every paid capability in use; set {gap}"
-                for gap in gaps]
+        from app.config.billing import billing_problems
+        from app.schemas.providers import Capability
+
+        p = self.providers
+        unbounded = [] if p.offline else billing_problems(
+            tts_chain=p.chain(Capability.TTS), tts_model=p.tts_model, image_chain=p.chain(Capability.IMAGE),
+            image_model=p.image_model, image_quality=p.image_quality, image_size=p.image_size,
+            image_input_price_per_mtok=p.image_input_price_per_mtok)
+        return ([f"TA_BUDGET_TOTAL_MAX_COST_USD needs a price for every paid capability in use; set {gap}"
+                 for gap in gaps]
+                + [f"TA_BUDGET_TOTAL_MAX_COST_USD cannot bound this request before it is sent: {problem}"
+                   for problem in unbounded])
 
     def deployment_problems(self) -> list[str]:
         """Why this configuration is not a production deployment (an empty list: it is). Never shows a secret."""

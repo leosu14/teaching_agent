@@ -193,11 +193,27 @@ and the same cap, scans and cleanup; then once more with `--fail-after lesson`, 
 
 **Setting up `staging` (once, by the repository owner):** Settings, Environments, New environment `staging`;
 deployment branches: `main` only (a required reviewer is optional). Secrets: `OPENAI_API_KEY`, `TAVILY_API_KEY`.
-Variables: `LLM_MODEL` (the OpenAI model), `LLM_INPUT_PRICE_PER_MTOK`, `LLM_OUTPUT_PRICE_PER_MTOK`,
-`TTS_PRICE_PER_MCHAR`, `IMAGE_PRICE_PER_IMAGE`, `SEARCH_PRICE_PER_REQUEST` (USD, at or above the list prices of the
-models used; for Tavily, the price of the credits one request uses), `TA_VENDOR_CAPS` (for example
-`openai=20,tavily=10`, the hard caps set in each vendor's console), and optionally `TTS_MODEL` and `IMAGE_MODEL`. A
-missing or invalid price, model or vendor cap stops the run before anything starts (exit code 2).
+Variables: the models and billing parameters, their prices (below), and `TA_VENDOR_CAPS` (for example
+`openai=20,tavily=10`, the hard caps set in each vendor's console). A missing or invalid price, model, parameter or
+vendor cap stops the run before anything starts (exit code 2), and a combination the prices cannot bound stops the
+API and the worker at startup (`check` names it).
+
+**Prices.** Every price is USD, copied from the vendor's own price list for exactly the model and parameters below
+(OpenAI: https://openai.com/api/pricing, "Text tokens", "Audio" and "Image generation"; Tavily:
+https://docs.tavily.com/documentation/api-credits), at or above it; the repository holds no rates.
+
+| Variable | Unit | What it prices |
+|---|---|---|
+| `LLM_MODEL` | | The OpenAI chat model (base name, e.g. as listed; dated snapshots in replies are priced as it) |
+| `LLM_INPUT_PRICE_PER_MTOK` / `LLM_OUTPUT_PRICE_PER_MTOK` | USD per 1M tokens | `LLM_MODEL`'s input (cached input is charged at this price too) and output tokens |
+| `TTS_MODEL` | | `tts-1` or `tts-1-hd` (billed per character; a token-billed `gpt-4o*-tts` model is refused) |
+| `TTS_PRICE_PER_MCHAR` | USD per 1M characters | `TTS_MODEL`'s speech price; speed and voice do not change it |
+| `IMAGE_MODEL`, `IMAGE_QUALITY`, `IMAGE_SIZE` | | e.g. `gpt-image-1` at `low`/`medium`/`high` and `1024x1024`/`1536x1024`/`1024x1536`, or `dall-e-3` at `standard`/`hd` and its sizes; every image is generated at that quality and size |
+| `IMAGE_PRICE_PER_IMAGE` | USD per image | The listed price of one image of `IMAGE_MODEL` at `IMAGE_QUALITY` and `IMAGE_SIZE` (for GPT image models, the image output tokens) |
+| `IMAGE_INPUT_PRICE_PER_MTOK` | USD per 1M tokens | GPT image models only: the prompt's text input tokens |
+| `SEARCH_PRICE_PER_REQUEST` | USD per request | The price of one Tavily credit (the run pins `SEARCH_DEPTH=basic`, one credit per search) |
+
+Set `TTS_MODEL`, `IMAGE_MODEL`, `IMAGE_QUALITY` and `IMAGE_SIZE` before the prices, and price those exact values.
 
 ## Known limits
 

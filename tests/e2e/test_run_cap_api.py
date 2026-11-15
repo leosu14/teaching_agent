@@ -71,6 +71,7 @@ def test_a_lesson_and_a_graded_answer_are_charged_to_the_cap_and_stay_under_it(t
         assert settled == sum(e.final_cost_microusd or 0 for e in paid)
         by_capability = {e.capability for e in paid}
         assert {"llm", "tts", "image", "search"} <= by_capability
+        assert all(e.cost_source == "priced" for e in paid if e.capability == "llm")  # reconciled from usage
         for e in paid:
             assert e.cost_source != "unpriced", e
             if e.capability in ("tts", "image", "search"):

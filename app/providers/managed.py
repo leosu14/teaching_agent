@@ -11,6 +11,8 @@ is always recorded as a provider.fallback event. Results carry the provider that
 from __future__ import annotations
 
 import json
+import logging
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Generic, TypeVar
 
@@ -39,6 +41,8 @@ from app.schemas.generative_video import (
 from app.schemas.providers import Capability, HealthStatus, ProviderUsage
 from app.schemas.spend import Estimate
 
+log = logging.getLogger(__name__)
+
 P = TypeVar("P", bound=Provider)
 T = TypeVar("T")
 CostFn = Callable[[str, TokenUsage], float | None]  # (model, usage) -> estimated cost in USD, None when unpriced
@@ -60,6 +64,22 @@ def input_token_bound(request: LLMRequest) -> int:
     if request.response_schema is not None:
         size += len(json.dumps(request.response_schema, ensure_ascii=False).encode("utf-8"))
     return size + TOKENS_PER_MESSAGE * (len(request.messages) + 1) + TOKENS_PER_REQUEST
+
+
+_SNAPSHOT = re.compile(r"-(\d{4}-\d{2}-\d{2}|\d{4})$")  # OpenAI's dated snapshots: -2024-07-18, -0125
+
+
+def pricing_model(requested: str, reported: str | None) -> str | None:
+    """The model a response is priced as: the requested model (the routed target priced at startup) when the
+    response names it or one of its dated snapshots (OpenAI answers `gpt-4o-mini` with `gpt-4o-mini-2024-07-18`).
+    None when it names another model: its usage is not priced, so the attempt keeps its upper-bound reservation
+    (fail closed, never a guess)."""
+    if not reported or reported == requested:
+        return requested
+    match = _SNAPSHOT.search(reported)
+    if match and reported[:match.start()] == requested:
+        return requested
+    return None
 
 
 def llm_estimate(request: LLMRequest, cost: CostFn | None) -> Estimate:
@@ -161,7 +181,11 @@ class ManagedLLMProvider(_Delegating, LLMProvider):
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
         def usage(response: LLMResponse, request_id: str) -> ProviderUsage:
-            cost = self._cost(response.model, response.usage) if self._cost else None
+            priced_as = pricing_model(request.model, response.model)
+            cost = self._cost(priced_as, response.usage) if self._cost and priced_as else None
+            if priced_as is None:
+                log.warning("LLM response names model %r, not %r or a dated snapshot of it: its usage is not "
+                            "priced, the reservation stands", response.model, request.model)
             return ProviderUsage(
                 provider=self.name, capability=Capability.LLM, operation="generate", model=response.model,
                 request_id=request_id, vendor_request_id=response.vendor_request_id,
@@ -222,10 +246,16 @@ class ManagedTTSProvider(_Delegating, TTSProvider):
 
 
 class ManagedImageGenerationProvider(_Delegating, ImageGenerationProvider):
+    """Priced per image at its pinned quality and size (`price_per_image`), plus, for a model that bills the prompt
+    (GPT image models), its text input tokens (`input_price_per_mtok`): reserved at the prompt's UTF-8 bytes plus
+    framing, an upper bound of its tokens, and settled at the input tokens the vendor reports when it does
+    (app/config/billing.py)."""
+
     def __init__(self, chain: Sequence[ImageGenerationProvider], invoker: ProviderInvoker, *,
-                 price_per_image: float | None = None) -> None:
+                 price_per_image: float | None = None, input_price_per_mtok: float | None = None) -> None:
         self._chain = _Chain(chain, invoker, Capability.IMAGE)
         self.price_per_image = price_per_image
+        self.input_price_per_mtok = input_price_per_mtok
         primary = self._primary = chain[0]
         self.name = primary.name
         self.requires_network = primary.requires_network
@@ -237,20 +267,30 @@ class ManagedImageGenerationProvider(_Delegating, ImageGenerationProvider):
     def providers(self) -> list[ImageGenerationProvider]:
         return list(self._chain.providers)
 
+    def image_cost(self, images: int, prompt_tokens: int) -> float | None:
+        cost = priced(max(images, 1), self.price_per_image)
+        if cost is None or self.input_price_per_mtok is None:
+            return cost
+        return round(cost + prompt_tokens * self.input_price_per_mtok / 1_000_000, 6)
+
     async def generate(self, request: ProviderImageRequest) -> GeneratedImage:
+        bound = len(request.prompt.encode("utf-8")) + TOKENS_PER_REQUEST
+
         def usage(p: ImageGenerationProvider, image: GeneratedImage, request_id: str) -> ProviderUsage:
+            vendor = image.metadata.get("vendor_usage") or {}
+            reported = vendor.get("input_tokens")
+            tokens = reported if isinstance(reported, int) and reported >= 0 else bound
+            price = self.image_cost(image.usage.images, tokens)
             return ProviderUsage(
                 provider=p.name, capability=Capability.IMAGE, operation="generate", model=image.model,
                 request_id=request_id, vendor_request_id=image.metadata.get("vendor_request_id"),
-                image_count=image.usage.images,
-                actual_cost=at_least_priced(image.usage.cost_usd, priced(max(image.usage.images, 1),
-                                                                         self.price_per_image)),
-                estimated_cost=priced(max(image.usage.images, 1), self.price_per_image),
+                image_count=image.usage.images, input_tokens=reported if tokens == reported else None,
+                actual_cost=at_least_priced(image.usage.cost_usd, price), estimated_cost=price,
                 currency=_currency(image.usage.cost_usd, self.price_per_image),
             )
 
         provider, image = await self._chain.run("generate", lambda p: p.generate(request), usage,
-                                                estimate=Estimate(cost_usd=priced(1, self.price_per_image)))
+                                                estimate=Estimate(cost_usd=self.image_cost(1, bound)))
         return image.model_copy(update={"provider": provider.name})
 
 

@@ -8,10 +8,11 @@
 #
 # The `staging` environment holds:
 #   secrets    OPENAI_API_KEY, TAVILY_API_KEY
-#   variables  LLM_MODEL, LLM_INPUT_PRICE_PER_MTOK, LLM_OUTPUT_PRICE_PER_MTOK, TTS_PRICE_PER_MCHAR,
-#              IMAGE_PRICE_PER_IMAGE, SEARCH_PRICE_PER_REQUEST (USD, at or above the vendors' list prices),
-#              TA_VENDOR_CAPS (e.g. openai=20,tavily=10: the hard caps set in each vendor's console),
-#              optionally TTS_MODEL, IMAGE_MODEL
+#   variables  LLM_MODEL, TTS_MODEL (per-character: tts-1 or tts-1-hd), IMAGE_MODEL, IMAGE_QUALITY, IMAGE_SIZE,
+#              and their prices in each model's billing units (docs/deployment.md, "Prices"):
+#              LLM_INPUT_PRICE_PER_MTOK, LLM_OUTPUT_PRICE_PER_MTOK, TTS_PRICE_PER_MCHAR, IMAGE_PRICE_PER_IMAGE,
+#              IMAGE_INPUT_PRICE_PER_MTOK (GPT image models), SEARCH_PRICE_PER_REQUEST;
+#              TA_VENDOR_CAPS (e.g. openai=20,tavily=10: the hard caps set in each vendor's console)
 name: live-smoke
 
 on:
@@ -78,6 +79,9 @@ jobs:
           LLM_OUTPUT_PRICE_PER_MTOK: ${{ vars.LLM_OUTPUT_PRICE_PER_MTOK }}
           TTS_PRICE_PER_MCHAR: ${{ vars.TTS_PRICE_PER_MCHAR }}
           IMAGE_PRICE_PER_IMAGE: ${{ vars.IMAGE_PRICE_PER_IMAGE }}
+          IMAGE_INPUT_PRICE_PER_MTOK: ${{ vars.IMAGE_INPUT_PRICE_PER_MTOK }}
+          IMAGE_QUALITY: ${{ vars.IMAGE_QUALITY }}
+          IMAGE_SIZE: ${{ vars.IMAGE_SIZE }}
           SEARCH_PRICE_PER_REQUEST: ${{ vars.SEARCH_PRICE_PER_REQUEST }}
           TA_VENDOR_CAPS: ${{ vars.TA_VENDOR_CAPS }}
           TTS_MODEL: ${{ vars.TTS_MODEL }}

@@ -342,7 +342,9 @@ def production(**env: object) -> Settings:
                 openai_api_key="sk-test-0123456789", tts_provider="openai", image_provider="openai",
                 search_provider="tavily", tavily_api_key="tvly-test-0123456789",
                 llm_input_price_per_mtok=2.5, llm_output_price_per_mtok=10.0, tts_price_per_mchar=15.0,
-                image_price_per_image=0.04, search_price_per_request=0.008)
+                image_price_per_image=0.04, search_price_per_request=0.008, tts_model="tts-1",
+                image_model="gpt-image-1", image_quality="low", image_size="1024x1024",
+                image_input_price_per_mtok=5.0)  # arbitrary test prices, not vendor rates
     base.update(env)
     return Settings(providers=ProviderSettings(**base), budget_total_max_cost_usd=1.0)
 

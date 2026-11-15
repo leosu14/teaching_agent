@@ -89,7 +89,8 @@ class ProviderSettings(BaseSettings):
     tts_base_url: str | None = None
     tts_languages: str = "en-US,en-GB,es-ES,es-MX,fr-FR,de-DE,zh-CN"  # languages a multilingual voice is offered in
     # USD per million characters synthesized, by any provider of the chain; unset: cost is "unknown". Characters are
-    # known before the request, so the reservation is exact.
+    # known before the request, so the reservation is exact, for a model billed per character (app/config/billing.py;
+    # under the run-wide cap a token-billed model is refused).
     tts_price_per_mchar: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
     # --- Image generation and image search -----------------------------------------------------------------
@@ -99,8 +100,17 @@ class ProviderSettings(BaseSettings):
     image_model: str | None = None
     image_base_url: str | None = None
     image_search_provider: str = MOCK
-    # USD per generated image, by any provider of the chain; unset: cost is "unknown".
+    # The quality and size every OpenAI image is generated at (then cropped and resized to the requested size).
+    # Unset: the vendor's default quality and the size closest to each image's aspect ratio. They fix the per-image
+    # price, so the run-wide cap requires both (app/config/billing.py).
+    image_quality: str | None = None
+    image_size: str | None = None
+    # USD per generated image at IMAGE_QUALITY and IMAGE_SIZE, by any provider of the chain (for GPT image models:
+    # the image output tokens); unset: cost is "unknown".
     image_price_per_image: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # USD per million prompt text input tokens (GPT image models bill the prompt too), reserved at the prompt's UTF-8
+    # bytes, an upper bound of its tokens.
+    image_input_price_per_mtok: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
     # --- Web search ---------------------------------------------------------------------------------------
     search_provider: str = MOCK
@@ -302,6 +312,10 @@ class ProviderSettings(BaseSettings):
             problems.append("LLM_FALLBACK_PROVIDER and LLM_FALLBACK_MODEL must be set together")
         if self.llm_fallback_provider and not self.llm_provider:
             problems.append("LLM_FALLBACK_PROVIDER needs LLM_PROVIDER (or define fallbacks in config/routing.toml)")
+        if self.image_quality is not None or self.image_size is not None:
+            from app.config.billing import image_option_problems
+            if any(x != MOCK for x in self.chain(Capability.IMAGE)):
+                problems += image_option_problems(self.image_model, self.image_quality, self.image_size)
         if (self.llm_input_price_per_mtok is None) != (self.llm_output_price_per_mtok is None):
             problems.append("LLM_INPUT_PRICE_PER_MTOK and LLM_OUTPUT_PRICE_PER_MTOK must be set together")
         if self.llm_input_price_per_mtok is not None and not self.llm_model:

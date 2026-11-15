@@ -40,6 +40,7 @@ import signal
 import subprocess
 import sys
 import traceback
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote, quote_plus
@@ -67,8 +68,12 @@ LIVE_REQUEST = "Create a short A1 Spanish lesson about greetings and introductio
 # The prices and caps a live run needs, from the `staging` environment's variables (not secrets).
 LIVE_PRICE_VARS = ("LLM_INPUT_PRICE_PER_MTOK", "LLM_OUTPUT_PRICE_PER_MTOK", "TTS_PRICE_PER_MCHAR",
                    "IMAGE_PRICE_PER_IMAGE", "SEARCH_PRICE_PER_REQUEST")
+# The billing parameters a live run pins rather than leaving to a vendor default (app/config/billing.py checks the
+# combination at startup and refuses one the prices cannot bound).
+LIVE_BILLING_VARS = ("TTS_MODEL", "IMAGE_MODEL", "IMAGE_QUALITY", "IMAGE_SIZE")
 # The rehearsal prices its mock TTS, images and search too (the mock LLM models are priced in config/routing.toml),
-# so every paid capability is charged to the run-wide cap exactly as in a live run.
+# so every paid capability is charged to the run-wide cap exactly as in a live run. Arbitrary test values, not any
+# vendor's rates: the live run's prices come from the `staging` environment (docs/deployment.md).
 MOCK_PRICES = {"TTS_PRICE_PER_MCHAR": "15", "IMAGE_PRICE_PER_IMAGE": "0.04", "SEARCH_PRICE_PER_REQUEST": "0.008"}
 # Field names that hold an answer key in the application's internal schemas: never in a learner's response.
 ANSWER_KEY_FIELDS = {"expected_answer", "accepted_answers", "answer_key", "correct_answer"}
@@ -125,10 +130,19 @@ def stack_environment(*, mock: bool, max_cost: float, environ: dict[str, str]) -
         return {**env, "TEACHING_AGENT_MODE": "offline", "TA_COURSES": "", "TA_VENDOR_CAPS": "",
                 "LLM_PROVIDER": "", "LLM_MODEL": "", "LLM_INPUT_PRICE_PER_MTOK": "", "LLM_OUTPUT_PRICE_PER_MTOK": "",
                 "TTS_PROVIDER": "mock", "IMAGE_PROVIDER": "mock", "SEARCH_PROVIDER": "mock", "TTS_MODEL": "",
-                "IMAGE_MODEL": "", **MOCK_PRICES}
+                "IMAGE_MODEL": "", "IMAGE_QUALITY": "", "IMAGE_SIZE": "", "IMAGE_INPUT_PRICE_PER_MTOK": "",
+                **MOCK_PRICES}
     problems = [p for p in (positive_price(environ, v) for v in LIVE_PRICE_VARS) if p]
     if not environ.get("LLM_MODEL", "").strip():
         problems.append("LLM_MODEL is not set (the OpenAI model the prices are for)")
+    for var in LIVE_BILLING_VARS:
+        if not environ.get(var, "").strip():
+            problems.append(f"{var} is not set (it fixes what a request is billed; the prices are for it)")
+    image_input = None
+    if environ.get("IMAGE_MODEL", "").strip().startswith("gpt-image"):
+        image_input = positive_price(environ, "IMAGE_INPUT_PRICE_PER_MTOK")
+        if image_input:
+            problems.append(image_input + " (a GPT image model bills the prompt's input tokens too)")
     caps = environ.get("TA_VENDOR_CAPS", "")
     declared = {e.partition("=")[0].strip().lower() for e in caps.split(",") if "=" in e}
     for vendor in ("openai", "tavily"):
@@ -139,8 +153,8 @@ def stack_environment(*, mock: bool, max_cost: float, environ: dict[str, str]) -
     return {**env, "TEACHING_AGENT_MODE": "production", "TA_COURSES": LIVE_COURSE, "TA_VENDOR_CAPS": caps,
             "LLM_PROVIDER": "openai", "LLM_MODEL": environ["LLM_MODEL"].strip(),
             "TTS_PROVIDER": "openai", "IMAGE_PROVIDER": "openai", "SEARCH_PROVIDER": "tavily",
-            "TTS_MODEL": environ.get("TTS_MODEL", "").strip(), "IMAGE_MODEL": environ.get("IMAGE_MODEL", "").strip(),
-            **{v: environ[v].strip() for v in LIVE_PRICE_VARS}}
+            "IMAGE_INPUT_PRICE_PER_MTOK": environ.get("IMAGE_INPUT_PRICE_PER_MTOK", "").strip(),
+            **{v: environ[v].strip() for v in (*LIVE_PRICE_VARS, *LIVE_BILLING_VARS)}}
 
 
 # --- the provider keys: never printed, searched for everywhere --------------------------------------------------------
@@ -201,13 +215,34 @@ class Run:
     keys: Keys | None = None
     started: bool = False  # compose up was attempted: the stack must come down
     learner: str | None = None
-    learner_headers: dict | None = None
+    learner_headers: Mapping[str, str] | None = None
     deleted: bool = False
     cleaning: bool = False
     responses: list[str] = field(default_factory=list)  # every API answer body, scanned for the keys
     leaks: list[str] = field(default_factory=list)
     report: dict = field(default_factory=dict)
     cleanup_errors: list[str] = field(default_factory=list)
+
+
+class Bearer(Mapping):
+    """Request headers whose `Authorization` is a token signed afresh each time httpx reads it, so every request of
+    the run carries an unexpired identity, however long the lesson takes: the IdP's tokens live 10 minutes
+    (deploy/smoke.py, `token`), a real lesson can take longer, and polling, grading and the deletion (also cleanup's)
+    must never get a 401 for it."""
+
+    def __init__(self, key, subject: str, roles: list[str] | None = None) -> None:
+        self._key, self._subject, self._roles = key, subject, roles
+
+    def __getitem__(self, name: str) -> str:
+        if name != "Authorization":
+            raise KeyError(name)
+        return f"Bearer {smoke.token(self._key, self._subject, roles=self._roles)}"
+
+    def __iter__(self):
+        return iter(("Authorization",))
+
+    def __len__(self) -> int:
+        return 1
 
 
 def compose_command() -> list[str]:
@@ -321,16 +356,23 @@ def ledger(max_cost: float) -> dict:
             "SELECT metric, settled, reserved FROM spend_counters WHERE scope_key = 'total:all';"))}
     settled, reserved = counters.get("cost_microusd", (0, 0))
     rows = [line.split("|") for line in smoke.sql(
-        "SELECT capability, cost_source, count(*), coalesce(sum(final_cost_microusd), 0) FROM spend_entries "
+        "SELECT capability, cost_source, count(*), coalesce(sum(final_cost_microusd), 0), "
+        "coalesce(sum(estimated_cost_microusd), 0) FROM spend_entries "
         "WHERE state IN ('settled', 'unknown') GROUP BY 1, 2 ORDER BY 1, 2;")]
     left = int(smoke.sql("SELECT count(*) FROM spend_entries WHERE state = 'reserved';")[0])
     outside = int(smoke.sql("SELECT count(*) FROM spend_entries WHERE state IN ('settled', 'unknown') "
                             "AND scope_keys NOT LIKE '%\"total:all\"%';")[0])
     by_capability: dict[str, dict] = {}
-    for capability, source, count, cost in rows:
-        entry = by_capability.setdefault(capability, {"attempts": 0, "cost_usd": 0.0, "sources": {}})
+    for capability, source, count, cost, reserved_cost in rows:
+        entry = by_capability.setdefault(capability, {"attempts": 0, "cost_usd": 0.0, "reserved_usd": 0.0,
+                                                      "reconciled_usd": 0.0, "sources": {}})
         entry["attempts"] += int(count)
         entry["cost_usd"] = round(entry["cost_usd"] + int(cost) / 1_000_000, 6)
+        # reserved before dispatch (the upper bound) versus charged: from the usage the vendor reported ("priced",
+        # "reported"), or the reservation itself ("estimate": no usable usage came back)
+        entry["reserved_usd"] = round(entry["reserved_usd"] + int(reserved_cost) / 1_000_000, 6)
+        if source in ("priced", "reported"):
+            entry["reconciled_usd"] = round(entry["reconciled_usd"] + int(cost) / 1_000_000, 6)
         entry["sources"][source] = entry["sources"].get(source, 0) + int(count)
     return {"ceiling_usd": max_cost, "total_usd": round(settled / 1_000_000, 6),
             "reserved_usd": round(reserved / 1_000_000, 6), "entries_still_reserved": left,
@@ -346,6 +388,10 @@ def assert_ledger(spend: dict, *, mock: bool) -> None:
     assert spend["total_usd"] > 0, spend  # paid work was charged to the cap
     expected = {"llm", "tts", "image", "search"}
     assert expected <= set(spend["by_capability"]), spend
+    # LLM usage is reconciled from the reported tokens (priced as the configured model, also when the reply names a
+    # dated snapshot of it): an attempt left at its upper-bound reservation is only one whose usage never came back.
+    llm = spend["by_capability"]["llm"]["sources"]
+    assert llm.get("priced", 0) > 0 and llm.get("priced", 0) >= llm.get("estimate", 0), spend
     if mock:  # the rehearsal's TTS, image and search are priced like a live run's
         for capability in ("tts", "image", "search"):
             assert spend["by_capability"][capability]["cost_usd"] > 0, spend
@@ -435,9 +481,7 @@ def flow(run: Run, environment: dict[str, str]) -> None:
     key = smoke.write_secrets()
     fixture = json.loads((smoke.FIXTURES / "learner.json").read_text(encoding="utf-8"))
     lid = fixture["learner_id"] if run.mock else f"live-{secrets.token_hex(4)}"
-    me = {"Authorization": f"Bearer {smoke.token(key, lid)}"}
-    other = {"Authorization": f"Bearer {smoke.token(key, 'other-learner')}"}
-    teacher = {"Authorization": f"Bearer {smoke.token(key, 'teacher-1', roles=['teacher'])}"}
+    me, other, teacher = Bearer(key, lid), Bearer(key, "other-learner"), Bearer(key, "teacher-1", roles=["teacher"])
 
     run.started = True
     smoke.compose("up", "-d", *(["--build"] if run.build else []))

@@ -259,7 +259,7 @@ def _openai_image(settings: Settings) -> ImageGenerationProvider:
     p, key = settings.providers, _credential(settings, Capability.IMAGE, "openai")
     http = _http(settings, Capability.IMAGE, "openai", p.image_base_url or p.openai_base_url,
                  _openai_headers(p, key), key, request_id_header="X-Client-Request-Id")
-    return OpenAIImageGenerationProvider(http, model=p.image_model)
+    return OpenAIImageGenerationProvider(http, model=p.image_model, quality=p.image_quality, size=p.image_size)
 
 
 def _tavily_search(settings: Settings) -> SearchProvider:
@@ -362,7 +362,8 @@ def build_providers(settings: Settings, events: EventBus, *, llm_providers: dict
         registry=registry, selector=selector, invoker=invoker, routing=routing, llm=llm,
         tts=ManagedTTSProvider(selector.chain(Capability.TTS), invoker, price_per_mchar=p.tts_price_per_mchar),
         image_generation=ManagedImageGenerationProvider(selector.chain(Capability.IMAGE), invoker,
-                                                        price_per_image=p.image_price_per_image),
+                                                        price_per_image=p.image_price_per_image,
+                                                        input_price_per_mtok=p.image_input_price_per_mtok),
         image_search=ManagedImageSearchProvider(selector.chain(Capability.IMAGE_SEARCH)[0], invoker),
         search=ManagedSearchProvider(selector.chain(Capability.SEARCH), invoker,
                                      price_per_request=p.search_price_per_request),

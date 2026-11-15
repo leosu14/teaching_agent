@@ -153,17 +153,26 @@ stack's database is fresh, so the scope covers exactly that run.
   this estimate would pass the cap, nothing is sent and the work stops with `BudgetExceededError` (scope `total`,
   event `budget.exhausted`). Each retry attempt is reserved on its own, so retries cannot pass the cap either, and
   concurrent reservations (the API and the worker) are serialized by the counter's conditional update.
-- **Every paid capability is priced.** TTS (`TTS_PRICE_PER_MCHAR`, from the request's characters), image generation
-  (`IMAGE_PRICE_PER_IMAGE`) and search (`SEARCH_PRICE_PER_REQUEST`) are reserved at their configured price, known
-  before the request. An LLM request is reserved at a strict upper bound: the UTF-8 bytes of its system prompt,
+- **Every paid capability is priced in its own billing units** (`app/config/billing.py`). TTS is priced per
+  character (`TTS_PRICE_PER_MCHAR`), so only a model billed per character is accepted under the cap (OpenAI `tts-1`,
+  `tts-1-hd`); a `gpt-4o*-tts` model, billed by audio output tokens whose number depends on the voice and speed, is
+  refused at startup. An image is generated at a pinned `IMAGE_QUALITY` and `IMAGE_SIZE` (both required under the
+  cap; never the vendor's `auto`) and reserved at `IMAGE_PRICE_PER_IMAGE`, the price of one image at that quality and
+  size, plus, for GPT image models, the prompt's text input tokens at `IMAGE_INPUT_PRICE_PER_MTOK` (reserved at its
+  UTF-8 bytes, settled at the input tokens the vendor reports). Search is priced per request
+  (`SEARCH_PRICE_PER_REQUEST`). An LLM request is reserved at a strict upper bound: the UTF-8 bytes of its system prompt,
   messages and response schema (a byte-level tokenizer never makes more tokens than bytes) plus framing tokens, and
   its own output limit, at the configured price (cached input at the input price). A configured price is an upper
   bound by contract: a lower provider-reported cost is not charged below it.
-- **After each call** the reservation is replaced by what the provider reported, priced. Within the request's limits
+- **After each call** the reservation is replaced by what the provider reported, priced (`cost_source` `priced`).
+  An LLM reply is priced as the requested model, also when it names a dated snapshot of it (OpenAI answers
+  `gpt-4o-mini` with `gpt-4o-mini-2024-07-18`); a reply naming another model, or no usage at all, keeps the
+  upper-bound reservation (`estimate`). Within the request's limits
   this never exceeds the reservation; if a provider ever reports more, the spend is recorded as it is and all further
   work against the cap stops at that response.
 - **Fail closed.** With the cap set, the API and the worker do not start while any paid capability in use (every
-  capability's provider and fallback, every routed LLM model) has no price, naming each one; a non-finite or
+  capability's provider and fallback, every routed LLM model) has no price, or uses a model or parameter its price
+  cannot bound before the request (above), naming each one; a non-finite or
   negative price or cap is invalid, and a price for no model is a problem. A paid call that would not be charged to
   the cap (made outside any work's account) is refused.
 

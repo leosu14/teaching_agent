@@ -32,6 +32,7 @@ def load():
 
 live = load()
 smoke = live.smoke
+REAL_CLIENT = smoke.httpx.Client  # before any fixture replaces it
 
 
 @pytest.fixture
@@ -117,7 +118,8 @@ def test_the_ceiling_must_be_positive_finite_and_bounded(value: str) -> None:
 
 LIVE_ENV = {"LLM_MODEL": "gpt-x", "LLM_INPUT_PRICE_PER_MTOK": "2.5", "LLM_OUTPUT_PRICE_PER_MTOK": "10",
             "TTS_PRICE_PER_MCHAR": "15", "IMAGE_PRICE_PER_IMAGE": "0.04", "SEARCH_PRICE_PER_REQUEST": "0.008",
-            "TA_VENDOR_CAPS": "openai=50,tavily=10"}
+            "TA_VENDOR_CAPS": "openai=50,tavily=10", "TTS_MODEL": "tts-1", "IMAGE_MODEL": "gpt-image-1",
+            "IMAGE_QUALITY": "low", "IMAGE_SIZE": "1024x1024", "IMAGE_INPUT_PRICE_PER_MTOK": "5"}
 
 
 def test_a_complete_live_configuration_is_passed_to_the_stack() -> None:
@@ -137,6 +139,10 @@ def test_a_complete_live_configuration_is_passed_to_the_stack() -> None:
     ({"LLM_OUTPUT_PRICE_PER_MTOK": "-2"}, "must be a positive price"),
     ({"LLM_MODEL": ""}, "LLM_MODEL is not set"),
     ({"TA_VENDOR_CAPS": "openai=50"}, "tavily console"),
+    ({"TTS_MODEL": ""}, "TTS_MODEL is not set"),
+    ({"IMAGE_QUALITY": ""}, "IMAGE_QUALITY is not set"),
+    ({"IMAGE_SIZE": " "}, "IMAGE_SIZE is not set"),
+    ({"IMAGE_INPUT_PRICE_PER_MTOK": ""}, "bills the prompt's input tokens"),
 ])
 def test_a_missing_or_invalid_price_model_or_vendor_cap_fails_closed(change: dict, problem: str) -> None:
     with pytest.raises(live.ConfigProblem, match=problem):
@@ -326,10 +332,13 @@ def test_teardown_removes_the_projects_containers_volumes_networks_and_key_files
 
 def test_the_ledger_assertions_hold_the_ceiling() -> None:
     good = {"entries_still_reserved": 0, "attempts_outside_the_cap": 0, "unpriced_attempts": 0, "total_usd": 0.4,
-            "ceiling_usd": 1.0, "by_capability": {c: {"cost_usd": 0.1} for c in ("llm", "tts", "image", "search")}}
+            "ceiling_usd": 1.0, "by_capability": {c: {"cost_usd": 0.1, "sources": {"priced": 3}}
+                                                  for c in ("llm", "tts", "image", "search")}}
     live.assert_ledger(good, mock=True)
+    unreconciled = {**good["by_capability"], "llm": {"cost_usd": 0.1, "sources": {"estimate": 3, "priced": 1}}}
     for change in ({"total_usd": 1.01}, {"entries_still_reserved": 1}, {"attempts_outside_the_cap": 2},
-                   {"unpriced_attempts": 1}, {"total_usd": 0.0}, {"by_capability": {"llm": {"cost_usd": 1}}}):
+                   {"unpriced_attempts": 1}, {"total_usd": 0.0}, {"by_capability": {"llm": {"cost_usd": 1}}},
+                   {"by_capability": unreconciled}):
         with pytest.raises(AssertionError):
             live.assert_ledger({**good, **change}, mock=True)
 
@@ -337,3 +346,188 @@ def test_the_ledger_assertions_hold_the_ceiling() -> None:
 def test_the_compose_command_adds_the_live_override_under_its_own_project() -> None:
     cmd = live.compose_command()
     assert cmd[-2:] == ["-p", "ta-live"] and str(Path("deploy") / "compose.live.yaml") in " ".join(cmd)
+
+
+# --- B1: the identity tokens outlive no request -------------------------------------------------------------------------
+
+
+class FakeClock:
+    """The IdP's and the polling's clock (deploy/smoke.py's `time`): `sleep` advances it, nothing waits."""
+
+    def __init__(self) -> None:
+        self.now = 1_800_000_000.0
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class Gateway:
+    """The gateway and API as the live flow sees them, verifying every token against the fake clock as the real
+    gateway does (signature, issuer, audience, `exp` with 30 s leeway): an expired token gets 401. The lesson runs
+    for 20 minutes before its diagnostic and 15 more after it, so it outlives any one token (10 minutes)."""
+
+    LEEWAY = 30
+
+    def __init__(self, key, clock: FakeClock) -> None:
+        self.public = key.public_key()
+        self.clock = clock
+        self.lid: str | None = None
+        self.phase, self.until = "QUEUED", 0.0
+        self.deleted = False
+        self.rejected: list[str] = []
+        self.subjects: dict[str, int] = {}
+
+    def subject(self, request) -> str | None:
+        import jwt
+        header = request.headers.get("authorization", "")
+        if not header.startswith("Bearer "):
+            return None
+        try:
+            claims = jwt.decode(header[7:], self.public, algorithms=["RS256"], audience=smoke.AUDIENCE,
+                                issuer=smoke.ISSUER, options={"verify_exp": False, "verify_iat": False})
+        except jwt.PyJWTError:
+            return None
+        if claims["exp"] + self.LEEWAY < self.clock.now:
+            self.rejected.append(f"{request.method} {request.url.path}")
+            return None
+        self.subjects[claims["sub"]] = self.subjects.get(claims["sub"], 0) + 1
+        return claims["sub"]
+
+    def task(self) -> dict:
+        if self.phase == "RUNNING_1" and self.clock.now >= self.until:
+            self.phase = "WAITING"
+        if self.phase == "RUNNING_2" and self.clock.now >= self.until:
+            self.phase = "COMPLETED"
+        status = {"RUNNING_1": "RUNNING", "RUNNING_2": "RUNNING"}.get(self.phase, self.phase)
+        body = {"task_id": "task_1", "status": status,
+                "job": {"status": "RUNNING" if status == "RUNNING" else "SUCCEEDED"}}
+        if status == "WAITING":
+            body["waiting"] = {"prompt": {"questions": [{"question_id": "q1", "prompt": "¿Cómo te llamas?"}]}}
+        return body
+
+    def __call__(self, request):
+        import httpx
+        sub, path, method = self.subject(request), request.url.path, request.method
+
+        def answer(status: int, body=None):
+            return httpx.Response(status, json=body if body is not None else {})
+
+        if sub is None:
+            return answer(401, {"detail": "unauthenticated"})
+        me = sub == self.lid
+        if method == "PUT" and path.startswith("/learners/"):
+            self.lid = path.rsplit("/", 1)[1]
+            return answer(200, {"learner_id": self.lid})
+        if method == "GET" and path.startswith("/learners/"):
+            return answer(200 if me and not self.deleted else 404)
+        if method == "POST" and path == "/tasks":
+            self.phase, self.until = "RUNNING_1", self.clock.now + 20 * 60
+            return answer(202, {"task_id": "task_1", "status": "QUEUED", "job": {"status": "QUEUED"}})
+        if method == "POST" and path == "/tasks/task_1/answers":
+            self.phase, self.until = "RUNNING_2", self.clock.now + 15 * 60
+            return answer(202, {"task_id": "task_1", "status": "QUEUED", "job": {"status": "QUEUED"}})
+        if method == "GET" and path == "/tasks/task_1":
+            return answer(200, self.task()) if me else answer(404)
+        if method == "GET" and path == "/tasks/task_1/artifacts":
+            return answer(200, [{"artifact_id": "art_v", "type": "VIDEO"},
+                                {"artifact_id": "art_i", "type": "IMAGE_ASSET"}])
+        if method == "GET" and path == "/artifacts/art_i/content":
+            return httpx.Response(200 if me else 404, content=b"png")
+        if method == "GET" and path == "/artifacts/art_v/content":
+            return answer(404)
+        if method == "POST" and path == "/lessons/task_1/teaching-session":
+            self.clock.sleep(4 * 60)  # the teacher's first turn
+            return answer(201, {"session_id": "ts_1", "waiting_question": {"choices": ["Me llamo Ana."]}})
+        if method == "POST" and path == "/teaching-sessions/ts_1/answers":
+            self.clock.sleep(4 * 60)  # grading
+            return answer(200, {"answer_outcome": "correct", "correct": True})
+        if method == "DELETE" and path.startswith("/learners/"):
+            if sub == "teacher-1":
+                return answer(403)
+            if not me:
+                return answer(404)
+            self.deleted = True
+            return answer(200, {"objects_pending": 0})
+        return answer(404)
+
+
+@pytest.fixture
+def long_lesson(isolated, monkeypatch):
+    """The real `flow` against the fake gateway, on the fake clock, with Docker, SQL and the scans stubbed."""
+    import httpx
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    clock = FakeClock()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    gateway = Gateway(key, clock)
+    monkeypatch.setattr(smoke, "time", clock)
+    monkeypatch.setattr(smoke, "write_secrets", lambda: key)
+    monkeypatch.setattr(smoke, "wait_for", lambda *a, **k: None)
+    monkeypatch.setattr(smoke.httpx, "Client", lambda **kw: REAL_CLIENT(
+        transport=httpx.MockTransport(gateway), base_url=kw.get("base_url", "http://gw"), timeout=5))
+
+    class Done:
+        returncode, stderr = 0, ""
+
+        def __init__(self, stdout: str = "") -> None:
+            self.stdout = stdout
+
+    def compose(*args, check=True, capture=False, stdin=None):
+        if args[:3] == ("run", "--rm", "api"):
+            return Done("run-wide cap: max_cost_usd=1\nREADY")
+        if args[:4] == ("exec", "-T", "gateway", "sh"):
+            return Done("/run/secrets:\ngateway_secret\n/run/ta-config:\njwks.json\n")
+        return Done()
+
+    monkeypatch.setattr(smoke, "compose", compose)
+    monkeypatch.setattr(smoke, "sql", lambda q: ["task_1"] if "SELECT task_id" in q else [])
+    monkeypatch.setattr(smoke, "rows_naming", lambda ids: {})
+    monkeypatch.setattr(smoke, "bucket_keys", lambda: set())
+    monkeypatch.setattr(live, "video_duration", lambda artifact_id: 100.0)
+    monkeypatch.setattr(live, "scan_everything", lambda run, when: None)
+    monkeypatch.setattr(live, "ledger", lambda max_cost: {"total_microusd": 1})
+    monkeypatch.setattr(live, "assert_ledger", lambda spend, mock: None)
+    return clock, gateway
+
+
+def test_a_lesson_longer_than_a_token_completes_with_every_request_authenticated(long_lesson) -> None:
+    clock, gateway = long_lesson
+    start = clock.now
+    run = live.Run(mock=False, max_cost=1.0, build=False, keys=live.Keys({"OPENAI_API_KEY": KEY}))
+    live.flow(run, {})
+    assert clock.now - start > 40 * 60  # the run outlived four token lifetimes
+    assert gateway.rejected == []  # no request carried an expired token
+    assert run.deleted and gateway.deleted  # the deletion through the API still worked at the end
+    assert run.report["status"] == "PASSED" and run.report["graded_outcome"] == "correct"
+    assert gateway.subjects[gateway.lid] > 100  # every poll signed its own token
+
+
+def test_cleanup_deletes_the_learner_with_a_fresh_token_long_after_the_lesson_began(long_lesson) -> None:
+    clock, gateway = long_lesson
+    run = live.Run(mock=False, max_cost=1.0, build=False, keys=live.Keys({"OPENAI_API_KEY": KEY}))
+    run.fail_after = "lesson"
+    with pytest.raises(RuntimeError, match="forced failure"):
+        live.flow(run, {})
+    assert not gateway.deleted
+    clock.sleep(30 * 60)  # e.g. the deadline approaching
+    live.cleanup(run)
+    assert gateway.rejected == [] and gateway.deleted and run.deleted, run.cleanup_errors
+    assert run.cleanup_errors == []
+
+
+def test_the_fake_gateway_refuses_a_token_minted_once_as_before(long_lesson) -> None:
+    """The regression the two tests above guard: one token minted at the start is refused 10.5 minutes later."""
+    import httpx
+    clock, gateway = long_lesson
+    key = smoke.write_secrets()
+    stale = {"Authorization": f"Bearer {smoke.token(key, 'live-x')}"}
+    with smoke.httpx.Client(base_url="http://gw") as c:
+        assert c.put("/learners/live-x", json={}, headers=stale).status_code == 200
+        clock.sleep(11 * 60)
+        assert c.get("/learners/live-x", headers=stale).status_code == 401
+        assert c.get("/learners/live-x", headers=live.Bearer(key, "live-x")).status_code == 200
+    assert gateway.rejected == ["GET /learners/live-x"]
+    assert isinstance(httpx.Headers(live.Bearer(key, "a")), httpx.Headers)

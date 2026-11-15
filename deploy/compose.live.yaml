@@ -21,8 +21,12 @@ x-live-env: &live-env
   TTS_PRICE_PER_MCHAR: ${TTS_PRICE_PER_MCHAR:-}
   IMAGE_PROVIDER: ${IMAGE_PROVIDER:-mock}
   IMAGE_MODEL: ${IMAGE_MODEL:-}
+  IMAGE_QUALITY: ${IMAGE_QUALITY:-}
+  IMAGE_SIZE: ${IMAGE_SIZE:-}
   IMAGE_PRICE_PER_IMAGE: ${IMAGE_PRICE_PER_IMAGE:-}
+  IMAGE_INPUT_PRICE_PER_MTOK: ${IMAGE_INPUT_PRICE_PER_MTOK:-}
   SEARCH_PROVIDER: ${SEARCH_PROVIDER:-mock}
+  SEARCH_DEPTH: basic  # one Tavily credit per request: SEARCH_PRICE_PER_REQUEST is the price of one credit
   SEARCH_PRICE_PER_REQUEST: ${SEARCH_PRICE_PER_REQUEST:-}
   # The ceiling: one run-wide cap over all paid work, and the same amount on each narrower USD budget.
   TA_BUDGET_TOTAL_MAX_COST_USD: ${TA_BUDGET_TOTAL_MAX_COST_USD:?set the run-wide cap}
