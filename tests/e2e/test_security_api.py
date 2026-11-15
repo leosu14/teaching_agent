@@ -88,6 +88,7 @@ def routes(ids: dict) -> list[tuple[str, str, dict | None]]:
         ("PUT", f"/learners/{lid}", {"display_name": "hijacked"}),
         ("GET", f"/learners/{lid}", None),
         ("GET", f"/learners/{lid}/progress", None),
+        ("DELETE", f"/learners/{lid}", None),
         ("POST", f"/learners/{lid}/assessment", {"task_id": eid, "answers": [{"question_id": "q", "answer": "a"}]}),
         ("POST", f"/learners/{lid}/goals", {"title": "Other goal", "domain": "spanish", "target_level": "A2"}),
         ("GET", f"/learners/{lid}/goals", None),

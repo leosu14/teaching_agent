@@ -376,3 +376,29 @@ class ClassMemberRow(Base):
     class_id: Mapped[str] = mapped_column(String(64), ForeignKey("classes.class_id"), primary_key=True)
     learner_id: Mapped[str] = mapped_column(String(128), primary_key=True, index=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ObjectHoldRow(Base):
+    """A durable reference to a stored object by one owner (a task or a learning cycle), made before the object is put
+    or reused and kept with the owner. Content-addressed objects (`objects/sha256/...`) are shared by identical bytes,
+    so an object may be deleted only when no hold and no artifact row of anyone still points at it. Holds and that check
+    are made under the object's own lock (app/storage/repositories.py, `_lock_object`)."""
+
+    __tablename__ = "object_holds"
+    uri: Mapped[str] = mapped_column(String(512), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ObjectDeletionRow(Base):
+    """A stored object to delete once nothing points at it any more: queued by a learner's data deletion in the same
+    transaction as the rows it deletes, and done after that commits (at once, and by the sweeper on failure). Holds an
+    object reference and its content hash only; a row is removed once its object is deleted or found shared."""
+
+    __tablename__ = "object_deletions"
+    deletion_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    uri: Mapped[str] = mapped_column(String(512), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

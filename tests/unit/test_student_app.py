@@ -41,7 +41,8 @@ def test_the_app_files_are_served_without_credentials_and_with_a_strict_policy(a
     root = anonymous.get("/app", follow_redirects=False)
     assert root.status_code == 308 and root.headers["location"] == "/app/"
     for path, media in [("/app/", "text/html"), ("/app/app.js", "text/javascript"), ("/app/app.css", "text/css"),
-                        ("/app/teacher.html", "text/html"), ("/app/teacher.js", "text/javascript")]:
+                        ("/app/teacher.html", "text/html"), ("/app/teacher.js", "text/javascript"),
+                        ("/app/privacy.html", "text/html")]:
         r = anonymous.get(path)
         assert r.status_code == 200 and r.headers["content-type"].startswith(media), path
         assert r.headers["content-security-policy"] == web.CSP

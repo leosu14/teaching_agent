@@ -27,6 +27,7 @@ from app.runtime.workflows.curriculum_planning import WORKFLOW_ID as CURRICULUM_
 from app.runtime.workflows.lesson_generation import FOCUS_KEY, GOAL_KEY
 from app.observability.events import EventBus
 from app.schemas.common import utcnow
+from app.schemas.lease import learner_writes
 from app.schemas.curriculum import (
     LESSON_ACTIONS,
     Curriculum,
@@ -76,6 +77,11 @@ class CurriculumService:
     # --- goals --------------------------------------------------------------------------------------------------
 
     async def create_goal(self, learner_id: str, data: GoalInput) -> tuple[LearningGoal, bool]:
+        # Refused once the learner is deleted, inside each write's own transaction (LearnerDataGone, 404).
+        with learner_writes(learner_id):
+            return await self._create_goal(learner_id, data)
+
+    async def _create_goal(self, learner_id: str, data: GoalInput) -> tuple[LearningGoal, bool]:
         """Returns (goal, created). The same idempotency key (or, without one, the same content) returns the stored
         goal instead of creating a second one."""
         fields = data.model_dump(mode="json", exclude={"idempotency_key", "metadata"})
@@ -130,6 +136,10 @@ class CurriculumService:
         return self._memory.goals(learner_id)
 
     async def update_goal(self, goal_id: str, data: GoalUpdate, *, user_id: str) -> tuple[LearningGoal, Task | None]:
+        with learner_writes(self._memory.goal(goal_id).learner_id):  # as in `create_goal`
+            return await self._update_goal(goal_id, data, user_id=user_id)
+
+    async def _update_goal(self, goal_id: str, data: GoalUpdate, *, user_id: str) -> tuple[LearningGoal, Task | None]:
         """Apply the change; a changed definition or target date replans an existing curriculum (a new version)."""
         goal = self._memory.goal(goal_id)
         if goal.status == GoalStatus.COMPLETED and data.status is None:
@@ -166,6 +176,10 @@ class CurriculumService:
     # --- curricula ----------------------------------------------------------------------------------------------
 
     async def build_curriculum(self, goal_id: str, *, user_id: str, reason: ReplanReason | None = None) -> Task:
+        with learner_writes(self._memory.goal(goal_id).learner_id):  # as in `create_goal`
+            return await self._build_curriculum(goal_id, user_id=user_id, reason=reason)
+
+    async def _build_curriculum(self, goal_id: str, *, user_id: str, reason: ReplanReason | None = None) -> Task:
         """Run (or reuse) the planning task for the goal's curriculum. Idempotent: the same goal, definition,
         current version and reason reuse the same task; an unfinished one is resumed, never duplicated."""
         goal = self._memory.goal(goal_id)
@@ -246,13 +260,18 @@ class CurriculumService:
         when = as_of or self._clock()
         domains = sorted({g.domain for g in self._memory.goals(learner_id)})
         graphs = {d: await self._knowledge.graph(d) for d in domains}
-        # Replanning needs a task (its artifacts belong to one): evaluations and explicit rebuilds replan.
-        return self._tracker.tracked(learner_id, when, graphs=graphs, replan=False, scope=self._scope())
+        # Replanning needs a task (its artifacts belong to one): evaluations and explicit rebuilds replan. The refresh
+        # writes (progress, transitions, a completed goal): refused once the learner is deleted (LearnerDataGone).
+        with learner_writes(learner_id):
+            return self._tracker.tracked(learner_id, when, graphs=graphs, replan=False, scope=self._scope())
 
     async def next_action(self, learner_id: str, *, as_of: datetime | None = None) -> NextLearningAction:
+        """The learner's next action. A read that writes (the progress refresh, the action's events): each write is
+        refused once the learner is deleted, so a deletion racing it leaves nothing and the request answers 404."""
         self._memory.get(learner_id)  # unknown learners are rejected
-        tracked = await self.tracked(learner_id, as_of=as_of)
-        return self._tracker.next_action(learner_id, tracked, self._scope())
+        with learner_writes(learner_id):
+            tracked = await self.tracked(learner_id, as_of=as_of)
+            return self._tracker.next_action(learner_id, tracked, self._scope())
 
     async def start_lesson(self, action: NextLearningAction, *, user_id: str) -> Task:
         """Start the lesson a LEARN / REVIEW / PRACTICE / EVALUATE action asks for, planned around its objective."""

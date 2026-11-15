@@ -15,6 +15,7 @@ from datetime import datetime
 from app.learner.memory import LearnerMemoryService
 from app.schemas.classroom import ClassJoinCode, ClassMember, Classroom, ClassView, Enrollment
 from app.schemas.common import new_id, utcnow
+from app.schemas.lease import learner_writes
 from app.storage.repositories import SqlClassRepository
 
 
@@ -80,7 +81,8 @@ class ClassService:
         """Enroll the learner in the class the code names (idempotent: a second join returns the same enrollment).
         A wrong code, a retired one and a class of another tenant are all ClassNotFound."""
         self._memory.get(learner_id)  # an unknown learner is a 404 (UnknownLearner)
-        joined = self.repository.join(hash_join_code(join_code), learner_id, self._clock(), tenant_id)
+        with learner_writes(learner_id):  # refused once the learner is deleted (LearnerDataGone, 404)
+            joined = self.repository.join(hash_join_code(join_code), learner_id, self._clock(), tenant_id)
         if joined is None:
             raise ClassNotFound()
         classroom, member, created = joined

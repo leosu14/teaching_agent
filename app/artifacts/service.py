@@ -16,7 +16,8 @@ from app.observability.scope import ExecutionScope
 from app.schemas.artifact import Artifact, ArtifactDraft, ArtifactType, StoredArtifacts, StoredObject
 from app.schemas.common import new_id
 from app.schemas.events import EventType
-from app.schemas.lease import Lease
+from app.schemas.lease import LearnerDataGone, Lease, LeaseLost, learner_guard, write_fence
+from app.utils.object_uri import is_object_uri, key_of
 
 EXTENSIONS = {
     "application/json": ".json",
@@ -42,7 +43,7 @@ CHUNK = 1 << 20
 
 
 class ArtifactRepository(Protocol):
-    def add(self, artifact: Artifact, fence: Lease | None = None) -> None: ...
+    def add(self, artifact: Artifact, fence: Lease | None = None, **kwargs) -> None: ...
 
     def get(self, artifact_id: str) -> Artifact: ...
 
@@ -103,27 +104,56 @@ class ArtifactService:
         uri, created = self._store.put_if_absent(f"{task_id}/{name}/v{version}{_extension(media_type)}", content)
         if not created:
             uri = self._store.put(f"{task_id}/{name}/v{version}-{artifact_id}{_extension(media_type)}", content)
-        return self._add(Artifact(
-            artifact_id=artifact_id, task_id=task_id, type=type, name=name, uri=uri, media_type=media_type,
-            content_hash=digest, size_bytes=len(content), version=version, provider=provider,
-            parent_ids=parent_ids, metadata=metadata,
-        ), scope)
+        try:
+            return self._add(Artifact(
+                artifact_id=artifact_id, task_id=task_id, type=type, name=name, uri=uri, media_type=media_type,
+                content_hash=digest, size_bytes=len(content), version=version, provider=provider,
+                parent_ids=parent_ids, metadata=metadata,
+            ), scope)
+        except (LeaseLost, LearnerDataGone):
+            # The row was refused (a worker that lost its lease, or a learner deleted meanwhile): the object this call
+            # wrote is under a key of its own that no row will ever point at, so it goes too. Otherwise a deletion
+            # that ran between the put and the row could not find it, and it would keep the content.
+            self._store.delete(uri)
+            raise
 
-    def put_object(self, content: bytes, media_type: str) -> StoredObject:
-        """Store bytes content-addressed by their sha256. Identical content is written once and reused."""
+    def put_object(self, content: bytes, media_type: str, *, owner: str | None = None) -> StoredObject:
+        """Store bytes content-addressed by their sha256. Identical content is written once and reused.
+
+        The object is shared by everyone who stores the same bytes, so the owner (the task being executed, by default)
+        first records its hold on it (`SqlArtifactRepository.hold`, under the object's lock), and only then puts it. A
+        learner's data deletion deletes a shared object only when no hold or artifact row of anyone else points at it,
+        under the same lock: it either sees this hold and keeps the object, or deleted it before the hold, and the put
+        below writes it afresh."""
         digest = hashlib.sha256(content).hexdigest()
         key = f"objects/sha256/{digest[:2]}/{digest}{_extension(media_type)}"
+        self._hold(key, owner)
         uri, created = self._store.put_if_absent(key, content)
         return StoredObject(uri=uri, checksum=digest, media_type=media_type, size_bytes=len(content),
                             reused=not created, key=key)
 
-    def put_object_file(self, path: Path, media_type: str) -> StoredObject:
+    def put_object_file(self, path: Path, media_type: str, *, owner: str | None = None) -> StoredObject:
         """`put_object` for a file on disk: hashed and copied in chunks, never read into memory whole."""
         digest = file_sha256(path)
         key = f"objects/sha256/{digest[:2]}/{digest}{_extension(media_type)}"
+        self._hold(key, owner)
         uri, created = self._store.put_file_if_absent(key, path)
         return StoredObject(uri=uri, checksum=digest, media_type=media_type, size_bytes=path.stat().st_size,
                             reused=not created, key=key)
+
+    def reuse_object(self, obj: StoredObject, *, owner: str | None = None) -> StoredObject | None:
+        """An object stored earlier (by another task, as the generated-video ledger records it), held for this owner
+        before it is used: None when it is gone, so that the caller makes it again. As for `put_object`, the hold comes
+        first, then the check, so a deletion cannot remove it in between."""
+        if CONTENT_ADDRESSED in obj.uri and is_object_uri(obj.uri):
+            self._hold(key_of(obj.uri), owner)
+        return obj if self._store.exists(obj.uri) else None
+
+    def _hold(self, key: str, owner: str | None) -> None:
+        owner = owner or _current_owner()
+        hold = getattr(self._repo, "hold", None)
+        if owner is not None and hold is not None:
+            hold(f"object:{key}", owner)
 
     def put_record(self, namespace: str, key: str, record: dict) -> str:
         """Write (or replace) a small JSON record outside any task, e.g. the generation ledger, which lets a later
@@ -201,7 +231,10 @@ class ArtifactService:
         return None
 
     def _add(self, artifact: Artifact, scope: ExecutionScope) -> Artifact:
-        self._repo.add(artifact, fence=scope.fence)  # refused (LeaseLost) once the storing worker lost its lease
+        if CONTENT_ADDRESSED in artifact.uri:  # a shared object: still stored, checked under its lock with the row
+            self._repo.add(artifact, fence=scope.fence, object_exists=lambda: self._store.exists(artifact.uri))
+        else:  # refused (LeaseLost) once the storing worker lost its lease
+            self._repo.add(artifact, fence=scope.fence)
         scope.emit(EventType.ARTIFACT_CREATED, artifact_id=artifact.artifact_id, artifact_type=artifact.type.value,
                    name=artifact.name, version=artifact.version, parent_ids=artifact.parent_ids, uri=artifact.uri)
         return artifact
@@ -251,6 +284,10 @@ class ArtifactService:
             return f"object unreadable: {exc}"
         return None
 
+    def delete_object(self, uri: str) -> None:
+        """Remove a stored object for good (a learner's data deletion). A missing object is not an error."""
+        self._store.delete(uri)
+
     def discard_object(self, artifact: Artifact) -> None:
         """Remove an artifact's corrupt object so that storing the same content again writes it afresh."""
         self._store.delete(artifact.uri)
@@ -296,3 +333,15 @@ def file_sha256(path: Path) -> str:
 
 def _extension(media_type: str) -> str:
     return EXTENSIONS.get(media_type) or mimetypes.guess_extension(media_type) or ".bin"
+
+
+CONTENT_ADDRESSED = "objects/sha256/"  # media stored once and shared by identical bytes (see `put_object`)
+
+
+def _current_owner() -> str | None:
+    """Who stores an object now: the task being executed (its lease), or the lesson task a request writes for."""
+    lease = write_fence()
+    if lease is not None:
+        return lease.resource_id
+    guard = learner_guard()
+    return guard.task_id if guard is not None else None

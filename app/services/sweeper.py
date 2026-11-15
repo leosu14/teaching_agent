@@ -15,6 +15,10 @@ What a killed worker leaves behind, and who recovers it:
   picks it up. A task whose lease is live is being executed and is never touched, so the sweeper cannot cause a second
   execution; a task that holds no lease at all is swept only once it has not changed for `idle` (a lease's length).
 - A task whose latest job FAILED is left alone: it already failed on every attempt, and is resumed only on request.
+- A stored object a learner's data deletion queued but the store refused to delete (MVP item 9) is tried again
+  (`purge_objects`), until it is deleted, or found shared and kept.
+- A stranded task whose learner's data is deleted meanwhile gets no job: the recovery is a write for the learner, and
+  is refused like any other once their rows are gone.
 
 A stale worker that is still alive somewhere cannot interfere with the recovery: once its lease ran out, each of its
 writes (task, events, artifacts, grades, learner memory, curricula) is refused at commit.
@@ -32,7 +36,8 @@ from app.schemas.common import utcnow
 from app.schemas.job import JobStatus
 from app.schemas.task import TaskStatus
 from app.services.tasks import TaskService
-from app.storage.repositories import SqlTaskJobRepository, SqlTaskRepository
+from app.schemas.lease import LearnerDataGone
+from app.storage.repositories import NotFound, ObjectPurge, SqlTaskJobRepository, SqlTaskRepository
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +50,21 @@ class SweepReport:
     failed_jobs: int = 0  # jobs FAILED because their worker died on the last allowed attempt
     recovered: list[str] = field(default_factory=list)  # tasks a RECOVER job was queued for
     left_failed: list[str] = field(default_factory=list)  # stranded tasks whose latest job FAILED: left alone
+    objects_deleted: int = 0  # queued object deletions done on this pass
+    objects_pending: int = 0  # queued object deletions the store refused again
 
 
 class TaskSweeper:
     def __init__(self, tasks: SqlTaskRepository, jobs: SqlTaskJobRepository, service: TaskService, *,
-                 idle: timedelta = TASK_LEASE, batch: int = 100, clock: Callable[[], datetime] = utcnow) -> None:
+                 idle: timedelta = TASK_LEASE, batch: int = 100, clock: Callable[[], datetime] = utcnow,
+                 purge_objects: Callable[[], ObjectPurge] | None = None) -> None:
         self._tasks = tasks
         self._jobs = jobs
         self._service = service
         self._idle = idle
         self._batch = batch
         self._clock = clock
+        self._purge_objects = purge_objects
 
     def sweep(self) -> SweepReport:
         """One pass. Safe to run from several processes at once: each task gets at most one active job."""
@@ -68,9 +77,15 @@ class TaskSweeper:
             if latest is not None and latest.status == JobStatus.FAILED:
                 report.left_failed.append(task_id)
                 continue
-            job, queued = self._service.enqueue_recovery(task_id)
+            try:
+                job, queued = self._service.enqueue_recovery(task_id)
+            except (NotFound, LearnerDataGone):  # the learner's data was deleted since the task was listed
+                continue
             if queued:
                 report.recovered.append(task_id)
                 logger.warning("sweeper: task %s was left mid-run by a worker that stopped; queued job %s to "
                                "continue it", task_id, job.job_id)
+        if self._purge_objects is not None:
+            purged = self._purge_objects()
+            report.objects_deleted, report.objects_pending = purged.deleted, purged.pending
         return report

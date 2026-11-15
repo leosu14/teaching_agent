@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import threading
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 from app.artifacts.service import ArtifactService
@@ -16,6 +16,7 @@ from app.runtime.workflows.lesson_evaluation import WORKFLOW_ID as EVALUATION_WO
 from app.runtime.workflows.lesson_generation import WORKFLOW_ID as LESSON_WORKFLOW
 from app.schemas.artifact import Artifact
 from app.schemas.common import new_id
+from app.schemas.lease import learner_writes
 from app.schemas.events import Event
 from app.schemas.job import JobConflict, JobKind, TaskJob
 from app.schemas.lesson import DiagnosticAnswers, LessonRequest
@@ -33,8 +34,11 @@ class TaskService:
 
     def __init__(self, orchestrator: Orchestrator, tasks: SqlTaskRepository, events: SqlEventRepository,
                  artifacts: ArtifactService, jobs: SqlTaskJobRepository | None = None,
-                 job_max_attempts: int = 3) -> None:
+                 job_max_attempts: int = 3, has_profile: Callable[[str], bool] | None = None) -> None:
         self._orchestrator = orchestrator
+        # Whether a learner has a profile row: a lesson may be queued before onboarding (no profile yet), and then a
+        # missing learner row is not a deletion (`learner_writes(profile=False)`). Without it, assumed so.
+        self._has_profile = has_profile or (lambda learner_id: True)
         self._tasks = tasks
         self._events = events
         self._artifacts = artifacts
@@ -47,6 +51,13 @@ class TaskService:
                      idempotency_key: str | None = None) -> tuple[Task, TaskJob]:
         """Create a lesson task from its request and queue its execution. With an `idempotency_key`, a repeated
         call by the same user returns the same task and job (JobConflict when the key was used for another request)."""
+        # Refused once the learner is deleted (also while it is being deleted); a learner without a profile may queue.
+        with self._writes(learner_id):
+            return self._enqueue_task(request=request, learner_id=learner_id, user_id=user_id,
+                                      idempotency_key=idempotency_key)
+
+    def _enqueue_task(self, *, request: str, learner_id: str, user_id: str,
+                      idempotency_key: str | None) -> tuple[Task, TaskJob]:
         task_id = None
         if idempotency_key is not None:
             digest = hashlib.sha256(json.dumps(["task", user_id, idempotency_key]).encode()).hexdigest()
@@ -70,8 +81,9 @@ class TaskService:
             raise InvalidTransition(f"task {task_id} is not waiting for answers")
         node_id = task.waiting.node_id
         data = self._orchestrator.check_input(task, node_id, payload)
-        return task, self._enqueue(task_id, JobKind.SUBMIT_INPUT,
-                                   {"node_id": node_id, "answers": data, "task_version": task.version})
+        with self._writes(task.learner_id, task_id):
+            return task, self._enqueue(task_id, JobKind.SUBMIT_INPUT,
+                                       {"node_id": node_id, "answers": data, "task_version": task.version})
 
     def enqueue_assessment_for(self, learner_id: str, task_id: str,
                                answers: DiagnosticAnswers) -> tuple[Task, TaskJob]:
@@ -82,23 +94,34 @@ class TaskService:
 
     def enqueue_evaluation(self, lesson_task_id: str, *, user_id: str) -> tuple[Task, TaskJob]:
         """Create the evaluation task of a completed lesson and queue its execution."""
-        task = self.create_evaluation(lesson_task_id, user_id=user_id)
-        return task, self._enqueue(task.task_id, JobKind.RUN, {})
+        lesson = self._tasks.get(lesson_task_id)
+        with self._writes(lesson.learner_id, lesson_task_id):
+            task = self.create_evaluation(lesson_task_id, user_id=user_id)
+            return task, self._enqueue(task.task_id, JobKind.RUN, {})
 
     def enqueue_resume(self, task_id: str) -> tuple[Task, TaskJob]:
         """Queue the continuation of a paused, failed or abandoned task (InvalidTransition when it cannot resume)."""
         task = self._tasks.get(task_id)
         if task.status not in RESUMABLE and not self._orchestrator.waiting_on_work(task):
             raise InvalidTransition(f"task {task_id} in status {task.status.value} cannot be resumed")
-        return task, self._enqueue(task_id, JobKind.RESUME, {})
+        with self._writes(task.learner_id, task_id):
+            return task, self._enqueue(task_id, JobKind.RESUME, {})
 
     def enqueue_recovery(self, task_id: str) -> tuple[TaskJob, bool]:
         """Queue the continuation of a task left mid-run by a worker that died with no job left to reclaim (the
         sweeper). Returns (the task's active job, whether this call queued it): when the task already has an active
         job, that job will continue it and nothing is added."""
+        task = self._tasks.get(task_id)  # NotFound once the learner's data is deleted
         job = TaskJob(job_id=new_id("job"), task_id=task_id, kind=JobKind.RECOVER, dedupe_key="RECOVER",
                       max_attempts=self._job_max_attempts)
-        return self._job_store().enqueue(job)
+        # LearnerDataGone when the deletion lands after the read: the task row, deleted with the learner's data, is the
+        # check (a lesson may have been queued before onboarding, with no profile row)
+        with learner_writes(task.learner_id, task_id, profile=False):
+            return self._job_store().enqueue(job)
+
+    def _writes(self, learner_id: str, task_id: str | None = None):
+        """The writes of a request for this learner's task: refused once the learner or the task is deleted."""
+        return learner_writes(learner_id, task_id, profile=self._has_profile(learner_id))
 
     def job(self, task_id: str) -> TaskJob | None:
         """The task's latest job (None for a task that was only ever run in-process)."""

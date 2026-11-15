@@ -20,6 +20,7 @@ from app.pedagogy.graph import ConceptGraph
 from app.schemas.curriculum import NextLearningAction, ProgressUpdate, curriculum_id_for
 from app.schemas.events import EventType
 from app.schemas.learner import GoalStatus, LearningGoal
+from app.schemas.lease import LearnerDataGone
 from app.schemas.pedagogy import LearnerModel
 
 DEFAULT_FRAMEWORK = "mastery"  # the generic level scale, for a subject the learner's profile does not list
@@ -77,18 +78,21 @@ class CurriculumTracker:
                 model = self.model(goal, graph.ids if graph is not None else [], as_of)
                 result.models[goal.domain] = model
             version = self.engine.current(curriculum_id_for(goal.goal_id))
-            assert version is not None
+            if version is None:  # curricula are deleted only with their learner's data: deleted since the goal read
+                raise LearnerDataGone()
             counts = self.review_counts(model, {o.concept_id: o.evidence_required for o in version.objectives})
             update = self.engine.refresh(goal, model, as_of, review_counts=counts,
                                          graph=graph if replan else None, task_id=task_id, scope=scope,
                                          artifacts=artifacts)
-            assert update is not None
+            if update is None:  # its curriculum was deleted since it was read: with the learner's data
+                raise LearnerDataGone()
             if update.goal_completed:
                 goal = self.memory.save_goal(goal.model_copy(update={"status": GoalStatus.COMPLETED,
                                                                      "updated_at": as_of}))
                 completed.add(goal.goal_id)
             current = self.engine.current(curriculum_id_for(goal.goal_id))
-            assert current is not None
+            if current is None:  # as above
+                raise LearnerDataGone()
             result.updates.append(update)
             result.entries.append(GoalCurriculum(goal=goal, version=current, progress=update.progress))
         result.completed_now = frozenset(completed)

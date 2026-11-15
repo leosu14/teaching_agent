@@ -1,11 +1,12 @@
-"""The student web app and the teacher dashboard: static files only, served without authentication.
+"""The student web app, the teacher dashboard and the privacy notice: static files only, served without
+authentication.
 
 The apps (app/api/web/: the student app at /app/, the teacher dashboard at /app/teacher.html) are HTML, CSS and one
 script each, with no data in them: everything they show comes from the authenticated JSON API, called from the page
-(same origin). So these routes are public like /health, and nothing
-else is: they serve exactly the files listed in `FILES` and never a path from the request. Every response carries a
-strict Content-Security-Policy (no inline script, no third-party origin, blob: only for media the page fetched
-itself)."""
+(same origin). The privacy notice (/app/privacy.html) is static text with the same stylesheet and no script. So these
+routes are public like /health, and nothing else is: they serve exactly the files listed in `FILES` and never a path
+from the request. Every response carries a strict Content-Security-Policy (no inline script, no third-party origin,
+blob: only for media the page fetched itself)."""
 
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ FILES: dict[str, str] = {
     "app.css": "text/css; charset=utf-8",
     "teacher.html": "text/html; charset=utf-8",  # the teacher dashboard (MVP item 7), same rules, same stylesheet
     "teacher.js": "text/javascript; charset=utf-8",
+    "privacy.html": "text/html; charset=utf-8",  # the privacy notice (MVP item 9): static text, no script
 }
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")

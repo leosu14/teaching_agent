@@ -54,7 +54,8 @@ On the offline mock providers there is no vendor and nothing to declare.
 ## Database and migrations
 
 The schema is versioned with Alembic (`app/storage/migrations/`). Revision `0001_baseline` is the schema of MVP items
-1 to 7. `python -m app.storage.migrate`:
+1 to 7; `0002_object_holds` adds the object holds and the object-deletion queue of the learner data deletion (MVP
+item 9). `python -m app.storage.migrate`:
 
 - `upgrade`: an empty database gets the whole schema; a database at an older revision is upgraded; a database that
   an earlier version made with `create_all` (no `alembic_version` table) is adopted: the tables and the columns of
@@ -136,6 +137,14 @@ an empty or unreadable file, and a misspelt secret file variable stop the proces
 The gateway, the only published service, gets `gateway_secret` alone: it holds no database or object-store
 credential. A static key set for it (`TA_GATEWAY_JWKS_FILE=/run/ta-config/jwks.json`) goes in `deploy/gateway/`
 (git-ignored), mounted read-only; it is public key material, never a secret file.
+
+## Learner data and privacy
+
+Learners delete their own data from the student app (`DELETE /learners/{id}`): the rows go from PostgreSQL and the
+objects from the bucket, while the spend ledger stays so the daily caps hold. The privacy notice
+(`/app/privacy.html`) is part of the image; read it against the deployment and change it where it differs (who runs
+the service and a contact, the vendors, backup retention) before going live. Database backups and bucket object
+versions are not reached by a deletion. See [privacy](privacy.md).
 
 ## Known limits
 

@@ -38,7 +38,7 @@ from app.schemas.common import utcnow
 from app.schemas.curriculum import LESSON_ACTIONS, LearningActionType, NextLearningAction
 from app.schemas.events import Event
 from app.schemas.learner import stable_id
-from app.schemas.lease import LeaseLost
+from app.schemas.lease import LeaseLost, learner_writes
 from app.schemas.learning_cycle import (
     ACTIVE_CYCLE_STATUSES,
     CycleConflict,
@@ -117,6 +117,12 @@ class LearningCycleService:
     # --- start ---------------------------------------------------------------------------------------------------
 
     async def start(self, learner_id: str, data: StartLearningCycle) -> LearningCycleView:
+        # The cycle's writes (and its children's in this request) are refused once the learner is deleted, checked
+        # inside each write's own transaction (LearnerDataGone, 404).
+        with learner_writes(learner_id):
+            return await self._start(learner_id, data)
+
+    async def _start(self, learner_id: str, data: StartLearningCycle) -> LearningCycleView:
         """Start the learner's next cycle and run it until the learner is needed or it ends. The same idempotency
         key returns the same cycle (continuing it, never selecting or executing a second action); another key while
         a cycle is active is a conflict."""
@@ -151,6 +157,10 @@ class LearningCycleService:
     # --- learner responses ---------------------------------------------------------------------------------------
 
     async def respond(self, cycle_id: str, data: CycleResponse) -> LearningCycleView:
+        with learner_writes(self._learner_of(cycle_id)):  # as in `start`
+            return await self._respond(cycle_id, data)
+
+    async def _respond(self, cycle_id: str, data: CycleResponse) -> LearningCycleView:
         """The learner's response to the current prompt, delivered to the waiting child once. Idempotent per
         client_response_id: the same id and response replay; the same id with another response is a conflict."""
         cycle = await self._advance(cycle_id, token=None)  # fold in what happened since the last request
@@ -257,6 +267,10 @@ class LearningCycleService:
     # --- control -------------------------------------------------------------------------------------------------
 
     async def resume(self, cycle_id: str) -> LearningCycleView:
+        with learner_writes(self._learner_of(cycle_id)):  # as in `start`
+            return await self._resume(cycle_id)
+
+    async def _resume(self, cycle_id: str) -> LearningCycleView:
         """Continue the cycle: a BLOCKED cycle retries its child through the child's own recovery (a failed task is
         resumed from its checkpoint, a session regenerates the reply it owes); an active one is reconciled and
         driven. A permanently failed or cancelled cycle cannot be resumed."""
@@ -287,6 +301,10 @@ class LearningCycleService:
             pass  # still failing, or another worker runs it (TaskBusy): the next observation says which
 
     async def cancel(self, cycle_id: str) -> LearningCycleView:
+        with learner_writes(self._learner_of(cycle_id)):  # as in `start`
+            return await self._cancel(cycle_id)
+
+    async def _cancel(self, cycle_id: str) -> LearningCycleView:
         """Stop the cycle and its running child (whose history is kept). Idempotent; evidence already recorded by a
         finished step stays."""
         cycle = await self._load(cycle_id)
@@ -312,6 +330,12 @@ class LearningCycleService:
         return await self._view(cycle)
 
     # --- reads ---------------------------------------------------------------------------------------------------
+
+    def _learner_of(self, cycle_id: str) -> str:
+        cycle = self._repo.get(cycle_id)
+        if cycle is None:
+            raise CycleNotFound(f"learning cycle {cycle_id} not found")
+        return cycle.learner_id
 
     async def get(self, cycle_id: str) -> LearningCycleView:
         """The cycle, reconciled with its children (no child is driven by a read)."""

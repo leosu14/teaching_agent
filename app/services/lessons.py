@@ -55,12 +55,23 @@ def load_lesson(artifacts: ArtifactService, tasks: TaskService, lesson_id: str) 
     assert task.plan is not None
     research_artifact = artifacts.find(task.task_id, "research_bundle")
     plan_artifact = artifacts.find(task.task_id, "pedagogical_plan")
-    plan = (PedagogicalPlan.model_validate_json(artifacts.read(plan_artifact.artifact_id))
+    plan = (PedagogicalPlan.model_validate_json(_read(artifacts, plan_artifact))
             if plan_artifact is not None else None)
     return LessonMaterial(
         task=task, artifact=artifact,
-        lesson=LessonContent.model_validate_json(artifacts.read(artifact.artifact_id)),
+        lesson=LessonContent.model_validate_json(_read(artifacts, artifact)),
         request=task.plan.lesson_request,
-        research=(ResearchBundle.model_validate_json(artifacts.read(research_artifact.artifact_id))
+        research=(ResearchBundle.model_validate_json(_read(artifacts, research_artifact))
                   if research_artifact is not None else None),
         focus=plan.focus if plan is not None else None)
+
+
+def _read(artifacts: ArtifactService, artifact) -> bytes:
+    """The artifact's stored bytes; NotFound when the object is gone (its learner's data is being deleted: the rows
+    go with the same transaction)."""
+    try:
+        return artifacts.read(artifact.artifact_id)
+    except Exception:
+        if artifacts.object_exists(artifact.uri):
+            raise
+        raise NotFound(f"lesson {artifact.task_id} not found") from None
