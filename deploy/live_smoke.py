@@ -9,8 +9,8 @@
 It starts a temporary stack (deploy/compose.yaml plus deploy/compose.live.yaml, compose project `ta-live`) built from
 the checked-out commit, with TA_DEPLOYMENT=production: PostgreSQL, an S3-compatible store, the migration, the API,
 the worker and the gateway. Everything goes through the published gateway, with tokens this script signs as the
-identity provider (deploy/smoke.py's): one learner's lesson is queued, run by the worker and completed, its video is
-served back and probed; one teaching-session answer is graded; then the learner's data is deleted. Afterwards it
+identity provider (deploy/smoke.py's): one learner's lesson is queued, run by the worker and completed, its MP4 is
+read from the bucket and probed (the API refuses a VIDEO's bytes to a learner, which is checked); one teaching-session answer is graded; then the learner's data is deleted. Afterwards it
 checks the spend ledger in PostgreSQL directly (the run-wide total at or under the ceiling, nothing left reserved,
 every paid attempt priced), scans the logs, the database, the bucket, the API's answers and its own report for the
 provider keys, and tears the stack down.
@@ -393,10 +393,33 @@ def record(run: Run, response) -> dict | list:
     return response.json()
 
 
-def ffprobe_duration(path_in_container: str) -> float:
-    out = smoke.compose("exec", "-T", "api", "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
-                        "default=noprint_wrappers=1:nokey=1", path_in_container, capture=True).stdout.strip()
-    return float(out or 0)
+VIDEO_COPY = "/tmp/live-smoke-lesson.mp4"
+
+
+def video_duration(artifact_id: str) -> float:
+    """The lesson's MP4, streamed from the bucket inside the API container (which holds the store's credentials) and
+    probed with ffprobe there: its duration in seconds, 0 if it does not play. The copy is removed afterwards."""
+    uri = smoke.sql(f"SELECT body::json->>'uri' FROM artifacts WHERE artifact_id = {smoke.literal(artifact_id)};")
+    assert uri and uri[0], f"no stored object for the VIDEO {artifact_id}"
+    script = f"""
+import shutil
+from app.config.secrets import load_secret_files
+from app.config.settings import Settings
+from app.providers.storage.s3 import S3ObjectStore
+load_secret_files()
+store = S3ObjectStore(Settings().s3_config())
+with store.open({uri[0]!r}) as src, open({VIDEO_COPY!r}, "wb") as dst:
+    shutil.copyfileobj(src, dst)
+print("COPIED")
+"""
+    try:
+        out = smoke.compose("exec", "-T", "api", "python", "-", stdin=script, capture=True).stdout
+        assert "COPIED" in out, "the VIDEO could not be read from the bucket"
+        probed = smoke.compose("exec", "-T", "api", "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                               "-of", "default=noprint_wrappers=1:nokey=1", VIDEO_COPY, capture=True).stdout.strip()
+        return float(probed or 0)
+    finally:
+        smoke.compose("exec", "-T", "api", "rm", "-f", VIDEO_COPY, check=False)
 
 
 def stop_if(run: Run, stage: str) -> None:
@@ -454,18 +477,17 @@ def flow(run: Run, environment: dict[str, str]) -> None:
         assert answer_key_fields(artifacts) == set(), answer_key_fields(artifacts)
         videos = [a for a in artifacts if a["type"] == "VIDEO"]
         assert videos, {a["type"] for a in artifacts}
-        video = c.get(f"/artifacts/{videos[0]['artifact_id']}/content", headers=me)
-        assert video.status_code == 200 and len(video.content) > 1000, video.status_code
-        local = ROOT / "live-smoke-lesson.mp4"
-        try:
-            local.write_bytes(video.content)
-            smoke.compose("cp", str(local), "api:/tmp/live-smoke-lesson.mp4")
-        finally:
-            local.unlink(missing_ok=True)
-        duration = ffprobe_duration("/tmp/live-smoke-lesson.mp4")
+        video_id = videos[-1]["artifact_id"]
+        # The VIDEO is rendered from the deck, which can hold answer slides, so the API never serves its bytes to a
+        # learner (app/services/artifact_content.py, BLOCKED): its content route answers 404 as for any blocked type.
+        assert c.get(f"/artifacts/{video_id}/content", headers=me).status_code == 404
+        served = [a for a in artifacts if a["type"] == "IMAGE_ASSET"
+                  and c.get(f"/artifacts/{a['artifact_id']}/content", headers=me).status_code == 200]
+        assert served, "no servable artifact content came back through the API"
+        duration = video_duration(video_id)
         assert duration > 0, duration
         assert c.get(f"/tasks/{task['task_id']}", headers=other).status_code == 404
-        assert c.get(f"/artifacts/{videos[0]['artifact_id']}/content", headers=other).status_code == 404
+        assert c.get(f"/artifacts/{served[0]['artifact_id']}/content", headers=other).status_code == 404
         stop_if(run, "lesson")
 
         # One teaching-session answer, graded (the interactive path: teacher turns and grading in the API process).

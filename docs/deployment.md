@@ -150,7 +150,9 @@ versions are not reached by a deletion. See [privacy](privacy.md).
 
 The `live-smoke` workflow (`.github/workflows/live-smoke.yml`, MVP item 10) proves the deployed stack on the real
 providers: one lesson queued through the gateway and run by the worker on OpenAI (LLM, TTS, images) and Tavily
-(search) to a playable MP4 served from the bucket, one teaching-session answer graded, then the learner's data
+(search) to an MP4 that plays (read from the bucket and probed with ffprobe; the API lists it but never serves a
+VIDEO's bytes to a learner, since it is rendered from a deck that can hold answer slides, and the run checks that
+refusal and that a servable image is served), one teaching-session answer graded, then the learner's data
 deleted. It runs `deploy/live_smoke.py`, which reuses `deploy/smoke.py`'s identity provider and checks.
 
 **When it runs.** Only when started by hand (Actions, `live-smoke`, Run workflow, branch `main`), with the input
