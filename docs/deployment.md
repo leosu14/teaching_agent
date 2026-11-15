@@ -146,6 +146,57 @@ objects from the bucket, while the spend ledger stays so the daily caps hold. Th
 the service and a contact, the vendors, backup retention) before going live. Database backups and bucket object
 versions are not reached by a deletion. See [privacy](privacy.md).
 
+## Live smoke run
+
+The `live-smoke` workflow (`.github/workflows/live-smoke.yml`, MVP item 10) proves the deployed stack on the real
+providers: one lesson queued through the gateway and run by the worker on OpenAI (LLM, TTS, images) and Tavily
+(search) to a playable MP4 served from the bucket, one teaching-session answer graded, then the learner's data
+deleted. It runs `deploy/live_smoke.py`, which reuses `deploy/smoke.py`'s identity provider and checks.
+
+**When it runs.** Only when started by hand (Actions, `live-smoke`, Run workflow, branch `main`), with the input
+`max_cost_usd` (default `1.00`, at most `5.00`). Its job runs only on `main` and inside the `staging` environment; it
+has no push, pull-request or schedule trigger and is not a required check.
+
+**The temporary stack.** The image is built from the dispatched commit and `deploy/compose.yaml` plus
+`deploy/compose.live.yaml` start on the GitHub-hosted runner under the compose project `ta-live`, with
+`TA_DEPLOYMENT=production`: PostgreSQL, the S3-compatible store, the migration, the API, the worker and the gateway.
+Only the gateway is published, on the runner. Nothing is created outside the runner, and the runner is discarded
+after the job.
+
+**The ceiling.** `TA_BUDGET_TOTAL_MAX_COST_USD=max_cost_usd` (see [production](production.md#the-run-wide-cap)): every
+paid call of the run is reserved against that one cap before it is sent, and refused when it would pass it; the task,
+session, grading and daily USD budgets are set to the same amount, and the unit limits are small (one generated image,
+no image search, no generated video). Afterwards the script reads the ledger in PostgreSQL directly and fails unless
+the run's total is at or under the ceiling, nothing is left reserved, every paid attempt was charged to the cap and
+none was unpriced. The report (`live-smoke-report.json`, a workflow artifact) gives the total and the cost by
+capability and source.
+
+**The keys.** They come only from the `staging` environment's secrets, are written to `deploy/secrets/` in a step
+that never prints them, and reach the API and the worker as secret files (`OPENAI_API_KEY_FILE`,
+`TAVILY_API_KEY_FILE`), never as environment variables; the gateway gets none. The run scans every service's logs, a
+dump of the whole database, every object in the bucket, every API answer it received and its own report for each key
+(as is, base64 and URL-encoded) before and after the deletion; a hit fails the run naming only the variable and the
+place. Failure output is redacted (`***`), and a report holding a key is never written.
+
+**Cleanup.** The learner's data is deleted through the API, then `docker compose down -v --remove-orphans` (with a
+by-label fallback) and the key files and generated key set are removed, on success, failure, the script's own
+30-minute deadline and SIGINT or SIGTERM (a cancelled run; a further signal during the cleanup does not stop it).
+The step's 35-minute timeout is under the job's 45, and `if: always()` steps repeat the teardown
+(`live_smoke.py teardown`) and fail the job if any container, volume or network of `ta-live`, or a key file, is left
+(`live_smoke.py verify-clean`).
+
+**The rehearsal.** The required `deploy` job runs the same script with `--mock`: the offline mock providers, fake
+values in the key files (no real credential is reachable from that job), the mock TTS, images and search priced,
+and the same cap, scans and cleanup; then once more with `--fail-after lesson`, which must fail and leave nothing.
+
+**Setting up `staging` (once, by the repository owner):** Settings, Environments, New environment `staging`;
+deployment branches: `main` only (a required reviewer is optional). Secrets: `OPENAI_API_KEY`, `TAVILY_API_KEY`.
+Variables: `LLM_MODEL` (the OpenAI model), `LLM_INPUT_PRICE_PER_MTOK`, `LLM_OUTPUT_PRICE_PER_MTOK`,
+`TTS_PRICE_PER_MCHAR`, `IMAGE_PRICE_PER_IMAGE`, `SEARCH_PRICE_PER_REQUEST` (USD, at or above the list prices of the
+models used; for Tavily, the price of the credits one request uses), `TA_VENDOR_CAPS` (for example
+`openai=20,tavily=10`, the hard caps set in each vendor's console), and optionally `TTS_MODEL` and `IMAGE_MODEL`. A
+missing or invalid price, model or vendor cap stops the run before anything starts (exit code 2).
+
 ## Known limits
 
 - One API replica and one worker: the multi-replica items (database-time leases, a shared rate limiter) come after

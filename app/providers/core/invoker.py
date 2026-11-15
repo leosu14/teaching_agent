@@ -12,6 +12,8 @@
   afterwards. A timed-out, cancelled or garbled attempt that may have been billed is recorded as `unknown` with its
   estimate charged, as is a successful attempt whose reported usage cannot be read; every attempt is also kept in
   the work's in-memory usage summary.
+- with a run-wide cap (`required_scope`, TA_BUDGET_TOTAL_MAX_COST_USD): refuses a billable attempt that would not be
+  reserved against it (no work scope, or an in-memory account), so no paid call can bypass the cap.
 
 Events go to the scope of the task being executed when there is one, otherwise to the application event bus.
 """
@@ -29,6 +31,7 @@ from app.observability.events import EventBus
 from app.observability.redaction import redact, redact_text
 from app.observability.scope import UsageLedger, current_scope
 from app.observability.spend import Reservation
+from app.schemas.usage import BILLABLE
 from app.providers.core.base import Provider, bind_request_id, new_request_id, release_request_id
 from app.providers.core.errors import (
     ProviderError,
@@ -53,10 +56,14 @@ USAGE_LOG_SIZE = 1000
 class ProviderInvoker:
     def __init__(self, *, policies: dict[Capability, ProviderPolicy] | None = None, events: EventBus | None = None,
                  offline: bool = False, clock: Callable[[], float] = time.perf_counter,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 required_scope: str | None = None, required_limit: float = 0.0) -> None:
         self._policies = dict(policies or {})
         self._events = events
         self.offline = offline
+        # The run-wide cap's scope: every billable attempt must be reserved against it (None: no such rule).
+        self.required_scope = required_scope
+        self._required_limit = required_limit
         self._clock = clock
         self._sleep = sleep
         self._limiters: dict[tuple[Capability, str], RateLimiter] = {}
@@ -81,6 +88,18 @@ class ProviderInvoker:
         elif self._events is not None:
             self._events.emit(type, **data)
 
+    def _require_scope(self, scope, ledger: UsageLedger | None, base: dict) -> None:
+        """Fail closed: a billable attempt that would not be charged to the run-wide cap is never sent."""
+        if ledger is not None and self.required_scope in ledger.account.scope_keys:
+            return
+        exc = BudgetExceededError(
+            "budget exceeded: this paid request would not be charged to the run-wide cap "
+            f"(limit TA_BUDGET_TOTAL_MAX_COST_USD={self._required_limit:g}); it is not sent",
+            limit="TA_BUDGET_TOTAL_MAX_COST_USD", used=0.0, maximum=self._required_limit, scope="total")
+        self._spend_event(scope, EventType.BUDGET_EXHAUSTED, budget=exc.scope, limit=exc.limit, used=exc.used,
+                          maximum=exc.maximum, **base)
+        raise exc
+
     def check_offline(self, provider: Provider) -> None:
         if self.offline and provider.requires_network:
             raise ProviderOfflineError(f"provider '{provider.name}' needs the network, but offline mode is on "
@@ -103,6 +122,9 @@ class ProviderInvoker:
         scope = current_scope()
         ledger = scope.usage if scope is not None else None
         operation_id = new_id("pop")
+
+        if self.required_scope is not None and operation in BILLABLE.get(capability, ()):
+            self._require_scope(scope, ledger, base)
 
         attempt = 0
         while True:

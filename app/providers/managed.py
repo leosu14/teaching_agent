@@ -10,6 +10,7 @@ is always recorded as a provider.fallback event. Results carry the provider that
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Generic, TypeVar
 
@@ -46,14 +47,44 @@ CHARS_PER_TOKEN = 3  # most tokenizers average 3-4 characters per token in Europ
 SPEECH_CHARS_PER_SECOND = 12  # about 12-15 characters of speech per second: over-estimate the audio length
 
 
+# A strict upper bound of a request's input tokens, for its cost reservation: a byte-level tokenizer never makes
+# more tokens than the text has UTF-8 bytes, plus each chat message's framing tokens and the reply's priming.
+TOKENS_PER_MESSAGE = 8
+TOKENS_PER_REQUEST = 16
+
+
+def input_token_bound(request: LLMRequest) -> int:
+    """At least as many input tokens as the request can be billed for: the UTF-8 bytes of the system prompt, the
+    messages and the response schema (sent with the request when native structured output is used), plus framing."""
+    size = len(request.system.encode("utf-8")) + sum(len(m.content.encode("utf-8")) for m in request.messages)
+    if request.response_schema is not None:
+        size += len(json.dumps(request.response_schema, ensure_ascii=False).encode("utf-8"))
+    return size + TOKENS_PER_MESSAGE * (len(request.messages) + 1) + TOKENS_PER_REQUEST
+
+
 def llm_estimate(request: LLMRequest, cost: CostFn | None) -> Estimate:
-    """An upper bound of an LLM request's tokens (estimated input, plus the request's own output limit) and its
-    configured price."""
+    """What an LLM request is reserved at before it is sent. Tokens: estimated input plus the request's own output
+    limit (for MAX_LLM_TOKENS). Cost: the configured price of an upper bound (`input_token_bound`, plus the output
+    limit, which the provider never exceeds), so the settled cost of the request cannot exceed its reservation."""
     chars = len(request.system) + sum(len(m.content) for m in request.messages)
     input_tokens = -(-chars // CHARS_PER_TOKEN)
-    tokens = TokenUsage(input_tokens=input_tokens, output_tokens=request.max_output_tokens)
+    bound = TokenUsage(input_tokens=input_token_bound(request), output_tokens=request.max_output_tokens)
     return Estimate(llm_tokens=input_tokens + request.max_output_tokens,
-                    cost_usd=cost(request.model, tokens) if cost else None)
+                    cost_usd=cost(request.model, bound) if cost else None)
+
+
+def priced(units: float, price: float | None) -> float | None:
+    """The configured price of `units` (characters, images, requests) in USD; None when no price is configured."""
+    return None if price is None else round(units * price, 6)
+
+
+def at_least_priced(reported: float | None, price: float | None) -> float | None:
+    """The provider-reported cost to settle when a price is configured: kept only when it is at least the configured
+    price (None otherwise, so the configured price is charged). A configured price is an upper bound by contract, so
+    a lower reported cost (a mock's 0.0) never makes the run-wide cap charge less than that."""
+    if price is None or reported is None:
+        return reported
+    return reported if reported >= price else None
 
 
 def _currency(*costs: float | None) -> str | None:
@@ -143,8 +174,10 @@ class ManagedLLMProvider(_Delegating, LLMProvider):
 
 
 class ManagedTTSProvider(_Delegating, TTSProvider):
-    def __init__(self, chain: Sequence[TTSProvider], invoker: ProviderInvoker) -> None:
+    def __init__(self, chain: Sequence[TTSProvider], invoker: ProviderInvoker, *,
+                 price_per_mchar: float | None = None) -> None:
         self._chain = _Chain(chain, invoker, Capability.TTS)
+        self.price_per_char = None if price_per_mchar is None else price_per_mchar / 1_000_000
         primary = self._primary = chain[0]
         self.name = primary.name
         self.requires_network = primary.requires_network
@@ -168,24 +201,31 @@ class ManagedTTSProvider(_Delegating, TTSProvider):
     async def synthesize(self, request: ProviderSpeechRequest) -> SynthesizedSpeech:
         def usage(p: TTSProvider, speech: SynthesizedSpeech, request_id: str) -> ProviderUsage:
             u = speech.usage
+            # the configured price of the characters billed (the provider's own estimate when none is configured)
+            price = (priced(u.characters if u.characters is not None else len(request.text), self.price_per_char)
+                     if self.price_per_char is not None else None)
+            estimated = price if price is not None else u.estimated_cost_usd
             return ProviderUsage(
                 provider=p.name, capability=Capability.TTS, operation="synthesize", model=speech.model,
                 request_id=request_id, vendor_request_id=speech.metadata.get("vendor_request_id"),
                 characters=u.characters, audio_seconds=u.seconds, input_tokens=u.tokens,
-                estimated_cost=u.estimated_cost_usd, actual_cost=u.cost_usd,
-                currency=_currency(u.estimated_cost_usd, u.cost_usd),
+                estimated_cost=estimated, actual_cost=at_least_priced(u.cost_usd, price),
+                currency=_currency(estimated, u.cost_usd),
             )
 
         chars = len(request.text)
         provider, speech = await self._chain.run("synthesize", lambda p: p.synthesize(request), usage,
                                                  estimate=Estimate(characters=chars,
-                                                                   audio_seconds=chars / SPEECH_CHARS_PER_SECOND))
+                                                                   audio_seconds=chars / SPEECH_CHARS_PER_SECOND,
+                                                                   cost_usd=priced(chars, self.price_per_char)))
         return speech.model_copy(update={"provider": provider.name})
 
 
 class ManagedImageGenerationProvider(_Delegating, ImageGenerationProvider):
-    def __init__(self, chain: Sequence[ImageGenerationProvider], invoker: ProviderInvoker) -> None:
+    def __init__(self, chain: Sequence[ImageGenerationProvider], invoker: ProviderInvoker, *,
+                 price_per_image: float | None = None) -> None:
         self._chain = _Chain(chain, invoker, Capability.IMAGE)
+        self.price_per_image = price_per_image
         primary = self._primary = chain[0]
         self.name = primary.name
         self.requires_network = primary.requires_network
@@ -202,11 +242,15 @@ class ManagedImageGenerationProvider(_Delegating, ImageGenerationProvider):
             return ProviderUsage(
                 provider=p.name, capability=Capability.IMAGE, operation="generate", model=image.model,
                 request_id=request_id, vendor_request_id=image.metadata.get("vendor_request_id"),
-                image_count=image.usage.images, actual_cost=image.usage.cost_usd,
-                currency=_currency(image.usage.cost_usd),
+                image_count=image.usage.images,
+                actual_cost=at_least_priced(image.usage.cost_usd, priced(max(image.usage.images, 1),
+                                                                         self.price_per_image)),
+                estimated_cost=priced(max(image.usage.images, 1), self.price_per_image),
+                currency=_currency(image.usage.cost_usd, self.price_per_image),
             )
 
-        provider, image = await self._chain.run("generate", lambda p: p.generate(request), usage)
+        provider, image = await self._chain.run("generate", lambda p: p.generate(request), usage,
+                                                estimate=Estimate(cost_usd=priced(1, self.price_per_image)))
         return image.model_copy(update={"provider": provider.name})
 
 
@@ -238,8 +282,10 @@ class ManagedImageSearchProvider(_Delegating, ImageSearchProvider):
 
 
 class ManagedSearchProvider(_Delegating, SearchProvider):
-    def __init__(self, chain: Sequence[SearchProvider], invoker: ProviderInvoker) -> None:
+    def __init__(self, chain: Sequence[SearchProvider], invoker: ProviderInvoker, *,
+                 price_per_request: float | None = None) -> None:
         self._chain = _Chain(chain, invoker, Capability.SEARCH)
+        self.price_per_request = price_per_request
         primary = self._primary = chain[0]
         self.name = primary.name
         self.requires_network = primary.requires_network
@@ -253,9 +299,12 @@ class ManagedSearchProvider(_Delegating, SearchProvider):
         def usage(p: SearchProvider, page: SearchPage, request_id: str) -> ProviderUsage:
             return ProviderUsage(provider=p.name, capability=Capability.SEARCH, operation="search",
                                  request_id=request_id, result_count=len(page.hits),
-                                 actual_cost=page.usage.cost_usd, currency=_currency(page.usage.cost_usd))
+                                 actual_cost=at_least_priced(page.usage.cost_usd, priced(1, self.price_per_request)),
+                                 estimated_cost=priced(1, self.price_per_request),
+                                 currency=_currency(page.usage.cost_usd, self.price_per_request))
 
-        provider, page = await self._chain.run("search", lambda p: p.search(request), usage)
+        provider, page = await self._chain.run("search", lambda p: p.search(request), usage,
+                                               estimate=Estimate(cost_usd=priced(1, self.price_per_request)))
         return page.model_copy(update={"provider": provider.name})
 
 

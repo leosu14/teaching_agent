@@ -37,12 +37,13 @@ class ProductionSettings(BaseSettings):
     max_searched_images: int = Field(default=0, ge=0)
     max_tts_characters: int = Field(default=30_000, ge=1)
     max_tts_seconds: float = Field(default=1800.0, gt=0)
-    max_cost_usd: float | None = Field(default=None, ge=0)
+    max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     # Generated video segments (optional; only lessons that ask for them). They apply to every lesson, not only to
     # production tasks: the video strategy plans within them, and production tasks also enforce them per request.
     max_generated_video_segments: int = Field(default=2, ge=0, le=20)
     max_generated_video_seconds: float = Field(default=20.0, ge=0, le=600)
-    max_video_generation_cost_usd: float | None = Field(default=None, ge=0)  # None: no cost limit (counts still do)
+    # None: no cost limit (counts still do)
+    max_video_generation_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     production_health_timeout_seconds: float = Field(default=20.0, gt=0, le=300)
 
     @field_validator("*", mode="before")

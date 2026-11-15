@@ -143,3 +143,22 @@ jobs:
         run: pip install "httpx>=0.27" "PyJWT[crypto]>=2.8"
       - name: Deployment smoke test (image, compose stack, migrations, S3, gateway, worker)
         run: python deploy/smoke.py
+      # The live smoke run's rehearsal (MVP item 10, deploy/live_smoke.py --mock): the same script and stack as the
+      # manual `live-smoke` workflow, on the offline mock providers with fake keys in the key files and every paid
+      # capability priced under a run-wide cap. No real provider or credential is reachable from this job.
+      - name: Live smoke rehearsal (mock providers, fake keys, run-wide cap)
+        timeout-minutes: 30
+        run: |
+          python deploy/live_smoke.py --mock --max-cost 2.00 --no-build --deadline-minutes 25
+          python deploy/live_smoke.py verify-clean
+      - name: Live smoke rehearsal of a failed run (must fail, then leave nothing behind)
+        timeout-minutes: 20
+        run: |
+          if python deploy/live_smoke.py --mock --max-cost 2.00 --no-build --fail-after lesson --deadline-minutes 15
+          then
+            echo "the forced failure did not fail"; exit 1
+          fi
+          python deploy/live_smoke.py verify-clean
+      - name: Tear down whatever a rehearsal left (always)
+        if: always()
+        run: python deploy/live_smoke.py teardown && python deploy/live_smoke.py verify-clean

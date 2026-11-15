@@ -1,0 +1,99 @@
+# The live smoke run (MVP item 10, issue #52; docs/deployment.md, "Live smoke run"): one lesson and one graded
+# answer on the real providers (OpenAI and Tavily), through a temporary production-profile stack started on this
+# runner from `main`, under one run-wide dollar ceiling, then the learner's data deleted and everything torn down.
+#
+# It spends real money, so it runs only when started by hand, only on `main`, and only inside the protected `staging`
+# environment, whose secrets are released to `main` alone (set the environment's deployment branches to `main`).
+# It never runs on a push or a pull request, and it is not a required check of the `main` ruleset.
+#
+# The `staging` environment holds:
+#   secrets    OPENAI_API_KEY, TAVILY_API_KEY
+#   variables  LLM_MODEL, LLM_INPUT_PRICE_PER_MTOK, LLM_OUTPUT_PRICE_PER_MTOK, TTS_PRICE_PER_MCHAR,
+#              IMAGE_PRICE_PER_IMAGE, SEARCH_PRICE_PER_REQUEST (USD, at or above the vendors' list prices),
+#              TA_VENDOR_CAPS (e.g. openai=20,tavily=10: the hard caps set in each vendor's console),
+#              optionally TTS_MODEL, IMAGE_MODEL
+name: live-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_cost_usd:
+        description: "Run-wide ceiling in USD for every paid call of the run (above 0, at most 5.00)"
+        required: true
+        default: "1.00"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-smoke
+  cancel-in-progress: false
+
+jobs:
+  live-smoke:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 45
+    env:
+      MAX_COST_USD_INPUT: ${{ inputs.max_cost_usd }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check the ceiling (above 0, at most 5.00 USD)
+        run: |
+          python - <<'PY'
+          import math, os, sys
+          raw = os.environ["MAX_COST_USD_INPUT"]
+          try:
+              value = float(raw)
+          except ValueError:
+              sys.exit(f"max_cost_usd={raw!r} is not a number")
+          if not math.isfinite(value) or not 0 < value <= 5.0:
+              sys.exit(f"max_cost_usd={raw!r} must be above 0 and at most 5.00")
+          print(f"ceiling: {value:.2f} USD")
+          PY
+      - name: Install the smoke test's client (the IdP's token signing and HTTP)
+        run: pip install "httpx>=0.27" "PyJWT[crypto]>=2.8"
+      - name: Write the provider keys to secret files (never echoed)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+        run: |
+          set +x
+          mkdir -p deploy/secrets
+          printf '%s' "$OPENAI_API_KEY" > deploy/secrets/openai_api_key
+          printf '%s' "$TAVILY_API_KEY" > deploy/secrets/tavily_api_key
+          chmod 0644 deploy/secrets/openai_api_key deploy/secrets/tavily_api_key  # read by the containers' user
+      - name: Live smoke run (gateway, API, worker, PostgreSQL, S3, OpenAI, Tavily)
+        timeout-minutes: 35
+        env:
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_INPUT_PRICE_PER_MTOK: ${{ vars.LLM_INPUT_PRICE_PER_MTOK }}
+          LLM_OUTPUT_PRICE_PER_MTOK: ${{ vars.LLM_OUTPUT_PRICE_PER_MTOK }}
+          TTS_PRICE_PER_MCHAR: ${{ vars.TTS_PRICE_PER_MCHAR }}
+          IMAGE_PRICE_PER_IMAGE: ${{ vars.IMAGE_PRICE_PER_IMAGE }}
+          SEARCH_PRICE_PER_REQUEST: ${{ vars.SEARCH_PRICE_PER_REQUEST }}
+          TA_VENDOR_CAPS: ${{ vars.TA_VENDOR_CAPS }}
+          TTS_MODEL: ${{ vars.TTS_MODEL }}
+          IMAGE_MODEL: ${{ vars.IMAGE_MODEL }}
+        run: python deploy/live_smoke.py --max-cost "$MAX_COST_USD_INPUT" --deadline-minutes 30
+      - name: Tear down the stack and remove the key files (always, also after a failure, timeout or cancel)
+        if: always()
+        run: python deploy/live_smoke.py teardown
+      - name: Verify nothing of the run is left
+        if: always()
+        run: python deploy/live_smoke.py verify-clean
+      - name: Upload the report (ids, numbers and statuses only; never written if a key is in it)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-report
+          path: live-smoke-report.json
+          if-no-files-found: ignore
+          retention-days: 30
