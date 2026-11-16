@@ -64,6 +64,8 @@ def summarize(settings: Settings) -> dict[str, str]:
                                                 if settings.real_vendors() else " (mock providers only)"),
         "daily caps per learner": _caps(settings, "learner_daily"),
         "daily caps overall": _caps(settings, "global_daily"),
+        "run-wide cap": (f"max_cost_usd={settings.budget_total_max_cost_usd:g}"
+                         if settings.budget_total_max_cost_usd is not None else "off"),
         "vendor caps": declared,
     }
 

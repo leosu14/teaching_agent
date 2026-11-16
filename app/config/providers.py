@@ -66,8 +66,10 @@ class ProviderSettings(BaseSettings):
     llm_fallback_provider: str | None = None
     llm_fallback_model: str | None = None
     llm_temperature: float | None = Field(default=None, ge=0, le=2)
-    llm_input_price_per_mtok: float | None = Field(default=None, ge=0)  # USD; without it cost is "unknown"
-    llm_output_price_per_mtok: float | None = Field(default=None, ge=0)
+    # USD per million tokens of LLM_MODEL; without it cost is "unknown". Cached input is charged at the input price
+    # (an upper bound: vendors charge cached input at most that).
+    llm_input_price_per_mtok: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    llm_output_price_per_mtok: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     llm_native_structured_output: bool = True  # use the provider's JSON-schema output mode when the schema fits
     # Per-agent routes: agent id -> (provider, model). Read from LLM_<ROLE>_PROVIDER / LLM_<ROLE>_MODEL when not
     # given explicitly (pass {} to ignore the environment).
@@ -86,6 +88,10 @@ class ProviderSettings(BaseSettings):
     tts_model: str | None = None
     tts_base_url: str | None = None
     tts_languages: str = "en-US,en-GB,es-ES,es-MX,fr-FR,de-DE,zh-CN"  # languages a multilingual voice is offered in
+    # USD per million characters synthesized, by any provider of the chain; unset: cost is "unknown". Characters are
+    # known before the request, so the reservation is exact, for a model billed per character (app/config/billing.py;
+    # under the run-wide cap a token-billed model is refused).
+    tts_price_per_mchar: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
     # --- Image generation and image search -----------------------------------------------------------------
     image_provider: str = MOCK
@@ -94,6 +100,17 @@ class ProviderSettings(BaseSettings):
     image_model: str | None = None
     image_base_url: str | None = None
     image_search_provider: str = MOCK
+    # The quality and size every OpenAI image is generated at (then cropped and resized to the requested size).
+    # Unset: the vendor's default quality and the size closest to each image's aspect ratio. They fix the per-image
+    # price, so the run-wide cap requires both (app/config/billing.py).
+    image_quality: str | None = None
+    image_size: str | None = None
+    # USD per generated image at IMAGE_QUALITY and IMAGE_SIZE, by any provider of the chain (for GPT image models:
+    # the image output tokens); unset: cost is "unknown".
+    image_price_per_image: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # USD per million prompt text input tokens (GPT image models bill the prompt too), reserved at the prompt's UTF-8
+    # bytes, an upper bound of its tokens.
+    image_input_price_per_mtok: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
     # --- Web search ---------------------------------------------------------------------------------------
     search_provider: str = MOCK
@@ -105,6 +122,9 @@ class ProviderSettings(BaseSettings):
     search_include_raw_content: bool = True  # full page text, so evidence quotes can be checked against it
     search_include_domains: str | None = None  # comma-separated; results are restricted to these domains
     search_exclude_domains: str | None = None
+    # USD per search request, by any provider of the chain (e.g. Tavily's price of one credit, or two for
+    # SEARCH_DEPTH=advanced); unset: cost is "unknown".
+    search_price_per_request: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
     # --- Video generation (optional generated clips; asynchronous jobs) ----------------------------------------
     video_generation_provider: str = MOCK
@@ -113,7 +133,8 @@ class ProviderSettings(BaseSettings):
     minimax_api_key: SecretStr | None = None
     video_generation_model: str | None = None
     video_generation_base_url: str | None = None
-    video_generation_price_per_second: float | None = Field(default=None, ge=0)  # USD; unset: cost is "unknown"
+    video_generation_price_per_second: float | None = Field(default=None, ge=0,
+                                                            allow_inf_nan=False)  # USD; unset: cost is "unknown"
 
     # --- Call policy: timeouts, bounded retries, local rate limits ------------------------------------------
     provider_backoff_seconds: float = Field(default=0.5, ge=0, le=60)
@@ -291,8 +312,15 @@ class ProviderSettings(BaseSettings):
             problems.append("LLM_FALLBACK_PROVIDER and LLM_FALLBACK_MODEL must be set together")
         if self.llm_fallback_provider and not self.llm_provider:
             problems.append("LLM_FALLBACK_PROVIDER needs LLM_PROVIDER (or define fallbacks in config/routing.toml)")
+        if self.image_quality is not None or self.image_size is not None:
+            from app.config.billing import image_option_problems
+            if any(x != MOCK for x in self.chain(Capability.IMAGE)):
+                problems += image_option_problems(self.image_model, self.image_quality, self.image_size)
         if (self.llm_input_price_per_mtok is None) != (self.llm_output_price_per_mtok is None):
             problems.append("LLM_INPUT_PRICE_PER_MTOK and LLM_OUTPUT_PRICE_PER_MTOK must be set together")
+        if self.llm_input_price_per_mtok is not None and not self.llm_model:
+            problems.append("LLM_INPUT_PRICE_PER_MTOK prices LLM_MODEL, which is not set: set LLM_PROVIDER and "
+                            "LLM_MODEL, or unset the price")
         for agent_id, (provider, model) in (self.llm_routes or {}).items():
             if not provider or not model:
                 problems.append(f"the LLM route of agent '{agent_id}' needs both LLM_<ROLE>_PROVIDER and "
@@ -355,6 +383,7 @@ def apply_llm_overrides(routing: RoutingConfig, settings: ProviderSettings) -> R
             env_models.append(model)
     if settings.llm_input_price_per_mtok is not None and settings.llm_model:
         config.pricing[settings.llm_model] = ModelPricing(input_per_mtok=settings.llm_input_price_per_mtok,
-                                                          output_per_mtok=settings.llm_output_price_per_mtok or 0.0)
+                                                          output_per_mtok=settings.llm_output_price_per_mtok or 0.0,
+                                                          cached_input_per_mtok=settings.llm_input_price_per_mtok)
     config.unpriced_models = sorted({*config.unpriced_models, *(m for m in env_models if m not in config.pricing)})
     return config

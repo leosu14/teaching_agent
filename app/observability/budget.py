@@ -30,6 +30,8 @@ class BudgetExceededError(Exception):
 
 def _exceeded(limit: str, used: float, maximum: float, what: str, *, scope: str = "task") -> BudgetExceededError:
     after = ("the task stops here. Raise the limit and resume the task to continue." if scope == "task" else
+             "no further provider request is made by any work until the run-wide limit is raised (it never resets)."
+             if scope == "total" else
              f"no further provider request is made against this {scope} budget until its limit is raised"
              + (" or the next day starts." if scope in ("learner", "global") else "."))
     return BudgetExceededError(f"budget exceeded: {what} (limit {limit}={maximum:g}, used {used:g}); {after}",

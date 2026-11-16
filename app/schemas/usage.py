@@ -49,6 +49,9 @@ class BudgetDefaults(Schema):
     attempt: TaskBudget = Field(default_factory=TaskBudget)
     learner_daily: TaskBudget | None = None
     global_daily: TaskBudget | None = None
+    # The run-wide cap (TA_BUDGET_TOTAL_MAX_COST_USD): one scope that every paid attempt of every kind of work is
+    # reserved against, which never resets (unlike the daily caps). None: off.
+    total: TaskBudget | None = None
     reservation_grace_seconds: float = Field(default=60.0, ge=0)
 
     def for_task(self, metadata: dict) -> TaskBudget:

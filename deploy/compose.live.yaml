@@ -1,0 +1,59 @@
+# The live smoke run's additions to compose.yaml (MVP item 10, deploy/live_smoke.py; docs/deployment.md, "Live smoke
+# run"): the provider keys as secret files of the API and the worker only, the providers and their prices, and the
+# run-wide spending cap. deploy/live_smoke.py sets every variable below; nothing here has a default that spends.
+#
+#   docker compose -f deploy/compose.yaml -f deploy/compose.live.yaml -p ta-live ...
+#
+# Keys reach the containers only as files (<NAME>_FILE, app/config/secrets.py), never as environment variables, so
+# neither `docker inspect` nor the environment listing shows them. The gateway (the published service) gets none.
+
+x-live-env: &live-env
+  OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+  TAVILY_API_KEY_FILE: /run/secrets/tavily_api_key
+  # Providers: OpenAI (LLM, TTS, images) and Tavily (search) in a live run; the offline mock providers in the
+  # rehearsal (TEACHING_AGENT_MODE=offline, *_PROVIDER=mock), which reads the same key files holding fake values.
+  LLM_PROVIDER: ${LLM_PROVIDER:-}
+  LLM_MODEL: ${LLM_MODEL:-}
+  LLM_INPUT_PRICE_PER_MTOK: ${LLM_INPUT_PRICE_PER_MTOK:-}
+  LLM_OUTPUT_PRICE_PER_MTOK: ${LLM_OUTPUT_PRICE_PER_MTOK:-}
+  TTS_PROVIDER: ${TTS_PROVIDER:-mock}
+  TTS_MODEL: ${TTS_MODEL:-}
+  TTS_PRICE_PER_MCHAR: ${TTS_PRICE_PER_MCHAR:-}
+  IMAGE_PROVIDER: ${IMAGE_PROVIDER:-mock}
+  IMAGE_MODEL: ${IMAGE_MODEL:-}
+  IMAGE_QUALITY: ${IMAGE_QUALITY:-}
+  IMAGE_SIZE: ${IMAGE_SIZE:-}
+  IMAGE_PRICE_PER_IMAGE: ${IMAGE_PRICE_PER_IMAGE:-}
+  IMAGE_INPUT_PRICE_PER_MTOK: ${IMAGE_INPUT_PRICE_PER_MTOK:-}
+  SEARCH_PROVIDER: ${SEARCH_PROVIDER:-mock}
+  SEARCH_DEPTH: basic  # one Tavily credit per request: SEARCH_PRICE_PER_REQUEST is the price of one credit
+  SEARCH_PRICE_PER_REQUEST: ${SEARCH_PRICE_PER_REQUEST:-}
+  # The ceiling: one run-wide cap over all paid work, and the same amount on each narrower USD budget.
+  TA_BUDGET_TOTAL_MAX_COST_USD: ${TA_BUDGET_TOTAL_MAX_COST_USD:?set the run-wide cap}
+  TA_BUDGET_LEARNER_DAILY_MAX_COST_USD: ${TA_BUDGET_TOTAL_MAX_COST_USD}
+  TA_BUDGET_GLOBAL_DAILY_MAX_COST_USD: ${TA_BUDGET_TOTAL_MAX_COST_USD}
+  TA_BUDGET_SESSION_MAX_COST_USD: ${TA_BUDGET_TOTAL_MAX_COST_USD}
+  TA_BUDGET_ATTEMPT_MAX_COST_USD: ${TA_BUDGET_TOTAL_MAX_COST_USD}
+  MAX_COST_USD: ${TA_BUDGET_TOTAL_MAX_COST_USD}
+  # One small lesson: tests/live's unit limits; no image search, no generated video.
+  MAX_LLM_REQUESTS: "40"
+  MAX_LLM_TOKENS: "300000"
+  MAX_SEARCH_REQUESTS: "8"
+  MAX_GENERATED_IMAGES: "1"
+  MAX_SEARCHED_IMAGES: "0"
+  MAX_TTS_CHARACTERS: "8000"
+  MAX_TTS_SECONDS: "900"
+  MAX_GENERATED_VIDEO_SEGMENTS: "0"
+  TA_GENERATED_VIDEO_ENABLED: "false"
+
+services:
+  api:
+    environment: *live-env
+    secrets: [openai_api_key, tavily_api_key]
+  worker:
+    environment: *live-env
+    secrets: [openai_api_key, tavily_api_key]
+
+secrets:
+  openai_api_key: {file: ./secrets/openai_api_key}
+  tavily_api_key: {file: ./secrets/tavily_api_key}

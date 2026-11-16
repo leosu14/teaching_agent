@@ -190,16 +190,20 @@ class Settings(BaseSettings):
     # TA_BUDGET_ATTEMPT_*). The daily caps per learner and across all work (UTC days) are off unless set.
     budget_session_max_llm_requests: int | None = Field(default=200, ge=0)
     budget_session_max_llm_tokens: int | None = Field(default=400_000, ge=0)
-    budget_session_max_cost_usd: float | None = Field(default=None, ge=0)
+    budget_session_max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     budget_attempt_max_llm_requests: int | None = Field(default=6, ge=0)
     budget_attempt_max_llm_tokens: int | None = Field(default=100_000, ge=0)
-    budget_attempt_max_cost_usd: float | None = Field(default=None, ge=0)
+    budget_attempt_max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     budget_learner_daily_max_llm_requests: int | None = Field(default=None, ge=0)
     budget_learner_daily_max_llm_tokens: int | None = Field(default=None, ge=0)
-    budget_learner_daily_max_cost_usd: float | None = Field(default=None, ge=0)
+    budget_learner_daily_max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     budget_global_daily_max_llm_requests: int | None = Field(default=None, ge=0)
     budget_global_daily_max_llm_tokens: int | None = Field(default=None, ge=0)
-    budget_global_daily_max_cost_usd: float | None = Field(default=None, ge=0)
+    budget_global_daily_max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # The run-wide cap: one USD limit for all paid work together (tasks, sessions, grading, every learner), reserved
+    # before each paid call and never reset (a temporary stack's whole run; docs/production.md, "Run-wide cap").
+    # When set, every paid capability in use must have a price, and a paid call outside it is refused.
+    budget_total_max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     # A reservation nobody settled this long after its attempt's timeout is presumed abandoned (crashed process): it
     # is then recorded as `unknown` and its estimate charged.
     spend_reservation_grace_seconds: float = Field(default=60.0, ge=0, le=3600)
@@ -233,6 +237,8 @@ class Settings(BaseSettings):
         return BudgetDefaults(task=task, session=budget("session") or TaskBudget(),
                               attempt=budget("attempt") or TaskBudget(), learner_daily=budget("learner_daily"),
                               global_daily=budget("global_daily"),
+                              total=(TaskBudget(max_cost_usd=self.budget_total_max_cost_usd)
+                                     if self.budget_total_max_cost_usd is not None else None),
                               reservation_grace_seconds=self.spend_reservation_grace_seconds)
 
     @property
@@ -279,6 +285,57 @@ class Settings(BaseSettings):
         used = {p for c in Capability for p in self.providers.chain(c)}
         used |= {provider for provider, _model in (self.providers.llm_routes or {}).values() if provider}
         return sorted(p.lower() for p in used if p and p.lower() != "mock")
+
+    def pricing_gaps(self) -> list[str]:
+        """Every paid capability in use that has no price, naming the variable that sets it. Mock providers are not
+        paid; in offline mode nothing is. An LLM model on a real provider is priced by LLM_INPUT/OUTPUT_PRICE_PER_MTOK
+        (LLM_MODEL only) or a [pricing] entry of the routing file; a fallback or per-role model needs its own."""
+        if self.providers.offline:
+            return []
+        from app.config.providers import MOCK, apply_llm_overrides
+        from app.config.routing import load_routing
+        from app.schemas.providers import Capability
+
+        p = self.providers
+        gaps = []
+        prices = ((Capability.TTS, "TTS_PRICE_PER_MCHAR", p.tts_price_per_mchar),
+                  (Capability.IMAGE, "IMAGE_PRICE_PER_IMAGE", p.image_price_per_image),
+                  (Capability.SEARCH, "SEARCH_PRICE_PER_REQUEST", p.search_price_per_request),
+                  (Capability.VIDEO_GENERATION, "VIDEO_GENERATION_PRICE_PER_SECOND",
+                   p.video_generation_price_per_second),
+                  (Capability.IMAGE_SEARCH, "an image search price (none can be configured)", None))
+        for capability, variable, price in prices:
+            real = [x for x in p.chain(capability) if x != MOCK]
+            if real and price is None:
+                gaps.append(f"{variable} (the {capability.value} provider {', '.join(real)} has no price)")
+        routing = apply_llm_overrides(load_routing(self.routing_file), p)
+        for target in routing.all_targets():
+            if target.provider != MOCK and target.model not in routing.pricing:
+                gaps.append(f"a price for the LLM model '{target.model}' ({target.provider}): "
+                            "LLM_INPUT_PRICE_PER_MTOK and LLM_OUTPUT_PRICE_PER_MTOK price LLM_MODEL only")
+        return gaps
+
+    def cost_cap_problems(self) -> list[str]:
+        """Why the run-wide cap (TA_BUDGET_TOTAL_MAX_COST_USD) cannot bind: a paid capability in use without a price
+        would be reserved at $0 and slip past it. Empty when the cap is off or every paid capability is priced."""
+        if self.budget_total_max_cost_usd is None:
+            return []
+        try:
+            gaps = self.pricing_gaps()
+        except ConfigError as exc:
+            return [f"TA_BUDGET_TOTAL_MAX_COST_USD: the prices cannot be checked: {exc}"]
+        from app.config.billing import billing_problems
+        from app.schemas.providers import Capability
+
+        p = self.providers
+        unbounded = [] if p.offline else billing_problems(
+            tts_chain=p.chain(Capability.TTS), tts_model=p.tts_model, image_chain=p.chain(Capability.IMAGE),
+            image_model=p.image_model, image_quality=p.image_quality, image_size=p.image_size,
+            image_input_price_per_mtok=p.image_input_price_per_mtok)
+        return ([f"TA_BUDGET_TOTAL_MAX_COST_USD needs a price for every paid capability in use; set {gap}"
+                 for gap in gaps]
+                + [f"TA_BUDGET_TOTAL_MAX_COST_USD cannot bound this request before it is sent: {problem}"
+                   for problem in unbounded])
 
     def deployment_problems(self) -> list[str]:
         """Why this configuration is not a production deployment (an empty list: it is). Never shows a secret."""
@@ -437,6 +494,9 @@ class Settings(BaseSettings):
         """Startup validation: provider configuration first (every problem at once, secrets never shown), then the
         local corpora the mock and local providers read."""
         self.providers.validate_startup()
+        problems = self.cost_cap_problems()  # fail closed: a cap that an unpriced capability could bypass
+        if problems:
+            raise ConfigError("the run-wide spending cap cannot bind:\n  - " + "\n  - ".join(problems))
         missing = [str(p) for p in self.course_paths() if not p.is_file()]
         if missing:
             raise ConfigError(f"TA_COURSES names course files that do not exist: {missing}")

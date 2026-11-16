@@ -7,7 +7,8 @@ database (unit tests, throwaway scopes) the same semantics.
 
 Scopes (`kind:id`): `task:{task_id}`, `session:{session_id}` (an interactive teaching session), `attempt:{attempt_id}`
 (the grading of one assessment attempt through the API), `learner:{learner_id}:{YYYY-MM-DD}` and `global:{YYYY-MM-DD}`
-(daily caps, UTC, only when configured), `local:{id}` (an in-memory ledger).
+(daily caps, UTC, only when configured), `total:all` (the run-wide cap, TA_BUDGET_TOTAL_MAX_COST_USD: every paid
+attempt of every account, never reset; only when configured), `local:{id}` (an in-memory ledger).
 
 A daily scope is resolved for each reservation, from the same clock reading that stamps the entry: an attempt
 reserved at 23:59:59 UTC belongs to that day, one reserved a second later to the next, whatever the age of the
@@ -99,6 +100,10 @@ def attempt_scope(attempt_id: str) -> str:
     return f"attempt:{attempt_id}"
 
 
+# The run-wide cap's scope: one counter set for all work, whatever the day (it never resets).
+TOTAL_SCOPE = "total:all"
+
+
 def utc_day(now: datetime) -> date:
     """The UTC calendar day of an instant (the day boundary of the daily caps); a naive datetime is taken as UTC."""
     return (now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)).date()
@@ -167,6 +172,7 @@ class SpendAccount:
     swept: list[str] = field(default_factory=list)  # abandoned reservations found by the last sweep (for events)
     learner_daily: TaskBudget | None = None  # applies only with a learner_id
     global_daily: TaskBudget | None = None
+    total: TaskBudget | None = None  # the run-wide cap (TOTAL_SCOPE), the same scope for every account and day
 
     @classmethod
     def local(cls, budget: TaskBudget | None = None, seed: TaskUsage | None = None) -> SpendAccount:
@@ -178,12 +184,15 @@ class SpendAccount:
         return cls(store=store, scopes=(BudgetScope(key, budget),))
 
     def scopes_at(self, now: datetime) -> tuple[BudgetScope, ...]:
-        """Every scope a reservation made at `now` charges: the fixed ones, then the daily caps of now's UTC day."""
+        """Every scope a reservation made at `now` charges: the fixed ones, the daily caps of now's UTC day, then the
+        run-wide cap (the same scope whatever the day)."""
         daily = []
         if self.learner_daily is not None and self.learner_id:
             daily.append(BudgetScope(learner_day_scope(self.learner_id, now), self.learner_daily))
         if self.global_daily is not None:
             daily.append(BudgetScope(global_day_scope(now), self.global_daily))
+        if self.total is not None:
+            daily.append(BudgetScope(TOTAL_SCOPE, self.total))
         return (*self.scopes, *daily)
 
     @property
@@ -271,7 +280,8 @@ class SpendAccount:
 
 
 def _daily(defaults: BudgetDefaults) -> dict[str, TaskBudget | None]:
-    return {"learner_daily": defaults.learner_daily, "global_daily": defaults.global_daily}
+    """The caps every durable account adds to its own scopes: the daily ones and the run-wide one."""
+    return {"learner_daily": defaults.learner_daily, "global_daily": defaults.global_daily, "total": defaults.total}
 
 
 def task_account(store: SpendStore, defaults: BudgetDefaults, *, task_id: str, learner_id: str | None,

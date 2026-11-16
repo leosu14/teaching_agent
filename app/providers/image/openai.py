@@ -63,21 +63,29 @@ class OpenAIImageGenerationProvider(ImageGenerationProvider):
     name = "openai"
     requires_network: ClassVar[bool] = True
 
-    def __init__(self, http: HttpClient, *, model: str | None = None) -> None:
+    def __init__(self, http: HttpClient, *, model: str | None = None, quality: str | None = None,
+                 size: str | None = None) -> None:
         self._http = http
         self.model = model or DEFAULT_MODEL
+        self.quality = quality  # sent as is; None: the vendor's default
+        self.size = size  # "WxH" pinned for every image (then cropped and resized); None: closest aspect ratio
 
     def configuration(self) -> dict:
-        return {"base_url": self._http.base_url, "model": self.model,
-                "sizes": [f"{w}x{h}" for w, h in sizes_for(self.model)]}
+        return {"base_url": self._http.base_url, "model": self.model, "quality": self.quality,
+                "sizes": [self.size] if self.size else [f"{w}x{h}" for w, h in sizes_for(self.model)]}
 
     async def probe(self) -> str:
         await self._http.request("GET", f"/models/{self.model}")  # authenticated, nothing generated
         return "network"
 
     async def generate(self, request: ProviderImageRequest) -> GeneratedImage:
-        native_w, native_h = closest_size(request.width, request.height, sizes_for(self.model))
+        if self.size:
+            native_w, native_h = (int(x) for x in self.size.split("x"))
+        else:
+            native_w, native_h = closest_size(request.width, request.height, sizes_for(self.model))
         body = {"model": self.model, "prompt": request.prompt, "size": f"{native_w}x{native_h}", "n": 1}
+        if self.quality:
+            body["quality"] = self.quality
         if self.model.startswith("dall-e"):
             body["response_format"] = "b64_json"  # GPT image models always return base64
         response = await self._http.request("POST", "/images/generations", json_body=body)

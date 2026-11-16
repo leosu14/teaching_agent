@@ -39,7 +39,7 @@ from app.pedagogy.strategy import StrategyRegistry
 from app.observability.events import EventBus
 from app.observability.logging import log_event
 from app.observability.redaction import register_secret
-from app.observability.spend import SpendStore
+from app.observability.spend import TOTAL_SCOPE, SpendStore
 from app.providers.core.http import HttpClient
 from app.providers.core.invoker import ProviderInvoker
 from app.providers.core.registry import ProviderRegistry
@@ -259,7 +259,7 @@ def _openai_image(settings: Settings) -> ImageGenerationProvider:
     p, key = settings.providers, _credential(settings, Capability.IMAGE, "openai")
     http = _http(settings, Capability.IMAGE, "openai", p.image_base_url or p.openai_base_url,
                  _openai_headers(p, key), key, request_id_header="X-Client-Request-Id")
-    return OpenAIImageGenerationProvider(http, model=p.image_model)
+    return OpenAIImageGenerationProvider(http, model=p.image_model, quality=p.image_quality, size=p.image_size)
 
 
 def _tavily_search(settings: Settings) -> SearchProvider:
@@ -330,7 +330,9 @@ def build_providers(settings: Settings, events: EventBus, *, llm_providers: dict
     for secret in p.secret_values():
         register_secret(secret)
     routing = apply_llm_overrides(load_routing(settings.routing_file), p)
-    invoker = ProviderInvoker(policies=p.policies(), events=events, offline=p.offline)
+    total = settings.budget_total_max_cost_usd
+    invoker = ProviderInvoker(policies=p.policies(), events=events, offline=p.offline,
+                              required_scope=TOTAL_SCOPE if total is not None else None, required_limit=total or 0.0)
     registry = ProviderRegistry(offline=p.offline)
 
     raw_llm = llm_providers if llm_providers is not None else build_llm_providers(settings, routing)
@@ -358,10 +360,13 @@ def build_providers(settings: Settings, events: EventBus, *, llm_providers: dict
                                 models={cap: p.model(cap) for cap in Capability})
     return ProviderStack(
         registry=registry, selector=selector, invoker=invoker, routing=routing, llm=llm,
-        tts=ManagedTTSProvider(selector.chain(Capability.TTS), invoker),
-        image_generation=ManagedImageGenerationProvider(selector.chain(Capability.IMAGE), invoker),
+        tts=ManagedTTSProvider(selector.chain(Capability.TTS), invoker, price_per_mchar=p.tts_price_per_mchar),
+        image_generation=ManagedImageGenerationProvider(selector.chain(Capability.IMAGE), invoker,
+                                                        price_per_image=p.image_price_per_image,
+                                                        input_price_per_mtok=p.image_input_price_per_mtok),
         image_search=ManagedImageSearchProvider(selector.chain(Capability.IMAGE_SEARCH)[0], invoker),
-        search=ManagedSearchProvider(selector.chain(Capability.SEARCH), invoker),
+        search=ManagedSearchProvider(selector.chain(Capability.SEARCH), invoker,
+                                     price_per_request=p.search_price_per_request),
         video_generation=ManagedVideoGenerationProvider(selector.chain(Capability.VIDEO_GENERATION), invoker,
                                                         price_per_second=p.video_generation_price_per_second),
     )

@@ -23,6 +23,7 @@ from app.storage.db import create_db, dispose
 from app.storage.repositories import SqlSpendRepository, SqlTaskRepository
 from tests.integration.test_spend_concurrency import EACH, WORKERS, _process, check, race
 from tests.unit.test_spend_daily_scope import race_across_midnight
+from tests.unit.test_spend_run_cap import race_total
 
 URL = os.environ.get("TA_TEST_POSTGRES_URL")
 pytestmark = pytest.mark.skipif(not URL, reason="set TA_TEST_POSTGRES_URL to run the PostgreSQL spend tests")
@@ -113,3 +114,9 @@ def test_workers_crossing_midnight_never_exceed_either_days_cap_on_postgres() ->
     """F8 on PostgreSQL: each reservation resolves its learner day, so workers whose clocks straddle midnight UTC
     race for two day counters; each day admits exactly its cap, and every counter equals the sum of its entries."""
     race_across_midnight(URL)
+
+
+def test_workers_never_pass_the_run_wide_cap_on_postgres() -> None:
+    """MVP item 10 on PostgreSQL: concurrent reservations of different tasks and learners race for the one
+    run-wide counter (`total:all`); row locks admit exactly what fits under the cap."""
+    race_total(URL)

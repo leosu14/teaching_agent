@@ -113,7 +113,7 @@ are no longer read (they only ever accepted the mocks).
 | `LLM_FALLBACK_PROVIDER` / `LLM_FALLBACK_MODEL` | none | Explicit fallback target, tried only after a transient failure (timeout, 429, 5xx, connection) |
 | `LLM_<ROLE>_PROVIDER` / `LLM_<ROLE>_MODEL` | none | Per-role route without touching the agent. `<ROLE>` is an agent id (`TEACHER`, `SLIDE_PLANNER`, ...) or an alias (`REVIEWER` = content_reviewer, `PLANNER` = curriculum_planner, `EVALUATOR`, ...); `DEFAULT` is `LLM_PROVIDER`/`LLM_MODEL` |
 | `LLM_TEMPERATURE` | provider default | Sent only when set |
-| `LLM_INPUT_PRICE_PER_MTOK` / `LLM_OUTPUT_PRICE_PER_MTOK` | none | USD per million tokens for the env-configured models; without them the cost is reported as unknown (`null`), never guessed |
+| `LLM_INPUT_PRICE_PER_MTOK` / `LLM_OUTPUT_PRICE_PER_MTOK` | none | USD per million tokens for `LLM_MODEL` (set both, and only with `LLM_MODEL`); cached input is charged at the input price. Without them the cost is reported as unknown (`null`), never guessed. A reply naming a dated snapshot of `LLM_MODEL` (e.g. `-2024-07-18`) is priced as it. A fallback or per-role model is priced in the routing file's `[pricing]` |
 | `LLM_NATIVE_STRUCTURED_OUTPUT` | `true` | Use the vendor's JSON-schema mode when the schema fits it; output is validated either way |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_ORGANIZATION` | — / `https://api.openai.com/v1` / — | OpenAI or a compatible server (https required except on localhost) |
 | `OPENAI_MAX_TOKENS_PARAM` | `max_completion_tokens` | `max_tokens` for older OpenAI-compatible servers |
@@ -121,13 +121,18 @@ are no longer read (they only ever accepted the mocks).
 | `TTS_PROVIDER` / `TTS_FALLBACK_PROVIDER` | `mock` / none | `mock` or `openai` (`/audio/speech`, returned as WAV) |
 | `TTS_API_KEY` / `TTS_MODEL` / `TTS_BASE_URL` | `OPENAI_API_KEY` / `gpt-4o-mini-tts` / OpenAI | Speech credentials, model and endpoint |
 | `TTS_LANGUAGES` | `en-US,en-GB,es-ES,es-MX,fr-FR,de-DE,zh-CN` | Languages the real TTS voices are offered in |
+| `TTS_PRICE_PER_MCHAR` | none | USD per million characters synthesized (any provider of the chain); reserved before each request from its characters. Under the run-wide cap only a model billed per character is accepted (OpenAI `tts-1`, `tts-1-hd`). Without it the cost is unknown |
 | `IMAGE_PROVIDER` / `IMAGE_FALLBACK_PROVIDER` | `mock` / none | `mock` or `openai` (`/images/generations`). Only generated visuals use it: the VisualAgent policy keeps photos and maps searched |
 | `IMAGE_API_KEY` / `IMAGE_MODEL` / `IMAGE_BASE_URL` | `OPENAI_API_KEY` / `gpt-image-1` / OpenAI | Image generation credentials, model and endpoint |
+| `IMAGE_QUALITY` / `IMAGE_SIZE` | none | The quality (`low`/`medium`/`high` for GPT image models, `standard`/`hd` for DALL·E 3) and size (`WxH`, one the model generates) every OpenAI image is generated at, then cropped and resized; unset: the vendor's default quality and the size closest to each image's aspect ratio. Both required under the run-wide cap |
+| `IMAGE_PRICE_PER_IMAGE` | none | USD per generated image at `IMAGE_QUALITY` and `IMAGE_SIZE` (any provider of the chain); reserved before each generation. Without it the cost is unknown |
+| `IMAGE_INPUT_PRICE_PER_MTOK` | none | USD per million prompt text input tokens (GPT image models bill the prompt too; required for them under the run-wide cap), reserved at the prompt's UTF-8 bytes |
 | `IMAGE_SEARCH_PROVIDER` | `mock` | Image search (only the mock catalogue in this release) |
 | `SEARCH_PROVIDER` / `SEARCH_FALLBACK_PROVIDER` | `mock` / none | `mock` or `tavily` |
 | `SEARCH_API_KEY` / `SEARCH_BASE_URL` | `TAVILY_API_KEY` / `https://api.tavily.com` | Web search credentials and endpoint |
 | `SEARCH_DEPTH` / `SEARCH_INCLUDE_RAW_CONTENT` | `basic` / `true` | Tavily search depth; fetch page text so evidence quotes can be checked against it |
 | `SEARCH_INCLUDE_DOMAINS` / `SEARCH_EXCLUDE_DOMAINS` | none | Comma-separated website restrictions applied to every research query |
+| `SEARCH_PRICE_PER_REQUEST` | none | USD per search request (any provider of the chain; for Tavily the price of the credits one request uses at `SEARCH_DEPTH`); reserved before each search. Without it the cost is unknown |
 | `VIDEO_GENERATION_PROVIDER` / `VIDEO_GENERATION_FALLBACK_PROVIDER` | `mock` / none | `mock` or `minimax` (MiniMax Hailuo, plain HTTP). A key alone never selects MiniMax: it needs this variable and `TEACHING_AGENT_MODE=production`. The fallback applies to submission only |
 | `VIDEO_GENERATION_API_KEY` / `VIDEO_GENERATION_MODEL` / `VIDEO_GENERATION_BASE_URL` | `MINIMAX_API_KEY` / `MiniMax-Hailuo-02` / `https://api.minimax.io/v1` | Video generation credentials, model and endpoint |
 | `VIDEO_GENERATION_PRICE_PER_SECOND` | none | USD per generated second; without it the cost is unknown and the segment and seconds limits bound spending |
@@ -166,6 +171,7 @@ exhausted one answers HTTP 429.
 | `TA_BUDGET_ATTEMPT_MAX_LLM_REQUESTS` / `_MAX_LLM_TOKENS` / `_MAX_COST_USD` | `6` / `100000` / none | Grading one assessment attempt outside a task |
 | `TA_BUDGET_LEARNER_DAILY_MAX_LLM_REQUESTS` / `_MAX_LLM_TOKENS` / `_MAX_COST_USD` | none | All of one learner's work per UTC day (off unless set) |
 | `TA_BUDGET_GLOBAL_DAILY_MAX_LLM_REQUESTS` / `_MAX_LLM_TOKENS` / `_MAX_COST_USD` | none | All work per UTC day (off unless set) |
+| `TA_BUDGET_TOTAL_MAX_COST_USD` | none | The run-wide cap: all paid work together (tasks, sessions, grading, every learner), never reset. When set, every paid capability in use must be priced, and a paid call outside it is refused ([production](production.md#the-run-wide-cap)) |
 | `TA_SPEND_RESERVATION_GRACE_SECONDS` | `60` | How long after its timeout an unsettled reservation is presumed abandoned and charged its estimate |
 
 ## Model routing (`config/routing.toml`)

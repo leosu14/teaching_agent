@@ -9,3 +9,4 @@ var/
 .venv/
 deploy/secrets/
 deploy/gateway/
+live-smoke-report.json
