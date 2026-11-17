@@ -18,10 +18,10 @@ Delivery is at least once. Within one connection a source's position only increa
 reconnect resumes strictly after the positions in the cursor the client last received, so an event whose frame was
 written but whose cursor never arrived is sent again, and the client deduplicates by `event_id`.
 
-Settled reads. `seq` is allocated at insert but visible at commit, so on PostgreSQL a lower `seq` can become visible
-after a higher one. Each poll records the table's highest visible `seq`; events are delivered only up to the highest
-value recorded at least `settle_seconds` earlier. That is an engineering assumption (each event append is its own
-short transaction), not a guarantee: a commit delayed beyond the bound can still be passed (docs/architecture.md).
+Ordered commits and settled reads. `seq` is allocated at insert but visible at commit; `SqlEventRepository.append`
+takes the event-order lock before its insert, so events commit in `seq` order and a source's position never passes a
+row that becomes visible later. Each poll also records the table's highest visible `seq`, and events are delivered only
+up to the highest value recorded at least `settle_seconds` earlier (defence in depth; docs/architecture.md).
 
 Access loss. Each poll re-runs the caller's access rule (the GET route's) after its reads and before anything read
 in it is sent. When the rule fails, or anything in the poll raises, the stream stops at once: no further frame, not

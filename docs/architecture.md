@@ -987,17 +987,31 @@ reconnect resumes strictly after the positions it names; an event whose frame wa
 reached the client is sent again, and the client deduplicates by the stable `event_id` (the student app keeps the
 ids it has shown per cycle, and shows progress from the latest `status` and that set).
 
-**Settled reads, an engineering assumption.** `seq` is allocated at insert and visible at commit, so on PostgreSQL a
-row with a lower `seq` can become visible after one with a higher `seq`. Each poll records the table's highest
-visible `seq`, and events are delivered only up to the highest value recorded at least `TA_STREAM_SETTLE_SECONDS`
-(2 s) earlier; positions never advance past that bound. This relies on each event append being its own short
-single-row transaction (`SqlEventRepository.append`), which commits in milliseconds. A commit delayed beyond the bound
-(a stalled connection, a lock wait, a paused process) can still become visible after the cursor has passed its `seq`,
-and that event is then not streamed (it stays stored and `GET .../events` serves it). Closing the window completely
-needs a commit-ordered feed (`LISTEN/NOTIFY`, or a per-source sequence written under the source's lease), which is
-out of scope. `tests/postgres/test_progress_stream_postgres.py` tests both sides of the bound with a held
-transaction. On SQLite writes are serialised and rows become visible in `seq` order. Before `end`, the stream waits
-until the bound covers every event that was stored when the stop state was read.
+**Event commits in `seq` order.** `seq` is allocated at INSERT and visible at commit, so on PostgreSQL a row with a
+lower `seq` could otherwise become visible after one with a higher `seq` (a stalled connection, a slow commit, a paused
+process), after a stream's cursor had passed it. `SqlEventRepository.append` therefore takes a transaction-scoped
+advisory lock (`_lock_event_order`, `pg_advisory_xact_lock(54, 1)`, the two-key form, a key space apart from the
+learner and object locks) as the last lock of its transaction, just before the lookup of the event id and the INSERT,
+in the same transaction and connection. It is held until that transaction commits or rolls back, and PostgreSQL makes
+a commit visible before it releases the transaction's locks, so the next append allocates its `seq` only once the
+previous one is visible or gone. The rows visible at any moment are therefore every row up to the highest visible
+`seq` (a rolled-back `seq` is a gap that never fills), and a cursor never passes a committed event, however long a
+commit takes. The same lock makes a stable event id appended twice at once stored once (the second sees the first).
+It cannot be part of a deadlock: nothing else takes it, and its holder only does its own lookup, INSERT and commit.
+SQLite needs nothing: every write there takes the database's write lock.
+
+*Trade-off.* Event appends from the API and the worker take turns for the lock's hold time (one indexed lookup, one
+INSERT and the commit, milliseconds). Measured on a local PostgreSQL 16 (a development container), appends ran at
+about 700 to 750 a second from 1 or 4 writers with the lock, against 700 to 900 without it; a lesson writes tens of
+events. A commit that stalls now delays the other event writes (and the requests or task steps that emit them) until
+it commits or its connection is dropped, instead of letting a stream pass the event.
+
+**Settled reads.** Each poll also records the table's highest visible `seq`, and events are delivered only up to the
+highest value recorded at least `TA_STREAM_SETTLE_SECONDS` (2 s) earlier; positions never advance past that bound.
+With ordered commits this is defence in depth, not what completeness depends on.
+`tests/postgres/test_progress_stream_postgres.py` holds a real append after its INSERT and checks that later appends
+wait for it far beyond the bound, that a rollback frees them, and that concurrent appends become visible in `seq`
+order. Before `end`, the stream waits until the bound covers every event that was stored when the stop state was read.
 
 **Access loss.** Each poll reads the state and the events in a worker thread and then re-runs the GET route's access
 rule (`owned_task` / `owned_cycle`: the learner scope, the teacher's roster, the resource and its learner still
