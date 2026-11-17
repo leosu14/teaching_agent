@@ -423,6 +423,7 @@ class Container:
     object_store: object = None  # the artifacts' store (filesystem or S3), for readiness checks and closing
 
     def close(self) -> None:
+        self.progress_streams.close()
         dispose(self._sessions)
         close = getattr(self.object_store, "close", None)
         if close is not None:

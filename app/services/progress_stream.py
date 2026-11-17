@@ -293,6 +293,10 @@ class ProgressStreamService:
         self.slots = StreamSlots(per_principal=limits.max_per_principal, total=limits.max_streams)
         self._pool = ThreadPoolExecutor(max_workers=STREAM_THREADS, thread_name_prefix="progress-stream")
 
+    def close(self) -> None:
+        """Let the poll threads go (the container is closing): a poll in progress finishes, no new one starts."""
+        self._pool.shutdown(wait=False)
+
     # --- opening -------------------------------------------------------------------------------------------------
 
     def task(self, task_id: str, *, principal: str, check_access: AccessCheck,
