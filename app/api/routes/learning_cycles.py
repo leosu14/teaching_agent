@@ -82,7 +82,7 @@ def cycle_artifacts(cycle_id: str, c: Container = Depends(container)) -> list[Ar
 async def cycle_stream(cycle_id: str, p: Principal = Depends(principal), a: Access = Depends(access),
                        c: Container = Depends(container),
                        after_version: int | None = Query(default=None, ge=0),
-                       last_event_id: str | None = Header(default=None, max_length=4096)) -> EventStreamResponse:
+                       last_event_id: str | None = Header(default=None)) -> EventStreamResponse:  # long: the cursor 400s
     """The cycle's progress as server-sent events: its own events and its child tasks' (sources `cycle` and
     `task:<id>` in the cursor). `after_version`: the `version` of the view the client showed when it sent a POST;
     WAITING or BLOCKED at that version or below does not end the stream (it is the state before the POST). It is

@@ -153,7 +153,7 @@ def test_a_task_stream_follows_the_worker_to_each_stop_and_resumes_without_repea
 def test_stream_errors_and_limits(demo, tmp_path) -> None:
     created = demo.http.post("/tasks", json={"request": DEMO["request"], "learner_id": DEMO["learner_id"]})
     tid = created.json()["task_id"]
-    for bad in ("v9.e30", "v1.!!", "nonsense"):
+    for bad in ("v9.e30", "v1.!!", "nonsense", "v1." + "A" * 5000):
         r = demo.http.get(f"/tasks/{tid}/stream", headers={"Last-Event-ID": bad})
         assert r.status_code == 400 and r.json()["error"] == "InvalidCursor"
     other = demo.auth.headers("someone-else")

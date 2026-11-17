@@ -1032,7 +1032,10 @@ orders event rows by `seq`; the version orders cycle states. Neither is encoded 
 poll's reads in a worker thread, so an idle stream holds no thread. Open streams are capped per principal
 (`TA_STREAM_MAX_PER_PRINCIPAL`, 4) and per API process (`TA_STREAM_MAX_STREAMS`, 200); above either the open is a
 429. A client that goes away is noticed by the response's disconnect watch, and its slot is freed. The caps are per
-process: with several API replicas each counts its own. DB load is two small queries per open stream per poll. The
+process: with several API replicas each counts its own. DB load per open stream and poll is a handful of small
+queries (about 5 for a task: the task, its job, the table's top `seq`, the events, the access rule; about 9 for a
+cycle, whose read is `GET /learning-cycles/{id}`'s, view included). The polls' reads run on their own pool of 8
+threads, not the event loop's default pool, so many open streams queue there instead of starving other work. The
 response sets `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`.
 
 ## Student web app

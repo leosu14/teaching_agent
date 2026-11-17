@@ -111,7 +111,7 @@ def task_events(task_id: str, c: Container = Depends(container)) -> list[Learner
             responses={200: {"content": {"text/event-stream": {}}}})
 async def task_stream(task_id: str, p: Principal = Depends(principal), a: Access = Depends(access),
                       c: Container = Depends(container),
-                      last_event_id: str | None = Header(default=None, max_length=4096)) -> EventStreamResponse:
+                      last_event_id: str | None = Header(default=None)) -> EventStreamResponse:  # long: the cursor 400s
     """The task's progress as server-sent events (`status`, `progress`, `end`, `reconnect`; docs/architecture.md).
     `Last-Event-ID` resumes after a cursor the stream sent (400 when it cannot be read); 429 when too many streams
     are open. Access is checked again, with this route's rule, before every send: when it fails the stream stops

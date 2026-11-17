@@ -41,6 +41,7 @@ import re
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -70,6 +71,9 @@ TASK_WORKING = frozenset({TaskStatus.CREATED, TaskStatus.PLANNING, TaskStatus.RU
 TASK_STOPPED = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.PAUSED})
 TASK_STEP_KINDS = frozenset({StepKind.LESSON, StepKind.EVALUATION})  # steps whose child is a task with events
 EVENTS_PER_POLL = 500
+# The polls' reads run on their own small pool, not the event loop's default one (shared with the rest of the API):
+# many open streams wait their turn there instead of starving other work.
+STREAM_THREADS = 8
 
 
 class InvalidCursor(ValueError):
@@ -287,6 +291,7 @@ class ProgressStreamService:
         self._clock = clock
         self._sleep = sleep
         self.slots = StreamSlots(per_principal=limits.max_per_principal, total=limits.max_streams)
+        self._pool = ThreadPoolExecutor(max_workers=STREAM_THREADS, thread_name_prefix="progress-stream")
 
     # --- opening -------------------------------------------------------------------------------------------------
 
@@ -338,7 +343,8 @@ class ProgressStreamService:
         try:
             while True:
                 try:
-                    snap = await asyncio.to_thread(self._poll, reader, positions, settle, check_access)
+                    snap = await asyncio.get_running_loop().run_in_executor(
+                        self._pool, self._poll, reader, positions, settle, check_access)
                 except Exception as exc:  # noqa: BLE001 - access lost or a failed read: stop without a frame
                     reader.lost(exc)
                     return

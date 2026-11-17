@@ -41,7 +41,8 @@ def open_cycle(env, site, page_for):  # noqa: F811
 
 
 def lines(page) -> list[str]:
-    return [line.get_attribute("data-event-id") for line in page.get_by_test_id("progress-line").all()]
+    """The shown progress lines' event ids, read in one step (the page may re-render between two reads)."""
+    return page.eval_on_selector_all("[data-testid=progress-line]", "els => els.map(e => e.dataset.eventId)")
 
 
 def test_progress_is_shown_while_the_lesson_is_generated(cycle_env_at, site, page_for) -> None:  # noqa: F811
@@ -126,18 +127,7 @@ def test_the_page_falls_back_to_polling_when_the_stream_fails(cycle_env_at, site
 
 def test_a_deletion_in_another_tab_sends_the_page_to_its_error_state(cycle_env_at, site, page_for) -> None:  # noqa: F811
     env = cycle_env_at("session", **FAST)
-    service = env.container.learning_cycle_service
-    [cycle] = service.repository.for_learner(LEARNER)
-    from app.curriculum import cycle as engine
-    from app.schemas.common import utcnow
-
-    service.repository.apply(engine.receive(cycle, utcnow()), expected_version=cycle.version)  # RUNNING, undriven
-
-    async def as_stored(cycle_id):  # keep it RUNNING: a read would fold the waiting session back in
-        record = service.cycle(cycle_id)
-        return record, await service._view(record)
-
-    service.read = as_stored
+    cycle = running_undriven(env)  # a read would fold the waiting session back in: kept RUNNING
     url, token = site(env.container, LEARNER)
     page = page_for(url, token)
     page.route("**/resume", lambda route: None)  # the page's resume never arrives: nobody drives the cycle
@@ -148,3 +138,46 @@ def test_a_deletion_in_another_tab_sends_the_page_to_its_error_state(cycle_env_a
     page.get_by_test_id("error").wait_for()
     assert "could not be found" in page.get_by_test_id("error").inner_text()
     assert page.get_by_test_id("progress").count() == 0  # not a frozen progress view
+
+
+def running_undriven(env):
+    """The session-stage cycle as a RUNNING cycle nobody drives, kept so by every read."""
+    service = env.container.learning_cycle_service
+    [cycle] = service.repository.for_learner(LEARNER)
+    from app.curriculum import cycle as engine
+    from app.schemas.common import utcnow
+
+    service.repository.apply(engine.receive(cycle, utcnow()), expected_version=cycle.version)
+
+    async def as_stored(cycle_id):
+        record = service.cycle(cycle_id)
+        return record, await service._view(record)
+
+    service.read = as_stored
+    return cycle
+
+
+def test_a_stream_that_drops_after_each_status_still_falls_back(cycle_env_at, site, page_for) -> None:  # noqa: F811
+    """Each connection opens and sends `status`, then closes without `end`: that is a failure every time (no new
+    cursor, no end), so the page falls back after its retries instead of reconnecting forever."""
+    env = cycle_env_at("session", **FAST)
+    cycle = running_undriven(env)
+    url, token = site(env.container, LEARNER)
+    page = page_for(url, token)
+    page.route("**/resume", lambda route: None)  # nobody drives it
+    status = json.dumps(env.container.learning_cycle_service.cycle(cycle.cycle_id).model_dump(mode="json"))
+    opened = []
+
+    def status_then_drop(route):
+        opened.append(route.request.url)
+        route.fulfill(status=200, headers={"content-type": "text/event-stream"},
+                      body=f"event: status\ndata: {status}\n\n")
+
+    page.route("**/stream*", status_then_drop)
+    page.goto(f"{url}/app/#/cycle/{cycle.cycle_id}")
+    page.wait_for_timeout(6000)
+    settled = len(opened)
+    page.wait_for_timeout(4000)
+    # STREAM_RETRIES requests (plus one of a rendering the page replaced), with backoff; then no more streams
+    assert 1 <= settled <= 4 and len(opened) == settled, opened
+    assert page.get_by_test_id("error").count() == 0

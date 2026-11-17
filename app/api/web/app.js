@@ -39,6 +39,7 @@ const app = {
   seen: {}, cursors: {}, // per cycle: the event ids already shown, and the last stream cursor received
 };
 const STREAM_RETRIES = 3; // consecutive stream failures before the page falls back to polling
+const POLL_ONLY_MS = 60000; // after a fallback, how long the tab polls before it tries the stream again
 
 // --- small DOM helpers ---------------------------------------------------------------------------------------------
 
@@ -128,6 +129,7 @@ function store(kind, key, value) {
 function stopPolling() {
   if (app.polling) clearTimeout(app.polling);
   app.polling = null;
+  app.cyclePage = null;
   stopFollowing();
 }
 
@@ -261,6 +263,9 @@ function openStream(path, cursor, on) {
 // Follow a cycle's stream until it ends, reconnecting after `reconnect` or a drop (with the last cursor), and
 // falling back to `opts.fallback()` after STREAM_RETRIES failures in a row. `opts`: status(view), progress(data),
 // end(view), lost(), fallback(); `afterVersion` while a POST is in flight (the view's version when it was sent).
+// A connection counts as a success only once it moved the cursor (a new event) or ended with `end` or
+// `reconnect`: a stream that opens, sends `status` and drops each time still falls back, with backoff meanwhile.
+// Returns the follow; its `stop()` closes that follow only (never another page's).
 function followCycle(cycleId, opts) {
   stopFollowing();
   const id = encodeURIComponent(cycleId);
@@ -269,18 +274,24 @@ function followCycle(cycleId, opts) {
   const state = { stopped: false, failures: 0, handle: null };
   app.follow = state;
   const stop = () => { state.stopped = true; if (app.follow === state) app.follow = null; };
+  state.stop = () => { stop(); if (state.handle) state.handle.close(); };
   const retry = () => {
     if (state.stopped) return;
     state.failures += 1;
-    if (state.failures >= STREAM_RETRIES) { stop(); opts.fallback(); return; }
-    setTimeout(connect, 400 * state.failures);
+    if (state.failures >= STREAM_RETRIES) {
+      stop();
+      app.pollOnlyUntil = Date.now() + POLL_ONLY_MS;
+      opts.fallback();
+      return;
+    }
+    setTimeout(connect, Math.min(8000, 500 * 2 ** (state.failures - 1)));
   };
   const connect = () => {
     if (state.stopped) return;
     state.handle = openStream(`/learning-cycles/${id}/stream${query}`, app.cursors[cycleId], {
       frame(f) {
         if (state.stopped) return;
-        state.failures = 0;
+        if (f.id && f.id !== app.cursors[cycleId]) state.failures = 0; // the stream moved on: it works
         if (f.event === "progress" && f.data && f.data.event) {
           if (!seen.has(f.data.event.event_id)) {
             seen.add(f.data.event.event_id);
@@ -292,7 +303,7 @@ function followCycle(cycleId, opts) {
         if (f.id) app.cursors[cycleId] = f.id; // after the frame is shown: a replay is deduplicated, never lost
         if (f.event === "end" && f.data) { stop(); opts.end(f.data); }
       },
-      ended(kind) { if (kind === "reconnect") connect(); },
+      ended(kind) { state.failures = 0; if (kind === "reconnect") connect(); },
       lost() { if (!state.stopped) { stop(); opts.lost(); } },
       failed: retry,
       interrupted() {
@@ -341,7 +352,7 @@ function progressPanel(cycle, title) {
 function watchWhile(cycle, slot, title) {
   const panel = progressPanel(cycle, title);
   slot.replaceChildren(panel.node);
-  followCycle(cycle.cycle_id, {
+  const follow = followCycle(cycle.cycle_id, {
     afterVersion: cycle.version,
     status: (v) => panel.status(v),
     progress: (d) => panel.add(d),
@@ -349,7 +360,7 @@ function watchWhile(cycle, slot, title) {
     lost: () => show(h("h1", { text: "Learning session" }), errorBox({ status: 404 })),
     fallback: () => {}, // the spinner stays until the POST returns
   });
-  return { stop: stopFollowing };
+  return { stop: () => follow.stop() };
 }
 
 // --- start: who is this, and for which learner ---------------------------------------------------------------------
@@ -566,25 +577,30 @@ async function startCycle(button, feedback) {
   app.pending.start = app.pending.start || newId("web");
   const key = app.pending.start;
   feedback.replaceChildren(busy("Preparing your lesson. This can take a minute…"));
-  // The cycle's id comes with the POST's response: find it by its key meanwhile, then show its progress.
+  // The cycle's id comes with the POST's response: find it by its key meanwhile, then show its progress. Only
+  // while this page is shown: once the learner moved on, nothing here touches the page they are on.
+  const gen = app.view;
   let finding = true;
+  let follow = null;
+  const here = () => finding && gen === app.view;
   const find = async () => {
-    if (!finding) return;
+    if (!here()) return;
     try {
       const mine = (await get(`${L()}/learning-cycles`)).find((c) => c.idempotency_key === key);
-      if (mine && finding) {
+      if (mine && here()) {
         const panel = progressPanel(mine, "Preparing your lesson. This can take a minute…");
         feedback.replaceChildren(panel.node);
-        followCycle(mine.cycle_id, { status: (v) => panel.status(v), progress: (d) => panel.add(d), end: () => {},
-          lost: () => {}, fallback: () => {} });
+        follow = followCycle(mine.cycle_id, { status: (v) => panel.status(v), progress: (d) => panel.add(d),
+          end: () => {}, lost: () => {}, fallback: () => {} });
         return;
       }
     } catch (_) { /* the POST's own result decides */ }
-    if (finding) setTimeout(find, 1000);
+    if (here()) setTimeout(find, 1000);
   };
   setTimeout(find, 500);
   try {
-    const cycle = await post(`${L()}/learning-cycles`, { idempotency_key: key }).finally(() => { finding = false; stopFollowing(); });
+    const cycle = await post(`${L()}/learning-cycles`, { idempotency_key: key })
+      .finally(() => { finding = false; if (follow) follow.stop(); });
     app.pending.start = null;
     go(`#/cycle/${encodeURIComponent(cycle.cycle_id)}`);
   } catch (err) {
@@ -729,26 +745,33 @@ async function renderCycle(cycleId, view) {
   // two requests) the page resumes it, as before, and keeps showing the progress while that request runs. Without
   // the stream (not available, or failing) the page polls as before: every 2 s while another request drives it.
   const panel = body.panel;
+  const page = {}; // this rendering: a resume that returns after a newer rendering paints nothing
+  app.cyclePage = page;
   let resuming = false;
+  let scheduled = false;
   const resume = () => {
-    if (resuming) return;
+    if (resuming || app.cyclePage !== page) return;
     resuming = true;
-    post(`/learning-cycles/${encodeURIComponent(cycleId)}/resume`).then((v) => renderCycle(cycleId, v))
-      .catch((err) => show(header, errorBox(err)));
+    post(`/learning-cycles/${encodeURIComponent(cycleId)}/resume`)
+      .then((v) => { if (app.cyclePage === page) renderCycle(cycleId, v); })
+      .catch((err) => { if (app.cyclePage === page) show(header, errorBox(err)); });
   };
   const poll = () => {
     app.polling = setTimeout(() => (cycle.busy_until ? renderCycle(cycleId) : resume()), cycle.busy_until ? 2000 : 300);
   };
-  if (app.pollOnly) return poll();
+  if (app.pollOnlyUntil && Date.now() < app.pollOnlyUntil) return poll();
   followCycle(cycleId, {
     status: (v) => {
       panel.status(v);
-      if (v.status === "RUNNING" && !v.busy_until && !resuming) app.polling = setTimeout(resume, 300);
+      if (v.status === "RUNNING" && !v.busy_until && !resuming && !scheduled) {
+        scheduled = true;
+        app.polling = setTimeout(resume, 300);
+      }
     },
     progress: (d) => panel.add(d),
     end: (v) => renderCycle(cycleId, v),
     lost: () => show(header, errorBox({ status: 404 })),
-    fallback: () => { app.pollOnly = true; if (!resuming) poll(); },
+    fallback: () => { if (!resuming) poll(); },
   });
 }
 
