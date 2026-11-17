@@ -958,6 +958,83 @@ on resume and invalidates only the nodes whose artifacts are missing or corrupt,
 graph, per-node trace, usage). `scripts/run_production_demo.py` is a thin CLI over it; see
 [production](production.md).
 
+## Progress streams
+
+`GET /tasks/{id}/stream` and `GET /learning-cycles/{id}/stream` serve a task's or a learning cycle's progress as
+server-sent events (`text/event-stream`; issue #54). The polling routes (`GET /tasks/{id}`, `/events`,
+`GET /learning-cycles/{id}`) are unchanged, so any client can still poll. One read-only service owns both streams
+(`app/services/progress_stream.py`); the routes only check access and wrap it in a response
+(`app/api/streaming.py`).
+
+**Frames.** `status` carries the `TaskView` or `LearningCycleView`, on open and whenever it changes. `progress`
+carries one `LearnerEvent` and its source, `{"source": "cycle" | "task:<id>", "event": {...}}`. `end` comes only at
+a stop state (below), with the final view. `reconnect` comes at the maximum lifetime (`TA_STREAM_MAX_SECONDS`, 10
+minutes): the client reconnects, and so goes through the gateway and is authenticated again. A `: keepalive` comment
+follows `TA_STREAM_HEARTBEAT_SECONDS` (15 s) without a frame, well inside the gateway's 300 s read timeout. Payloads
+are built only from those three learner-safe projections; nothing is read from an event's `data`.
+
+**Sources and the cursor.** A source is a key the events table stores events under: `cycle` (the cycle's own events,
+stored under the cycle id) and `task:<id>` (a task; for a cycle, each LESSON or EVALUATION step's child task, checked
+to belong to the cycle's learner). A teaching-session step has no events: its progress shows in `status`. A source's
+position is the highest `events.seq` delivered from it. Every `progress`, `end` and `reconnect` frame carries the
+cursor as its SSE `id`: `v1.` and base64url JSON of `{source: position}`. It is versioned and not signed: it holds
+positions in the caller's own streams only, and a stream reads only the sources it owns, whatever a cursor names (a
+foreign source is ignored, a missing one is read from its start). A cursor that does not parse is a 400. A client
+resumes with `Last-Event-ID`; within a source frames are in `seq` order, and across sources merged by `seq`.
+
+**Delivery** is at least once. Within one connection a position only increases, so nothing is sent twice. A
+reconnect resumes strictly after the positions it names; an event whose frame was written but whose cursor never
+reached the client is sent again, and the client deduplicates by the stable `event_id` (the student app keeps the
+ids it has shown per cycle, and shows progress from the latest `status` and that set).
+
+**Settled reads, an engineering assumption.** `seq` is allocated at insert and visible at commit, so on PostgreSQL a
+row with a lower `seq` can become visible after one with a higher `seq`. Each poll records the table's highest
+visible `seq`, and events are delivered only up to the highest value recorded at least `TA_STREAM_SETTLE_SECONDS`
+(2 s) earlier; positions never advance past that bound. This relies on each event append being its own short
+single-row transaction (`SqlEventRepository.append`), which commits in milliseconds. A commit delayed beyond the bound
+(a stalled connection, a lock wait, a paused process) can still become visible after the cursor has passed its `seq`,
+and that event is then not streamed (it stays stored and `GET .../events` serves it). Closing the window completely
+needs a commit-ordered feed (`LISTEN/NOTIFY`, or a per-source sequence written under the source's lease), which is
+out of scope. `tests/postgres/test_progress_stream_postgres.py` tests both sides of the bound with a held
+transaction. On SQLite writes are serialised and rows become visible in `seq` order. Before `end`, the stream waits
+until the bound covers every event that was stored when the stop state was read.
+
+**Access loss.** Each poll reads the state and the events in a worker thread and then re-runs the GET route's access
+rule (`owned_task` / `owned_cycle`: the learner scope, the teacher's roster, the resource and its learner still
+existing). Only if it passes is anything read in that poll sent. When it fails, or anything in the poll raises (a
+not-found, a database error), the stream stops at once and the body is closed: no `end`, no error frame, nothing that
+names the resource. The log gets the exception type only. The client treats a stream that closed without `end` or
+`reconnect` as lost and reads the resource through its GET route, which answers 404 when it is gone or no longer
+visible; a reconnect is a new request and gets the same 404.
+
+**Termination.** The task stream ends when no job is QUEUED or RUNNING and the task is COMPLETED, FAILED, CANCELLED,
+PAUSED or WAITING for the learner (`LEARNER_WAITS`): a task in CREATED, PLANNING, RUNNING or REVIEWING, a WAITING
+task whose wait is not the learner's, or a FAILED task whose job retries (QUEUED) keeps it open. The cycle stream
+reads the cycle exactly as `GET /learning-cycles/{id}` does (it folds in what the children did and never drives one).
+It is in progress while the cycle is RUNNING (with or without a live drive lease: a RUNNING cycle nobody drives is the
+gap between two requests), while a drive lease is live whatever the status, or while the current step's child task
+owes work (as `_observe` decides) or has an active job. It ends only when it is not in progress and the cycle is
+terminal, or WAITING or BLOCKED at a `version` above the client's `after_version`. Not being busy is never a stop on
+its own. A refused POST (409, 422) leaves the version as it was, so the stream does not end: the client closes it,
+and the maximum lifetime is the backstop. A stream that ended can be reopened with its cursor: it sends only newer
+events, then a fresh `status`.
+
+**`version` is not the cursor.** `LearningCycleView.version` is the cycle record's optimistic-lock version, exposed
+read-only. Every stored change goes through one transition that copies the record and adds 1 (`_next` in
+`app/curriculum/cycle.py`) and a version-checked write, so it strictly increases: status, the current step, a child
+attached, the drive lease (claim, renew, release, takeover), the waiting prompt, failure and outcome all advance it.
+A child's own progress advances it once a read folds it in; the termination rule also reads the current child's
+status and job directly. `after_version` (query parameter, cycle stream only) is set by the client to the `version`
+of the view it showed when it sent a POST, and only decides whether WAITING or BLOCKED may send `end`. The cursor
+orders event rows by `seq`; the version orders cycle states. Neither is encoded in or compared with the other.
+
+**Limits.** The loop is a coroutine: it sleeps on the event loop (`TA_STREAM_POLL_SECONDS`, 1 s) and runs each
+poll's reads in a worker thread, so an idle stream holds no thread. Open streams are capped per principal
+(`TA_STREAM_MAX_PER_PRINCIPAL`, 4) and per API process (`TA_STREAM_MAX_STREAMS`, 200); above either the open is a
+429. A client that goes away is noticed by the response's disconnect watch, and its slot is freed. The caps are per
+process: with several API replicas each counts its own. DB load is two small queries per open stream per poll. The
+response sets `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`.
+
 ## Student web app
 
 `/app/` is the learner's web app (MVP item 6): one HTML page, one stylesheet and one dependency-free script
@@ -979,8 +1056,17 @@ step and no server-side rendering; the page holds no data until the API returns 
 The app is a thin client: every decision (what to learn next, the questions, grading, mastery) stays in the API.
 Retries are safe because every write it sends is idempotent (`idempotency_key` for goals and cycles,
 `client_response_id` for responses, reused until the response is accepted). A cycle that another request is driving
-(`busy_until`) is polled every two seconds; a RUNNING cycle nobody drives is resumed. Lesson generation happens inside
-the cycle's start and response requests, so the page shows a spinner meanwhile.
+(`busy_until`) is followed through its progress stream (below); a RUNNING cycle nobody drives is resumed, as before.
+Lesson generation happens inside the cycle's start and response requests; while one is in flight the page reads the
+cycle's progress stream (`GET /learning-cycles/{id}/stream`, with `after_version` set to the version of the view it
+sent the request from) and shows a line per learner event (its fixed message and the step it belongs to) instead of
+a bare spinner. For a start, the cycle is found by its idempotency key in `GET /learners/{id}/learning-cycles` while
+the request runs. The stream is read with `fetch()` (an `EventSource` cannot send the `Authorization` header, and a
+token never goes in a URL). After `reconnect` or a dropped connection the page reconnects with `Last-Event-ID`; it
+shows each event id once, so a replayed event is not shown twice. A stream that closed without `end` is checked
+with `GET /learning-cycles/{id}` first: a 404 shows the page's error state. After three failed stream requests in a
+row the page polls as before (every two seconds while another request drives the cycle). The request's own
+response still renders the result, and closes the stream.
 
 The lesson player is text and images: the deck, narration and video are blocked for learners because they can hold
 answer slides (see [security](security.md#lesson-reading)); serving them needs an answer-free render first.
