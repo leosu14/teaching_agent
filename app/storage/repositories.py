@@ -415,6 +415,28 @@ class SqlEventRepository:
             rows = s.scalars(select(EventRow).where(EventRow.task_id == task_id).order_by(EventRow.seq))
             return [Event.model_validate_json(r.body) for r in rows]
 
+    # --- reads for the progress stream (app/services/progress_stream.py) ----------------------------------------
+
+    def max_seq(self) -> int:
+        """The highest `seq` visible now (0 for an empty table). On PostgreSQL a row with a lower `seq` can still be
+        uncommitted: the stream only delivers up to a value read at least its settle time earlier."""
+        with self._sessions() as s:
+            return int(s.scalar(select(func.max(EventRow.seq))) or 0)
+
+    def after(self, positions: dict[str, int], upto: int, *, limit: int = 500) -> list[tuple[int, Event]]:
+        """(seq, event) of the events stored under each key of `positions` (a task or cycle id) with
+        position < seq <= upto, in `seq` order, at most `limit`. Keys not given are not read."""
+        if not positions or upto <= 0:
+            return []
+        clauses = [and_(EventRow.task_id == key, EventRow.seq > after) for key, after in positions.items()
+                   if after < upto]
+        if not clauses:
+            return []
+        with self._sessions() as s:
+            rows = s.execute(select(EventRow.seq, EventRow.body).where(EventRow.seq <= upto, or_(*clauses))
+                             .order_by(EventRow.seq).limit(limit))
+            return [(int(seq), Event.model_validate_json(body)) for seq, body in rows]
+
 
 class SqlArtifactRepository:
     def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:

@@ -339,7 +339,16 @@ class LearningCycleService:
 
     async def get(self, cycle_id: str) -> LearningCycleView:
         """The cycle, reconciled with its children (no child is driven by a read)."""
-        return await self._view(await self._advance(cycle_id, token=None))
+        return (await self.read(cycle_id))[1]
+
+    async def read(self, cycle_id: str) -> tuple[LearningCycle, LearningCycleView]:
+        """`get`, with the record its view was built from (the progress stream reads its lease and steps)."""
+        cycle = await self._advance(cycle_id, token=None)
+        return cycle, await self._view(cycle)
+
+    def lease_live(self, cycle: LearningCycle) -> bool:
+        """A drive lease that has not run out, whatever the cycle's status."""
+        return cycle.lease is not None and cycle.lease.until > self._clock()
 
     def cycle(self, cycle_id: str) -> LearningCycle:
         found = self._repo.get(cycle_id)
@@ -741,7 +750,7 @@ class LearningCycleService:
             status=cycle.status, action=cycle.action, steps=cycle.steps, waiting=cycle.waiting,
             prompt=await self._prompt(cycle) if with_prompt else None, failure=cycle.failure, outcome=cycle.outcome,
             artifact_ids=cycle.artifact_ids, created=created, replayed=replayed, created_at=cycle.created_at,
-            updated_at=cycle.updated_at, completed_at=cycle.completed_at,
+            updated_at=cycle.updated_at, completed_at=cycle.completed_at, version=cycle.version,
             busy_until=cycle.lease.until if cycle.lease is not None and cycle.lease.until > self._clock()
             and cycle.status in ACTIVE_CYCLE_STATUSES else None)
 

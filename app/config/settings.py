@@ -221,6 +221,18 @@ class Settings(BaseSettings):
     # off (then run `python -m app.services.worker --sweep` from cron instead).
     worker_sweep_seconds: float = Field(default=60.0, ge=0, le=86400)
 
+    # The progress streams (GET /tasks/{id}/stream, GET /learning-cycles/{id}/stream; app/services/progress_stream.py).
+    # A stream reads the database every `stream_poll_seconds`, delivers an event only once the table's highest `seq`
+    # read at least `stream_settle_seconds` earlier covers it (commit-latency bound, docs/architecture.md), sends a
+    # heartbeat comment after `stream_heartbeat_seconds` without a frame (well inside the gateway's 300 s timeout) and
+    # asks the client to reconnect after `stream_max_seconds`. Open streams are capped per principal and per process.
+    stream_max_seconds: float = Field(default=600.0, gt=0, le=86400)
+    stream_poll_seconds: float = Field(default=1.0, gt=0, le=60)
+    stream_settle_seconds: float = Field(default=2.0, ge=0, le=300)
+    stream_heartbeat_seconds: float = Field(default=15.0, gt=0, le=290)
+    stream_max_per_principal: int = Field(default=4, ge=1, le=100)
+    stream_max_streams: int = Field(default=200, ge=1, le=100_000)
+
     log_level: str = "INFO"
     log_json: bool = True
 
