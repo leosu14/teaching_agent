@@ -97,8 +97,9 @@ class Consumer:
 
 
 def service(sessions) -> ProgressStreamService:
+    # A short heartbeat: a `Consumer` checks its stop flag at each chunk, so an idle one stops within 0.1 s.
     return ProgressStreamService(tasks=None, cycles=None, events=SqlEventRepository(sessions),  # type: ignore[arg-type]
-                                 limits=StreamLimits(settle_seconds=SETTLE, poll_seconds=0.03, heartbeat_seconds=60))
+                                 limits=StreamLimits(settle_seconds=SETTLE, poll_seconds=0.03, heartbeat_seconds=0.1))
 
 
 class HeldAppend:

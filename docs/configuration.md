@@ -22,7 +22,7 @@ They are validated when the container is built; errors say what to fix.
 | `TA_WORKER_SWEEP_SECONDS` | `60` | How often a serving worker queues the continuation of tasks a killed worker left mid-run (`0`: off; run `python -m app.services.worker --sweep` from cron instead) |
 | `TA_STREAM_MAX_SECONDS` | `600` | Progress streams: the most a stream stays open before it sends `reconnect` (the client reconnects and is authenticated again) |
 | `TA_STREAM_POLL_SECONDS` | `1.0` | Progress streams: how often an open stream reads the database |
-| `TA_STREAM_SETTLE_SECONDS` | `2.0` | Progress streams: an event is delivered once the highest event `seq` read at least this long ago covers it (the commit-latency bound; see architecture, Progress streams) |
+| `TA_STREAM_SETTLE_SECONDS` | `2.0` | Progress streams: an event is delivered once the highest event `seq` read at least this long ago covers it (defence in depth: event appends commit in `seq` order; see architecture, Progress streams) |
 | `TA_STREAM_HEARTBEAT_SECONDS` | `15` | Progress streams: a keepalive comment after this long without a frame (below every proxy read timeout) |
 | `TA_STREAM_MAX_PER_PRINCIPAL` | `4` | Progress streams: open streams per principal in one API process (429 above) |
 | `TA_STREAM_MAX_STREAMS` | `200` | Progress streams: open streams in one API process (429 above) |
