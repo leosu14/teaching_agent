@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest

@@ -16,7 +16,6 @@ import json
 from fastapi.testclient import TestClient
 
 from app.schemas.events import EventType
-from app.schemas.learning_cycle import LearnerPrompt
 from app.utils.text import reveals
 from tests import sse
 from tests.auth import client_for
