@@ -230,6 +230,9 @@ class TaskView(Schema):
     # The task's latest background job (app/schemas/job.py), when it was queued through the API: poll the task until
     # the job is no longer QUEUED or RUNNING, then read the task's status.
     job: TaskJobView | None = None
+    # Lesson approval (Important item 2): PENDING or REJECTED while the lesson is held for its teacher's release,
+    # APPROVED once released by them; null when no class of the learner required approval.
+    release: str | None = None
 
     @classmethod
     def of(cls, task: Task, job: TaskJob | None = None) -> TaskView:

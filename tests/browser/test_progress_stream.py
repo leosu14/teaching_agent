@@ -5,7 +5,8 @@
 - A stream cut in the middle of the lesson (once by the server's maximum lifetime, `reconnect`, and once by a dropped
   connection) resumes with `Last-Event-ID`, and no progress line is shown twice.
 - With the stream route failing, the page falls back to polling and still gets there.
-- A deletion from another tab while the page follows a cycle sends the page to its error state."""
+- A deletion from another tab while the page follows a cycle sends the page to its error state.
+- Of two renderings of the cycle in a row, only the newest follows the stream."""
 
 from __future__ import annotations
 
@@ -181,3 +182,39 @@ def test_a_stream_that_drops_after_each_status_still_falls_back(cycle_env_at, si
     # STREAM_RETRIES requests (plus one of a rendering the page replaced), with backoff; then no more streams
     assert 1 <= settled <= 4 and len(opened) == settled, opened
     assert page.get_by_test_id("error").count() == 0
+
+
+def test_only_the_newest_rendering_follows_the_stream(cycle_env_at, site, page_for) -> None:  # noqa: F811
+    """Two routes in a row (the start's own and a hash change) render the cycle twice. When the older rendering's
+    read returns last, it paints nothing and must not take the stream over: its progress would go to a panel that is
+    never shown (the flake seen in CI)."""
+    env = cycle_env_at("session", **FAST)
+    cycle = running_undriven(env)
+    url, token = site(env.container, LEARNER)
+    page = page_for(url, token)
+    page.get_by_test_id("active-cycle").wait_for()  # started: routes from here on are the page's own
+    page.route("**/resume", lambda route: None)  # nobody drives the cycle
+    held = []
+
+    def hold_first(route):
+        if not held:
+            held.append(route)  # the older rendering's read: answered last
+            return
+        route.continue_()
+
+    page.route(f"**/learning-cycles/{cycle.cycle_id}", hold_first)
+    streams = []
+    page.on("request", lambda r: streams.append(r.url) if r.url.endswith("/stream") else None)
+    page.evaluate(f"location.hash = '#/cycle/{cycle.cycle_id}'")
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(20)
+    assert held
+    page.evaluate("window.dispatchEvent(new HashChangeEvent('hashchange'))")  # the newer rendering
+    page.get_by_test_id("progress-line").first.wait_for()
+    held[0].continue_()
+    page.wait_for_timeout(1000)
+    assert len(streams) == 1, streams  # the older rendering opened none
+    assert page.get_by_test_id("progress-line").count() > 0
+    assert page.problems == []

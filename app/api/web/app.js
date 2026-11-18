@@ -521,10 +521,15 @@ async function renderToday() {
   show(nodes);
 }
 
+function awaitingTeacher(cycle) {
+  return Boolean(cycle.failure && cycle.failure.kind === "APPROVAL");
+}
+
 function activeCard(cycle) {
   const what = cycle.action.objective_description || ACTION_LABELS[cycle.action.action];
   return h("div", { class: "card highlight", "data-testid": "active-cycle" },
-    h("span", { class: "badge" }, cycle.status === "BLOCKED" ? "Paused by a problem" : "In progress"),
+    h("span", { class: "badge" }, cycle.status !== "BLOCKED" ? "In progress"
+      : awaitingTeacher(cycle) ? "Waiting for your teacher" : "Paused by a problem"),
     h("h2", { text: ACTION_LABELS[cycle.action.action] || cycle.action.action }),
     h("p", { text: what }),
     h("a", { class: "button", href: `#/cycle/${encodeURIComponent(cycle.cycle_id)}`, "data-testid": "continue" }, "Continue"));
@@ -712,6 +717,7 @@ async function renderGoalForm() {
 
 async function renderCycle(cycleId, view) {
   if (!location.hash.startsWith(`#/cycle/${encodeURIComponent(cycleId)}`)) return; // the learner moved on
+  const generation = app.view;
   const show = painter();
   if (!view) show(busy("Loading…"));
   let cycle = view;
@@ -740,6 +746,9 @@ async function renderCycle(cycleId, view) {
     },
   }, "Stop this session")) : null;
   show(header, body, footer);
+  // A newer rendering (two routes in a row, e.g. the start's own and a hash change) owns the page and its stream:
+  // this one painted nothing, so it must not take the stream over (its progress would go to a panel never shown).
+  if (generation !== app.view) return;
   if (cycle.status !== "RUNNING") return;
   // A RUNNING cycle is followed through its progress stream until the stream ends. When nobody drives it (between
   // two requests) the page resumes it, as before, and keeps showing the progress while that request runs. Without
@@ -788,18 +797,24 @@ async function cycleBody(cycle, lessonLink) {
     return Object.assign(panel.node, { panel });
   }
   if (cycle.status === "BLOCKED") {
+    // A lesson waiting for the teacher's release (failure kind APPROVAL): nothing is wrong, and the page does not
+    // resume it by itself; "Check again" asks once.
+    const teacher = awaitingTeacher(cycle);
     const feedback = h("div");
     const button = h("button", {
       type: "button", "data-testid": "retry",
       on: {
         click: async () => {
           button.disabled = true;
-          const watch = watchWhile(cycle, feedback, "Trying again…");
+          const watch = watchWhile(cycle, feedback, teacher ? "Checking…" : "Trying again…");
           try { renderCycle(id, await post(`/learning-cycles/${encodeURIComponent(id)}/resume`).finally(watch.stop)); } catch (err) { feedback.replaceChildren(errorBox(err)); button.disabled = false; }
         },
       },
-    }, "Try again");
-    return h("div", { class: "card" }, h("p", { class: "notice", text: (cycle.failure && cycle.failure.message) || "Something went wrong." }), feedback, button);
+    }, teacher ? "Check again" : "Try again");
+    const message = teacher ? "Your teacher reviews this lesson before you see it. Check again later."
+      : (cycle.failure && cycle.failure.message) || "Something went wrong.";
+    return h("div", { class: "card", "data-testid": teacher ? "awaiting-teacher" : "blocked" },
+      h("p", { class: "notice", text: message }), feedback, button);
   }
   if (cycle.status === "FAILED") {
     return h("div", { class: "card" }, h("div", { class: "error", text: (cycle.failure && cycle.failure.message) || "This session could not be completed." }),

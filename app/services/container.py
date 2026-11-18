@@ -107,6 +107,7 @@ from app.services.learners import LearnerService
 from app.services.artifact_content import ArtifactContentService
 from app.services.learner_deletion import LearnerDeletionService
 from app.services.lesson_reading import LessonReadingService
+from app.services.releases import LessonReleaseService
 from app.services.ownership import OwnershipService
 from app.services.progress_stream import ProgressStreamService, StreamLimits
 from app.services.production import ProductionService
@@ -133,6 +134,8 @@ from app.storage.repositories import (
     SqlTaskRepository,
     SqlAssessmentRepository,
     SqlClassRepository,
+    SqlGradeOverrideRepository,
+    SqlLessonReleaseRepository,
     SqlLearningCycleRepository,
     SqlTeachingRepository,
 )
@@ -411,6 +414,7 @@ class Container:
     ownership: OwnershipService
     progress_streams: ProgressStreamService  # the task and learning-cycle progress streams (SSE; read-only)
     classes: ClassService  # classes and rosters: whose learners a teacher may read
+    lesson_releases: LessonReleaseService  # lesson approval before release (Important item 2)
     class_dashboard: ClassDashboardService  # the teacher dashboard: a class's progress and UNCERTAIN grades (read-only)
     artifact_content: ArtifactContentService
     lesson_reading: LessonReadingService  # the learner-safe text of a lesson (the student app's lesson player)
@@ -611,9 +615,14 @@ def build_container(
                                 spend=spend, budgets=budgets, clock=clock)
     jobs = SqlTaskJobRepository(sessions, clock)
     learner_repo = SqlLearnerRepository(sessions, clock)
+    class_repo = SqlClassRepository(sessions)
+    lesson_releases = LessonReleaseService(SqlLessonReleaseRepository(sessions), class_repo, task_repo, artifacts,
+                                           memory, events, clock)
+    grade_overrides = SqlGradeOverrideRepository(sessions)
     task_service = TaskService(orchestrator, task_repo, event_repo, artifacts, jobs=jobs,
                                job_max_attempts=settings.job_max_attempts,
-                               has_profile=lambda learner_id: learner_repo.get(learner_id) is not None)
+                               has_profile=lambda learner_id: learner_repo.get(learner_id) is not None,
+                               releases=lesson_releases)
     learner_deletion = LearnerDeletionService(SqlLearnerDataRepository(sessions, clock), artifacts, clock)
     task_worker = TaskWorker(jobs, task_service, poll_seconds=settings.worker_poll_seconds,
                              retry_backoff_seconds=settings.job_retry_backoff_seconds,
@@ -627,7 +636,8 @@ def build_container(
     assessment_service = AssessmentService(
         SqlAssessmentRepository(sessions, clock), AgentSemanticGrader(agents, tools, router, events), artifacts=artifacts,
         memory=memory, knowledge=RetrieverKnowledgeBase(retriever), curriculum=curriculum_service,
-        tasks=task_service, events=events, config=assessment_config, spend=spend, budgets=budgets)
+        tasks=task_service, events=events, config=assessment_config, spend=spend, budgets=budgets,
+        overrides=grade_overrides)
     assessment_port.bind(assessment_service)
     teaching_service = TeachingSessionService(
         SqlTeachingRepository(sessions), TeachingRuntime(agents, tools, router, events), artifacts=artifacts,
@@ -639,7 +649,7 @@ def build_container(
         teaching=teaching_service, memory=memory, artifacts=artifacts, events=events, event_log=event_repo,
         clock=clock)
     artifact_content = ArtifactContentService(artifacts)
-    classes = ClassService(SqlClassRepository(sessions), memory, clock)
+    classes = ClassService(class_repo, memory, clock)
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
@@ -658,9 +668,11 @@ def build_container(
                                 max_per_principal=settings.stream_max_per_principal,
                                 max_streams=settings.stream_max_streams)),
         classes=classes,
+        lesson_releases=lesson_releases,
         class_dashboard=ClassDashboardService(classes=classes, memory=memory, curriculum=curriculum_service,
                                               cycles=learning_cycle_service.repository,
-                                              assessment=assessment_service.repository, clock=clock),
+                                              assessment=assessment_service.repository,
+                                              overrides=grade_overrides, clock=clock),
         artifact_content=artifact_content,
         lesson_reading=LessonReadingService(artifacts=artifacts, tasks=task_service, teaching=teaching_service,
                                             assessment=assessment_service, content=artifact_content),

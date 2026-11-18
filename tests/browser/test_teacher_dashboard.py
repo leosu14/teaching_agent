@@ -46,6 +46,8 @@ def world(teaching_env):
         author = auth.headers(learner, roles=(AUTHOR,))
         item = entry["item"]
         answers = entry["answers"]
+        test_auth = auth
+        lesson_task = teaching_env.lesson_task
 
         def answer(self, kind: str, attempt_id: str) -> dict:
             from fastapi.testclient import TestClient
@@ -187,3 +189,65 @@ def test_error_states_say_what_is_wrong(world, open_page) -> None:
     student_app.get_by_text("Your classes").wait_for()
     for page in (not_teacher, teacher, signed_out, student_app):
         assert page.problems == []
+
+
+def test_a_teacher_approves_a_lesson_and_decides_an_uncertain_answer(world, open_page) -> None:
+    """Important item 2: the lesson-approval setting, a held lesson previewed and approved, and an UNCERTAIN answer
+    marked correct, all from the teacher's page."""
+    from fastapi.testclient import TestClient
+
+    assert world.answer("uncertain", "web-override")["grade"]["outcome"] == "UNCERTAIN"
+    teacher = open_page(world.url, "/app/teacher.html", world.teacher)
+    teacher.on("dialog", lambda d: d.accept())
+    teacher.get_by_text("No classes yet").wait_for()
+    teacher.get_by_test_id("class-name").fill("Spanish B1")
+    teacher.get_by_test_id("create-class").click()
+    code = teacher.get_by_test_id("join-code").inner_text().strip()
+    student = open_page(world.url, "/app/#/progress", world.student)
+    student.get_by_test_id("join-code").fill(code)
+    student.get_by_test_id("join-class").click()
+    student.get_by_test_id("enrollment").wait_for()
+
+    teacher.reload()
+    teacher.get_by_test_id("lesson-approval").check()
+    teacher.get_by_text("No lesson is waiting for you.").wait_for()
+    assert world.container.classes.repository.for_teacher("teacher-web", None)[0].lesson_approval is True
+
+    # the learner's generated lesson is held for the teacher (as if requested after the setting was on: the API path
+    # is covered by tests/e2e/test_teacher_review_api.py)
+    from app.schemas.common import utcnow
+    from app.schemas.review import LessonRelease, ReleaseStatus
+
+    task_id = world.lesson_task
+    [classroom] = world.container.classes.repository.for_teacher("teacher-web", None)
+    world.container.lesson_releases.repository.request(LessonRelease(
+        task_id=task_id, learner_id=world.learner_id, class_id=classroom.class_id, status=ReleaseStatus.PENDING,
+        requested_at=utcnow()))
+    with TestClient(create_app(world.container, authenticator=world.test_auth.authenticator),
+                    headers={"Authorization": f"Bearer {world.student}"}) as client:
+        assert client.get(f"/tasks/{task_id}").json()["release"] == "PENDING"
+        assert client.get(f"/lessons/{task_id}/reading").status_code == 409
+
+    teacher.reload()
+    lesson = teacher.get_by_test_id("pending-lesson")
+    lesson.wait_for()
+    assert lesson.get_attribute("data-task") == task_id
+    teacher.get_by_test_id("preview").click()
+    teacher.get_by_test_id("lesson-preview").locator("h3").wait_for()
+    assert world.item["expected_answer"] not in teacher.locator("main").inner_text()
+    teacher.get_by_test_id("approve").click()
+    teacher.get_by_text("No lesson is waiting for you.").wait_for()
+    assert world.container.lesson_releases.status(task_id).value == "APPROVED"
+
+    with TestClient(create_app(world.container, authenticator=world.test_auth.authenticator),
+                    headers={"Authorization": f"Bearer {world.student}"}) as client:
+        assert client.get(f"/lessons/{task_id}/reading").status_code == 200
+
+    # an UNCERTAIN answer, marked correct
+    teacher.get_by_test_id("override-correct").first.click()
+    teacher.get_by_text("Nothing to review. Every answer was graded.").wait_for()
+    teacher.get_by_test_id("show-settled").check()
+    teacher.get_by_test_id("overridden").first.wait_for()
+    assert "Correct" in teacher.get_by_test_id("overridden").first.inner_text()
+    assert world.container.assessment_service.override_of("web-override").outcome == "CORRECT"
+    assert teacher.problems == [] and student.problems == []

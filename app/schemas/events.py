@@ -74,6 +74,11 @@ class EventType:
     ASSESSMENT_GRADED = "assessment.graded"
     ASSESSMENT_UNCERTAIN = "assessment.uncertain"
     ASSESSMENT_COMPLETED = "assessment.completed"
+    ASSESSMENT_OVERRIDDEN = "assessment.overridden"  # a teacher's outcome for an UNCERTAIN grade (Important item 2)
+    # Lesson approval before release (Important item 2; stream key: the lesson task id). Ids and status only.
+    LESSON_RELEASE_REQUESTED = "lesson_release.requested"
+    LESSON_RELEASE_APPROVED = "lesson_release.approved"
+    LESSON_RELEASE_REJECTED = "lesson_release.rejected"
     EVALUATION_STARTED = "evaluation.started"
     EVALUATION_COMPLETED = "evaluation.completed"
     RECOMMENDATION_CREATED = "recommendation.created"

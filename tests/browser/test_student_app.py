@@ -152,6 +152,41 @@ def test_a_learning_cycle_from_plan_to_progress(cycle_env_at, site, page_for) ->
     assert page.problems == []
 
 
+def test_a_lesson_waiting_for_the_teacher(cycle_env_at, site, page_for) -> None:
+    """Important item 2: in a class that approves lessons, the cycle's lesson waits for the teacher. The page says so
+    and does not resume it by itself; once the teacher approved, "Check again" carries on to the session."""
+    from app.schemas.classroom import Classroom
+    from app.schemas.common import utcnow
+    from app.schemas.review import ReleaseStatus
+
+    env = cycle_env_at("base")
+    c = env.container
+    classroom = Classroom(class_id="cls_web", name="Spanish B1", teacher_id="teacher-web", created_at=utcnow(),
+                          lesson_approval=True)
+    c.classes.repository.create(classroom, "0" * 64)
+    assert c.classes.repository.join("0" * 64, LEARNER, utcnow(), None) is not None
+    url, token = site(c, LEARNER)
+    page = page_for(url, token)
+    page.get_by_test_id("plan").click()
+    page.get_by_test_id("start").wait_for()
+    page.get_by_test_id("start").click()
+    page.get_by_test_id("diagnostic").wait_for()
+    answer_sheet(page, ScriptedLearner(prefix="w"))
+    page.get_by_test_id("awaiting-teacher").wait_for()
+    assert "Your teacher reviews this lesson" in page.get_by_test_id("awaiting-teacher").inner_text()
+    [cycle] = c.learning_cycle_service.repository.for_learner(LEARNER)
+    resumed = len([e for e in env.events if e.type == "learning_cycle.resumed"])
+    page.wait_for_timeout(1500)  # the page does not resume a cycle waiting for the teacher by itself
+    assert len([e for e in env.events if e.type == "learning_cycle.resumed"]) == resumed
+
+    lesson_task = cycle.steps[0].child_id
+    assert c.lesson_releases.decide(classroom, lesson_task, ReleaseStatus.APPROVED, teacher_id="teacher-web",
+                                    note=None).status == ReleaseStatus.APPROVED
+    page.get_by_test_id("retry").click()
+    page.get_by_test_id("chat").wait_for()
+    assert page.problems == []
+
+
 def test_signing_in_with_a_development_token(container, site, page_for) -> None:
     container.learner_service.upsert("web-signin", LearnerProfileInput(display_name="Bo"))
     url, token = site(container, "web-signin")

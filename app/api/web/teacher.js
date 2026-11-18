@@ -3,9 +3,11 @@ dependencies), next to the student app and with the same rules: everything shown
 with textContent, never parsed as HTML, and identity comes from the deployment (behind the auth gateway the browser's
 session is enough; in local development a token is pasted and kept for this tab only, in sessionStorage).
 
-The page only reads learners' data: the class dashboard and UNCERTAIN grades (GET /classes/{id}/dashboard and
+The page reads learners' data: the class dashboard and UNCERTAIN grades (GET /classes/{id}/dashboard and
 /uncertain-grades) and the learner routes a teacher may read (profile, progress, goals, curricula, cycle history). The
-only changes it sends are the teacher's own: creating a class and rotating its join code. */
+changes it sends are the teacher's own (creating a class, rotating its join code, the lesson-approval setting) and the
+teacher reviews of Important item 2, all on class routes: approving or rejecting a lesson after previewing it, and
+deciding an answer the grader could not (an override of an UNCERTAIN grade). */
 "use strict";
 
 const TOKEN_KEY = "ta.token";
@@ -136,6 +138,7 @@ async function api(method, path, body, { allow = [] } = {}) {
 
 const get = (path) => api("GET", path).then((r) => r.data);
 const post = (path, body) => api("POST", path, body).then((r) => r.data);
+const patch = (path, body) => api("PATCH", path, body).then((r) => r.data);
 const enc = encodeURIComponent;
 
 // --- start: who is this ----------------------------------------------------------------------------------------------
@@ -264,11 +267,13 @@ async function renderClass(classId, opts = {}) {
   const show = painter();
   show(busy("Loading the class…"));
   const settled = Boolean(opts.settled);
-  let board, uncertain;
+  let board, uncertain, info, pending;
   try {
-    [board, uncertain] = await Promise.all([
+    [board, uncertain, info, pending] = await Promise.all([
       get(`/classes/${enc(classId)}/dashboard`),
-      get(`/classes/${enc(classId)}/uncertain-grades${settled ? "?include_resolved=true" : ""}`)]);
+      get(`/classes/${enc(classId)}/uncertain-grades${settled ? "?include_resolved=true" : ""}`),
+      get(`/classes/${enc(classId)}`),
+      get(`/classes/${enc(classId)}/lessons?status=PENDING`)]);
   } catch (err) {
     return show(h("p", {}, h("a", { href: "#/" }, "← Classes")), h("h1", { text: "Class" }), errorBox(err));
   }
@@ -313,12 +318,117 @@ async function renderClass(classId, opts = {}) {
     h("div", { class: "row spread" }, h("h1", { text: board.name }), rotate),
     code ? joinCodeCard(code) : null,
     summary, roster,
+    approvalCard(classId, info, opts),
+    info.lesson_approval || pending.length ? h("h2", { id: "lessons", text: "Lessons to approve" }) : null,
+    info.lesson_approval || pending.length ? pendingLessons(classId, pending, opts) : null,
     h("h2", { id: "review", text: "Answers to review" }),
     h("p", { class: "muted small" },
       "The grader could not decide these answers, so they did not count for or against the learner. Learners may answer again; " +
       "a later graded answer settles one."),
     toggle,
-    uncertainList(uncertain, settled, true));
+    uncertainList(uncertain, settled, true, classId, () => renderClass(classId, opts)));
+}
+
+// --- lesson approval (Important item 2) ----------------------------------------------------------------------------
+
+function approvalCard(classId, info, opts) {
+  const feedback = h("div");
+  const box = h("input", {
+    type: "checkbox", checked: info.lesson_approval, "data-testid": "lesson-approval",
+    on: {
+      change: async (e) => {
+        box.disabled = true;
+        try {
+          await patch(`/classes/${enc(classId)}`, { lesson_approval: e.target.checked });
+          renderClass(classId, opts);
+        } catch (err) {
+          feedback.replaceChildren(errorBox(err));
+          box.disabled = false;
+        }
+      },
+    },
+  });
+  return h("div", { class: "card", "data-testid": "approval-setting" },
+    h("label", { class: "choice" }, box, "Approve lessons before learners see them"),
+    h("p", { class: "muted small" },
+      "New lessons for this class's learners wait for you: you preview each one and release it or not. " +
+      "Lessons requested before you turn this on are not affected."), feedback);
+}
+
+function pendingLessons(classId, items, opts) {
+  if (!items.length) {
+    return h("div", { class: "card", "data-testid": "pending-lessons" }, h("p", { class: "muted" }, "No lesson is waiting for you."));
+  }
+  return h("div", { "data-testid": "pending-lessons" }, items.map((l) => {
+    const feedback = h("div");
+    const preview = h("div", { "data-testid": "lesson-preview" });
+    const ready = l.task_status === "COMPLETED";
+    const decide = (verb) => async () => {
+      let note = null;
+      if (verb === "reject") {
+        note = window.prompt("Reject this lesson? It is not shown to the learner, and their session stops. Optional note:", "");
+        if (note === null) return;
+      }
+      try {
+        await post(`/classes/${enc(classId)}/lessons/${enc(l.task_id)}/${verb}`, { note: note || null });
+        renderClass(classId, opts);
+      } catch (err) {
+        feedback.replaceChildren(errorBox(err));
+      }
+    };
+    const show = async () => {
+      preview.replaceChildren(busy("Loading the lesson…"));
+      try {
+        preview.replaceChildren(readingNode(await get(`/classes/${enc(classId)}/lessons/${enc(l.task_id)}/preview`)));
+      } catch (err) {
+        preview.replaceChildren(errorBox(err));
+      }
+    };
+    return h("div", { class: "card", "data-testid": "pending-lesson", "data-task": l.task_id },
+      h("div", { class: "row spread" }, h("strong", { text: l.topic }), h("span", { class: "badge warn" }, "waiting for you")),
+      h("p", { class: "muted small" }, [l.display_name, l.subject, fmtDate(l.requested_at)].filter(Boolean).join(" · ")),
+      ready ? null : h("p", { class: "muted small" }, "Still being prepared. You can preview it once it is ready."),
+      h("div", { class: "row" },
+        h("button", { type: "button", class: "secondary", disabled: !ready, "data-testid": "preview", on: { click: show } }, "Preview"),
+        h("button", { type: "button", disabled: !ready, "data-testid": "approve", on: { click: decide("approve") } }, "Approve"),
+        h("button", { type: "button", class: "secondary", disabled: !ready, "data-testid": "reject", on: { click: decide("reject") } }, "Reject")),
+      feedback, preview);
+  }));
+}
+
+function readingNode(r) {
+  const parts = [h("h3", { text: r.title || "Lesson" })];
+  (r.introduction || []).forEach((p) => parts.push(h("p", { text: p })));
+  (r.sections || []).forEach((s) => {
+    if (s.heading) parts.push(h("h4", { text: s.heading }));
+    (s.paragraphs || []).forEach((p) => parts.push(h("p", { text: p })));
+    if (s.examples && s.examples.length) parts.push(h("ul", { class: "plain small" }, s.examples.map((e) => h("li", { text: e }))));
+    if (s.analogy) parts.push(h("p", { class: "muted", text: s.analogy }));
+  });
+  (r.summary || []).forEach((p) => parts.push(h("p", { class: "muted", text: p })));
+  if (r.withheld) parts.push(h("p", { class: "muted small" }, `${plural(r.withheld, "passage")} held back because it states an answer.`));
+  return h("div", { class: "reading" }, parts);
+}
+
+const OVERRIDE_LABELS = { CORRECT: "Correct", PARTIAL: "Partly correct", INCORRECT: "Incorrect" };
+
+function overrideButtons(classId, u, done) {
+  const feedback = h("div");
+  const buttons = Object.entries(OVERRIDE_LABELS).map(([outcome, label]) => h("button", {
+    type: "button", class: "secondary", "data-testid": `override-${outcome.toLowerCase()}`,
+    on: {
+      click: async () => {
+        if (!window.confirm(`Mark this answer as "${label}"? It then counts for the learner's progress, once.`)) return;
+        try {
+          await post(`/classes/${enc(classId)}/attempts/${enc(u.attempt_id)}/override`, { outcome });
+          done();
+        } catch (err) {
+          feedback.replaceChildren(errorBox(err));
+        }
+      },
+    },
+  }, label));
+  return h("div", {}, h("div", { class: "row" }, buttons), feedback);
 }
 
 function learnerRow(classId, o) {
@@ -338,7 +448,7 @@ function learnerRow(classId, o) {
     h("td", {}, o.uncertain_open ? h("span", { class: "badge warn", "data-testid": "learner-review" }, String(o.uncertain_open)) : "0"));
 }
 
-function uncertainList(items, settled, withLearner) {
+function uncertainList(items, settled, withLearner, classId, done) {
   if (!items.length) {
     return h("div", { class: "card", "data-testid": "uncertain" }, h("p", { class: "muted" },
       settled ? "No answer of these learners was left undecided." : "Nothing to review. Every answer was graded."));
@@ -346,13 +456,15 @@ function uncertainList(items, settled, withLearner) {
   return h("div", { "data-testid": "uncertain" }, items.map((u) => h("div", { class: "card", "data-testid": "uncertain-item" },
     h("div", { class: "row spread" },
       h("strong", { text: withLearner ? u.display_name : u.concept_name }),
-      u.resolved ? h("span", { class: "badge good" }, "settled by a later attempt") : h("span", { class: "badge warn" }, "to review")),
+      u.override ? h("span", { class: "badge good", "data-testid": "overridden" }, `marked ${OVERRIDE_LABELS[u.override.outcome] || u.override.outcome}`)
+        : u.resolved ? h("span", { class: "badge good" }, "settled by a later attempt") : h("span", { class: "badge warn" }, "to review")),
     h("p", { class: "muted small" }, [withLearner ? u.concept_name : null, SOURCE_LABELS[u.source] || u.source,
       `attempt ${u.attempt_number}`, fmtDate(u.submitted_at)].filter(Boolean).join(" · ")),
     h("p", { class: "question-text", text: u.prompt }),
     u.choices.length ? h("ul", { class: "plain small" }, u.choices.map((c) => h("li", { text: c }))) : null,
     h("div", { class: "answer" }, h("span", { class: "who" }, "Learner's answer"), h("span", { "data-testid": "learner-answer", text: u.learner_answer })),
-    u.later_attempts && !u.resolved ? h("p", { class: "muted small" }, `${plural(u.later_attempts, "later attempt")}, none graded yet.`) : null)));
+    u.later_attempts && !u.resolved ? h("p", { class: "muted small" }, `${plural(u.later_attempts, "later attempt")}, none graded yet.`) : null,
+    !u.resolved && classId ? overrideButtons(classId, u, done) : null)));
 }
 
 // --- one learner of the class --------------------------------------------------------------------------------------
@@ -411,7 +523,8 @@ async function renderLearner(classId, learnerId) {
       h("td", { text: c.action.objective_description || c.action.action }),
       h("td", {}, statusBadge(c.status)))))))
     : h("p", { class: "muted" }, "No learning sessions yet.")));
-  nodes.push(h("h2", { text: "Answers to review" }), uncertainList(uncertain.filter((u) => u.learner_id === learnerId), true, false));
+  nodes.push(h("h2", { text: "Answers to review" }), uncertainList(uncertain.filter((u) => u.learner_id === learnerId), true, false, classId,
+    () => renderLearner(classId, learnerId)));
   show(nodes);
 }
 

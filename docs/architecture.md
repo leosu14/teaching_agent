@@ -921,7 +921,9 @@ drives it; the state machine is pure (`app/curriculum/cycle.py`); the schemas ar
   (`TaskService.resume` from the workflow checkpoint, `TeachingSessionService.resume`); completed side effects are
   never repeated.
 - **Failures.** VALIDATION (a stale or invalid action, an unmet completion rule, a configuration error: FAILED),
-  PROVIDER (retryable: BLOCKED), WORKFLOW (a failed workflow stage, or a teacher reply or the grading of a session
+  PROVIDER (retryable: BLOCKED), APPROVAL (the lesson step's lesson is held for the teacher's release: BLOCKED while
+  PENDING, and `resume` looks again; FAILED once the teacher rejected it; see [Teacher review](#teacher-review)),
+  WORKFLOW (a failed workflow stage, or a teacher reply or the grading of a session
   answer refused by a learner or global daily cap: BLOCKED, resumable once the UTC day resets, when a refused answer
   is asked for again; an exhausted task budget, daily caps included, a teacher reply refused by the session's own
   budget, the grading of an answer refused by the session's or the attempt's budget, or a failed session: FAILED). A
@@ -1092,8 +1094,9 @@ answer slides (see [security](security.md#lesson-reading)); serving them needs a
 
 `/app/teacher.html` is the teacher's page (MVP item 7): the same stylesheet and rules as the student app (one
 dependency-free script, `app/api/web/teacher.js`, text set with `textContent` only, the same strict CSP), for a
-principal with the `teacher` role. It reads learners' data and never changes it: its only writes are the teacher's
-own, creating a class and rotating its join code.
+principal with the `teacher` role. It reads learners' data through the routes a teacher may read; its writes are the
+teacher's own (creating a class, rotating its join code, the lesson-approval setting) and the teacher reviews below,
+all on class routes: approving or rejecting a previewed lesson and overriding an UNCERTAIN grade.
 
 | Screen | API |
 |---|---|
@@ -1105,9 +1108,57 @@ The two class routes are served by `ClassDashboardService` (`app/services/class_
 reads stored records only: profiles, goals and curricula (progress computed now and not recorded, as
 `GET /goals/{id}/curriculum` does), learning cycles as stored (no reconciliation) and the roster's assessment attempts
 with their grades, in one query (`graded_attempts`). An UNCERTAIN grade is never evidence; it stays "to review" until
-the learner answers the same item again and that answer is graded (`resolved`). There is no grade override yet:
-the teacher sees the answer and can follow up with the learner (overrides are on the roadmap after the MVP). The
+the learner answers the same item again and that answer is graded, or the teacher overrides it (`resolved`; see
+[Teacher review](#teacher-review)). The
 learner's side of a class is a "Join a class" form on the student app's Progress page (`POST /learners/{id}/classes`).
+
+## Teacher review
+
+Important item 2 (issue #56). A class's teacher may approve lessons before its learners see them, and decide the
+answers the grader could not. Both are changes a teacher makes for a learner, and both are class routes through
+`taught_class`, for a learner still on that class's roster; `Access.check` (a teacher reads learner routes, never
+changes them) is unchanged ([security](security.md#teacher-review)).
+
+**Lesson approval** (`app/services/releases.py`, `LessonReleaseService`):
+
+- `classes.lesson_approval`, off by default, set with `PATCH /classes/{id}`. The decision is taken when a lesson is
+  requested: when `TaskService` creates a lesson task (`POST /tasks`, a cycle's lesson step), it first, in the
+  same request and learner-writes guard, has `request` store a PENDING `lesson_releases` row for the first class of
+  the learner that requires approval, and only then writes the task. So a lesson task never exists without the
+  release it was owed: a failure in between leaves no task (the request is retried) or a release of no task (never
+  shown). No row means released, so nothing changes for a learner in no such class, or for a lesson
+  requested before the setting was turned on (turning it off later does not release a pending lesson either).
+- A lesson is **held** while its release is PENDING or REJECTED and its learner is still on that class's roster
+  (leaving or being removed lifts that class's hold, by the consent rule of classes: a learner who leaves also
+  ends the teacher's access; a learner in two approving classes is held by the first one they joined). Held, every learner surface refuses it with `409 LessonHeld`
+  and a fixed message: the reading, starting a teaching session, creating its evaluation, an attempt on an item
+  registered on it, and `GET /artifacts/{id}/content` of its artifacts for the learner's own scope (the class's
+  teacher still reads them, for the preview's images). `GET /tasks/{id}` shows `release`. Authors may still register
+  items on it.
+- A learning cycle observes its lesson step's lesson: held PENDING, the cycle is BLOCKED (failure kind APPROVAL,
+  retryable; `resume` looks again and carries on once approved); REJECTED, it FAILED. `CurriculumService.lesson_for`
+  never reuses a rejected lesson. The student app shows "Waiting for your teacher" and a "Check again" button, and
+  does not resume a cycle waiting for approval by itself.
+- The teacher lists the class's releases (`GET /classes/{id}/lessons`), previews one (`.../preview`: the learner's
+  answer-isolated `LessonReading`, the same filter, with no gate) and approves or rejects it (`.../approve`,
+  `.../reject`, an optional note). A decision needs a completed lesson and is final: a compare-and-set on PENDING,
+  so of two racing decisions exactly one wins (`tests/postgres/test_teacher_review_postgres.py`); the same decision
+  again returns it, the other one is 409. Events `lesson_release.requested|approved|rejected` carry ids and the
+  status only.
+
+**Grade overrides** (`AssessmentService.override`): `POST /classes/{id}/attempts/{attempt_id}/override` with
+`CORRECT`, `PARTIAL` or `INCORRECT` and an optional note, for an UNCERTAIN grade of a learner on the roster. The
+stored grade stays as it was (grades are immutable). The override is a `grade_overrides` row, one per attempt, and
+one piece of `LearningEvidence` (`source_type="teacher_review"`, score 1, 0.5 or 0, a stable id per attempt)
+recorded through learner memory's MasteryUpdater, inside the learner-writes guard. The same override again is a
+replay that records the evidence again (a no-op), so a crash between the two writes heals; until the evidence
+is recorded the override counts for nothing (the learner's view and the dashboard ignore it, so the teacher's page
+offers the buttons again); a different one, or a
+grade that is not UNCERTAIN, is 409. The learner's attempt view carries `override` (`retry_recommended` false), and
+the dashboard counts an overridden grade as resolved. Overriding a grade that already counted would need retracting
+evidence from the append-only evidence model, and is not offered.
+
+Both tables are learner data, erased by the learner data deletion (`ERASED_TABLES`).
 
 ## Deployment
 
@@ -1139,6 +1190,6 @@ student app's Progress page has the "Delete my data" card; `/app/privacy.html` i
 
 Learned mastery models (BKT / IRT) and FSRS-style scheduling (the updater and scheduler are replaceable), courses
 beyond the Spanish A1 to B1 pilot and a course authoring UI, real image-search providers, video generation providers other than MiniMax, AI avatars, web scraping, vector retrieval and embeddings, advanced slide
-design, animations, cloud rendering, coding exercises and VS Code integration, teacher grade overrides and lesson
-approval, deployment. The provider and
+design, animations, cloud rendering, coding exercises and VS Code integration, overrides of grades that already counted
+(only UNCERTAIN grades can be overridden), deployment. The provider and
 tool interfaces they plug into already exist.

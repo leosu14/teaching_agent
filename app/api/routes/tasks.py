@@ -78,7 +78,9 @@ def submit_answers(task_id: str, body: SubmitAnswers, response: Response,
 
 @router.get("/{task_id}", response_model=TaskView, dependencies=[Depends(owned_task)])
 def get_task(task_id: str, c: Container = Depends(container)) -> TaskView:
-    return TaskView.of(c.task_service.get(task_id), c.task_service.job(task_id))
+    view = TaskView.of(c.task_service.get(task_id), c.task_service.job(task_id))
+    release = c.lesson_releases.status(task_id)
+    return view.model_copy(update={"release": release.value}) if release is not None else view
 
 
 @router.post("/{task_id}/pause", response_model=TaskView, dependencies=[Depends(owned_task)])

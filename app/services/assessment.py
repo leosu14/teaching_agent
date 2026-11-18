@@ -67,11 +67,19 @@ from app.schemas.lease import learner_writes
 from app.schemas.events import EventType
 from app.schemas.learner import LearningEvidence, graded_correctness, stable_id
 from app.schemas.usage import BudgetDefaults
+from app.schemas.review import (
+    OVERRIDE_SCORE,
+    GradeOverride,
+    OverrideConflict,
+    OverrideGrade,
+    OverrideResult,
+    OverrideView,
+)
 from app.services.budgets import BudgetExhausted
 from app.services.curriculum import CurriculumService
 from app.services.lessons import LessonMaterial, LessonNotReady, load_lesson
 from app.services.tasks import TaskService
-from app.storage.repositories import NotFound
+from app.storage.repositories import NotFound, SqlGradeOverrideRepository
 
 __all__ = ["AssessmentItemNotFound", "AssessmentService", "AttemptConflict", "AttemptNotFound",
            "InvalidAssessmentRequest", "ItemConflict"]
@@ -105,8 +113,10 @@ class AssessmentService:
                  artifacts: ArtifactService, memory: LearnerMemoryService, knowledge: KnowledgeBase,
                  curriculum: CurriculumService, tasks: TaskService, events: EventBus,
                  config: AssessmentConfig | None = None, clock: Callable[[], datetime] = utcnow,
-                 spend: SpendStore | None = None, budgets: BudgetDefaults | None = None) -> None:
+                 spend: SpendStore | None = None, budgets: BudgetDefaults | None = None,
+                 overrides: SqlGradeOverrideRepository | None = None) -> None:
         self._repo = repository
+        self._overrides = overrides
         self._spend = spend
         self._budgets = budgets or BudgetDefaults()
         self._grader = grader
@@ -251,6 +261,8 @@ class AssessmentService:
             raise InvalidAssessmentRequest(f"item {item_id} has no lesson")
         if m.task.learner_id != data.learner_id:
             raise InvalidAssessmentRequest("the item's lesson belongs to another learner")
+        if self._tasks.releases is not None:
+            self._tasks.releases.check(m.task.task_id)  # a lesson held for its teacher's release (LessonHeld, 409)
         # Every write below (the item, the attempt and grade, their artifacts and events, the evidence and mastery)
         # is refused once the learner or the lesson is deleted, checked inside each write's own transaction: a
         # deletion that lands while the answer is being graded leaves nothing behind (LearnerDataGone, 404).
@@ -300,12 +312,89 @@ class AssessmentService:
     def _view(self, a: AssessmentAttempt) -> AttemptView:
         grade = self._repo.grade(a.grade_id)
         assert grade is not None
-        evidence = a.outcome.evidence_ids if a.outcome else []
+        evidence = list(a.outcome.evidence_ids) if a.outcome else []
+        override = self.override_of(a.attempt_id) if grade.outcome == AssessmentOutcome.UNCERTAIN else None
+        if override is not None and not self.override_recorded(override, a.assessment_item_id):
+            override = None  # its evidence is not recorded yet (a failure in between): the same override heals it
+        if override is not None:
+            evidence.append(override.evidence_id)
         return AttemptView(attempt_id=a.attempt_id, assessment_item_id=a.assessment_item_id, learner_id=a.learner_id,
                            attempt_number=a.attempt_number, learner_answer=a.learner_answer,
                            submitted_at=a.submitted_at, grade_id=a.grade_id, source=a.source, outcome=grade.outcome,
                            completed=a.completed_at is not None, mastery_updated=bool(evidence),
-                           evidence_ids=evidence, retry_recommended=grade.outcome == AssessmentOutcome.UNCERTAIN)
+                           evidence_ids=evidence,
+                           retry_recommended=grade.outcome == AssessmentOutcome.UNCERTAIN and override is None,
+                           override=OverrideView(outcome=override.outcome, note=override.note,
+                                                 created_at=override.created_at) if override is not None else None)
+
+    # --- teacher overrides of UNCERTAIN grades (Important item 2) -------------------------------------------------
+
+    def override_of(self, attempt_id: str) -> GradeOverride | None:
+        return self._overrides.get(attempt_id) if self._overrides is not None else None
+
+    def overrides_for(self, attempt_ids) -> dict[str, GradeOverride]:
+        return self._overrides.for_attempts(attempt_ids) if self._overrides is not None else {}
+
+    def override_recorded(self, override: GradeOverride, item_id: str) -> bool:
+        """Whether the override's evidence is in learner memory. The override row is written first; until its evidence
+        is recorded it counts for nothing, and the same override again (a replay) records it."""
+        item = self._repo.item(item_id)
+        if item is None:
+            return False
+        return any(e.evidence_id == override.evidence_id for e in self._memory.evidence(override.learner_id,
+                                                                                         item.concept_id))
+
+    async def override(self, attempt_id: str, data: OverrideGrade, *, class_id: str,
+                       teacher_id: str) -> OverrideResult:
+        """A teacher's outcome for an answer the grader could not decide. The grade stays as stored (immutable); the
+        override is a record of its own, one per attempt, and one piece of LearningEvidence recorded through learner
+        memory's MasteryUpdater. The same override again is a replay (and records the evidence again, a no-op, so a
+        crash between the two writes heals); a different one, or a grade that is not UNCERTAIN, is OverrideConflict.
+        The caller checked that the attempt's learner is on the roster of the teacher's class."""
+        if self._overrides is None:
+            raise RuntimeError("no override store is configured")
+        attempt = self._attempt(attempt_id)
+        grade = self._repo.grade(attempt.grade_id)
+        assert grade is not None
+        if grade.outcome != AssessmentOutcome.UNCERTAIN:
+            raise OverrideConflict(f"the answer was graded {grade.outcome.value}: only an UNCERTAIN grade can be "
+                                   f"overridden")
+        item = self.item(attempt.assessment_item_id)
+        if item.lesson_id is None:
+            raise InvalidAssessmentRequest(f"item {item.assessment_item_id} has no lesson")
+        m = self._material(item.lesson_id)
+        if m.task.learner_id != attempt.learner_id:
+            raise InvalidAssessmentRequest("the item's lesson belongs to another learner")
+        note = (data.note or "").strip() or None
+        evidence_id = LearningEvidence.id_for(attempt.learner_id, "teacher_review", attempt_id, item.concept_id)
+        wanted = GradeOverride(attempt_id=attempt_id, learner_id=attempt.learner_id, class_id=class_id,
+                               teacher_id=teacher_id, outcome=data.outcome, note=note, evidence_id=evidence_id,
+                               created_at=self._clock())
+        scope = self._scope(m.task.task_id, None)
+        # Refused once the learner or the lesson is deleted, checked inside each write's own transaction.
+        with learner_writes(attempt.learner_id, m.task.task_id):
+            stored, created = self._overrides.save(wanted)
+            if not created and (stored.outcome, stored.note) != (wanted.outcome, wanted.note):
+                raise OverrideConflict(f"the answer was already overridden as {stored.outcome}")
+            correctness, score = graded_correctness(stored.outcome, OVERRIDE_SCORE[stored.outcome])
+            evidence = LearningEvidence(
+                evidence_id=stored.evidence_id, learner_id=attempt.learner_id, concept_id=item.concept_id,
+                source_type="teacher_review", source_ref=attempt_id, correctness=correctness, score=score,
+                difficulty=item.difficulty, timestamp=stored.created_at,
+                metadata={"attempt_id": attempt_id, "assessment_item_id": item.assessment_item_id,
+                          "grade_id": grade.grade_id, "outcome": stored.outcome, "class_id": stored.class_id})
+            graph = await self._knowledge.graph(m.request.subject)
+            update = self._memory.record_evidence(attempt.learner_id, m.request.subject, [evidence],
+                                                  [c.ref() for c in graph.concepts()], scope)
+            # Ids and the outcome only: never the answer or the teacher's note. A stable id: emitted once.
+            scope.events.emit(EventType.ASSESSMENT_OVERRIDDEN, task_id=m.task.task_id, node_id=NODE_ID,
+                              event_id=stable_id("aevt", attempt_id, "overridden"), attempt_id=attempt_id,
+                              assessment_item_id=item.assessment_item_id, grade_id=grade.grade_id,
+                              concept_id=item.concept_id, outcome=stored.outcome, class_id=stored.class_id)
+        return OverrideResult(attempt_id=attempt_id, replayed=not created, evidence_ids=[stored.evidence_id],
+                              override=OverrideView(outcome=stored.outcome, note=stored.note,
+                                                    created_at=stored.created_at),
+                              mastery_changes=[c.model_dump(mode="json") for c in update.changes])
 
     async def _record(self, attempt: AssessmentAttempt, grade: AssessmentGrade, item: AssessmentItem,
                       m: LessonMaterial, artifact_ids: dict[str, str]) -> AttemptOutcome:

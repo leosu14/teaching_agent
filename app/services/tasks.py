@@ -21,6 +21,7 @@ from app.schemas.events import Event
 from app.schemas.job import JobConflict, JobKind, TaskJob
 from app.schemas.lesson import DiagnosticAnswers, LessonRequest
 from app.schemas.task import Task, TaskStatus
+from app.services.releases import LessonReleaseService
 from app.runtime.tasks.state_machine import InvalidTransition
 from app.storage.repositories import NotFound, SqlEventRepository, SqlTaskJobRepository, SqlTaskRepository
 
@@ -34,8 +35,12 @@ class TaskService:
 
     def __init__(self, orchestrator: Orchestrator, tasks: SqlTaskRepository, events: SqlEventRepository,
                  artifacts: ArtifactService, jobs: SqlTaskJobRepository | None = None,
-                 job_max_attempts: int = 3, has_profile: Callable[[str], bool] | None = None) -> None:
+                 job_max_attempts: int = 3, has_profile: Callable[[str], bool] | None = None,
+                 releases: LessonReleaseService | None = None) -> None:
         self._orchestrator = orchestrator
+        # Lesson approval (Important item 2): a lesson task created for a learner in a class that approves lessons
+        # gets its PENDING release in the creating request; an evaluation of a held lesson is refused.
+        self.releases = releases
         # Whether a learner has a profile row: a lesson may be queued before onboarding (no profile yet), and then a
         # missing learner row is not a deletion (`learner_writes(profile=False)`). Without it, assumed so.
         self._has_profile = has_profile or (lambda learner_id: True)
@@ -62,12 +67,15 @@ class TaskService:
         if idempotency_key is not None:
             digest = hashlib.sha256(json.dumps(["task", user_id, idempotency_key]).encode()).hexdigest()
             task_id = f"task_{digest[:24]}"
+        existed = task_id is not None and self._exists(task_id)
+        task_id = task_id or new_id("task")
+        if not existed:  # a retry of an earlier request keeps what was decided for it then
+            self._request_release(task_id, learner_id)
         task = self._orchestrator.create_task(request=request, learner_id=learner_id, user_id=user_id,
                                               task_id=task_id)
-        if task_id is not None and (task.request != request or task.learner_id != learner_id
-                                    or task.user_id != user_id):
+        if idempotency_key is not None and (task.request != request or task.learner_id != learner_id or task.user_id != user_id):
             raise JobConflict(task.task_id)
-        if task_id is not None and task.status != TaskStatus.CREATED:  # a retry of a request that already ran
+        if idempotency_key is not None and task.status != TaskStatus.CREATED:  # a retry of a request that already ran
             job = self._job_store().latest_for_task(task.task_id)
             if job is not None:
                 return task, job
@@ -149,16 +157,35 @@ class TaskService:
     # --- in-process execution --------------------------------------------------------------------------------------
 
     async def create_and_run(self, *, request: str, learner_id: str, user_id: str) -> Task:
-        task = self._orchestrator.create_task(request=request, learner_id=learner_id, user_id=user_id)
+        task_id = new_id("task")
+        self._request_release(task_id, learner_id)
+        task = self._orchestrator.create_task(request=request, learner_id=learner_id, user_id=user_id,
+                                              task_id=task_id)
         return await self._orchestrator.run(task.task_id)
 
     def create_lesson(self, *, lesson_request: LessonRequest, learner_id: str, user_id: str,
                       metadata: dict | None = None) -> Task:
         """A lesson task whose request is already structured (no interpretation step). `metadata` may carry the
         task's budget."""
+        task_id = new_id("task")
+        self._request_release(task_id, learner_id)
         return self._orchestrator.create_planned_task(
             request=lesson_request.raw_request, learner_id=learner_id, user_id=user_id, workflow_id=LESSON_WORKFLOW,
-            lesson_request=lesson_request, inputs={}, metadata=metadata)
+            lesson_request=lesson_request, inputs={}, metadata=metadata, task_id=task_id)
+
+    def _exists(self, task_id: str) -> bool:
+        try:
+            self._tasks.get(task_id)
+            return True
+        except NotFound:
+            return False
+
+    def _request_release(self, task_id: str, learner_id: str) -> None:
+        """Before the lesson task is created (Important item 2): the release, when one is due, is stored first, so a
+        task never exists without the release it was owed. A failure here creates no task and the request can be
+        retried; a task that failed to be created after it leaves a release of no task, never shown."""
+        if self.releases is not None:
+            self.releases.request(task_id, learner_id)
 
     def create_planned(self, *, request: LessonRequest, learner_id: str, user_id: str, workflow_id: str,
                        inputs: dict[str, str], metadata: dict | None = None, task_id: str | None = None) -> Task:
@@ -201,6 +228,8 @@ class TaskService:
         lesson = self._tasks.get(lesson_task_id)
         if lesson.status != TaskStatus.COMPLETED or lesson.plan is None or lesson.plan.workflow_id != LESSON_WORKFLOW:
             raise InvalidTransition(f"task {lesson_task_id} is not a completed lesson")
+        if self.releases is not None:
+            self.releases.check(lesson_task_id)  # a held lesson is not evaluated (LessonHeld, 409)
         return self._orchestrator.create_planned_task(
             request=f"Evaluate lesson {lesson_task_id}", learner_id=lesson.learner_id, user_id=user_id,
             workflow_id=EVALUATION_WORKFLOW, lesson_request=lesson.plan.lesson_request,

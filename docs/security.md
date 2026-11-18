@@ -208,6 +208,34 @@ session view: PR17 M1) do so for a teacher's read too; they never drive a child 
 bearer secrets: anyone with a learner's credentials and the code can join that learner, and a leaked code should
 be rotated. There is no rate limit on joins at the API (gateway limits apply).
 
+### Teacher review
+
+Important item 2 ([architecture](architecture.md#teacher-review)). The teacher of a class may approve lessons before
+its learners see them, and override the UNCERTAIN grades of its learners. These are the only changes a teacher makes
+for a learner. `Access.check` is unchanged: on every learner route a teacher's change is still `403`. Each review is
+a class route through `taught_class` (a class of another teacher or tenant, or no teacher role: the uniform `404`),
+for a learner still on that class's roster (a learner who left, an unknown attempt and a lesson this class never held
+are the same `404`).
+
+| Route | What |
+|---|---|
+| `PATCH /classes/{class_id}` | `lesson_approval`: lessons requested from now on for the class's learners wait for approval |
+| `GET /classes/{class_id}/lessons`, `/lessons/{task_id}` | The class's held and decided lessons (learner, topic, status, note) |
+| `GET /classes/{class_id}/lessons/{task_id}/preview` | The lesson as the learner's reading will show it: the same answer-isolated `LessonReading` |
+| `POST /classes/{class_id}/lessons/{task_id}/approve`, `/reject` | The final decision, with an optional note |
+| `POST /classes/{class_id}/attempts/{attempt_id}/override` | A teacher's outcome for an UNCERTAIN grade, once |
+
+- **Nothing of a held lesson reaches its learner.** Every learner surface of it answers `409 LessonHeld` with a fixed
+  message and no lesson content (`tests/e2e/test_teacher_review_api.py`). The preview is the learner's own filtered
+  reading, so a teacher sees no exercise, check question or answer key there either (the security matrix's sentinel
+  is checked); the full lesson with its answers is still never served.
+- **An override changes mastery only through the MasteryUpdater**, as one piece of evidence with a stable id, and
+  only for an UNCERTAIN grade (never evidence before); the grade stays immutable. Neither the events nor the logs
+  carry the teacher's note or the learner's answer. The learner sees the outcome and the note on their attempt.
+- **Writes are guarded** like every other write for a learner (`learner_writes`): a deletion that committed first
+  refuses them, and the deletion erases `lesson_releases` and `grade_overrides`.
+- All seven routes are in the security matrix (`tests/e2e/test_security_api.py`).
+
 ### The teacher dashboard
 
 MVP item 7. Two read-only routes aggregate a class for its teacher; both take the class through `taught_class`, so a
@@ -227,9 +255,9 @@ uniform `404`, and only `GET` is served (any other method is `405`).
   `tests/e2e/test_class_dashboard_api.py` grades an answer on an item whose key is the security matrix's sentinel and
   checks that no response carries it; both routes are in the security matrix.
 - **Read-only.** Nothing is reconciled, recorded or graded: the service reads stored records only
-  (`tests/integration/test_class_dashboard.py` compares every table before and after). The page itself sends only
-  the teacher's own changes (creating a class, rotating its join code); `tests/unit/test_student_app.py` checks its
-  script.
+  (`tests/integration/test_class_dashboard.py` compares every table before and after). The page sends only class
+  routes: the teacher's own changes (creating a class, rotating its join code, the lesson-approval setting) and the
+  teacher reviews above; `tests/unit/test_student_app.py` checks its script.
 - **Residual points.** The learner page of the dashboard uses the learner routes a teacher may already read
   (above); it does not call `GET /learning-cycles/{id}` or the next action, the reads that reconcile or store. A
   teacher sees the learner's own answer text, which the learner wrote to be graded.

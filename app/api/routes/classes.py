@@ -4,7 +4,12 @@ learner route (app/api/authorization.py). Either side can end the membership: th
 the learner leaves.
 
 A class of another teacher, or of another tenant, gets the same 404 as one that does not exist, and so does a wrong
-or retired join code."""
+or retired join code.
+
+Teacher review (Important item 2): the class's teacher may require approving lessons before its learners see them,
+previews and approves or rejects them, and overrides the UNCERTAIN grades of its learners. These are the only changes
+a teacher makes for a learner, and every one is a class route through `taught_class`, for a learner still on that
+class's roster: `Access.check` (a teacher reads a learner's routes, never changes them) is unchanged."""
 
 from __future__ import annotations
 
@@ -15,6 +20,15 @@ from app.api.authorization import ResourceNotFound, authorize, principal, requir
 from app.api.deps import container
 from app.schemas.classroom import ClassJoinCode, Classroom, ClassView, CreateClass, Enrollment, JoinClass
 from app.schemas.dashboard import ClassDashboard, UncertainGrade
+from app.schemas.reading import LessonReading
+from app.schemas.review import (
+    ClassSettings,
+    LessonReleaseView,
+    OverrideGrade,
+    OverrideResult,
+    ReleaseDecision,
+    ReleaseStatus,
+)
 from app.services.container import Container
 
 router = APIRouter(tags=["classes"])
@@ -38,6 +52,68 @@ def list_classes(p: Principal = Depends(principal), c: Container = Depends(conta
 @router.get("/classes/{class_id}", response_model=ClassView)
 def get_class(classroom: Classroom = Depends(taught_class), c: Container = Depends(container)) -> ClassView:
     return c.classes.view(classroom)
+
+
+@router.patch("/classes/{class_id}", response_model=ClassView)
+def update_class(body: ClassSettings, classroom: Classroom = Depends(taught_class),
+                 c: Container = Depends(container)) -> ClassView:
+    """The class's settings. `lesson_approval`: lessons requested from now on for its learners wait for the
+    teacher's approval before the learners see them (lessons requested before keep what was decided then)."""
+    if body.lesson_approval is None:
+        return c.classes.view(classroom)
+    return c.classes.set_lesson_approval(classroom, body.lesson_approval)
+
+
+@router.get("/classes/{class_id}/lessons", response_model=list[LessonReleaseView])
+def class_lessons(classroom: Classroom = Depends(taught_class), status: ReleaseStatus | None = Query(default=None),
+                  c: Container = Depends(container)) -> list[LessonReleaseView]:
+    """The lessons requested for this class's learners while it required approval, newest first (`status`: only
+    PENDING, APPROVED or REJECTED). Learners who left the class are not listed."""
+    return c.lesson_releases.for_class(classroom, status)
+
+
+@router.get("/classes/{class_id}/lessons/{task_id}", response_model=LessonReleaseView)
+def class_lesson(task_id: str, classroom: Classroom = Depends(taught_class),
+                 c: Container = Depends(container)) -> LessonReleaseView:
+    return c.lesson_releases.view(classroom, task_id)
+
+
+@router.get("/classes/{class_id}/lessons/{task_id}/preview", response_model=LessonReading)
+def preview_lesson(task_id: str, classroom: Classroom = Depends(taught_class),
+                   c: Container = Depends(container)) -> LessonReading:
+    """The lesson as its learner's reading will show it once released: the same answer-isolated text and images
+    (never the exercises, answers, narration or deck). 409 while the lesson is still being generated."""
+    c.lesson_releases.release_for(classroom, task_id)
+    return c.lesson_reading.reading(task_id, preview=True)
+
+
+@router.post("/classes/{class_id}/lessons/{task_id}/approve", response_model=LessonReleaseView)
+def approve_lesson(task_id: str, body: ReleaseDecision | None = None, classroom: Classroom = Depends(taught_class),
+                   p: Principal = Depends(principal), c: Container = Depends(container)) -> LessonReleaseView:
+    """Release the lesson to its learner. Final: approving again returns it as it is; a rejected lesson is 409."""
+    return c.lesson_releases.decide(classroom, task_id, ReleaseStatus.APPROVED, teacher_id=p.user_id,
+                                    note=body.note if body else None)
+
+
+@router.post("/classes/{class_id}/lessons/{task_id}/reject", response_model=LessonReleaseView)
+def reject_lesson(task_id: str, body: ReleaseDecision | None = None, classroom: Classroom = Depends(taught_class),
+                  p: Principal = Depends(principal), c: Container = Depends(container)) -> LessonReleaseView:
+    """Do not release the lesson: it stays held from its learner, and a learning cycle on it fails (the learner
+    starts a new one, which generates a new lesson). Final: rejecting again returns it; an approved lesson is 409."""
+    return c.lesson_releases.decide(classroom, task_id, ReleaseStatus.REJECTED, teacher_id=p.user_id,
+                                    note=body.note if body else None)
+
+
+@router.post("/classes/{class_id}/attempts/{attempt_id}/override", response_model=OverrideResult)
+async def override_grade(attempt_id: str, body: OverrideGrade, classroom: Classroom = Depends(taught_class),
+                         p: Principal = Depends(principal), c: Container = Depends(container)) -> OverrideResult:
+    """The teacher's outcome for an answer the grader could not decide (UNCERTAIN), of a learner on this class's
+    roster. It becomes one piece of learning evidence (mastery changes through the learner's MasteryUpdater); the
+    grade itself stays as it was. Once per attempt: the same override again is a replay, a different one 409."""
+    owner = c.ownership.assessment_attempt(attempt_id)
+    if owner is None or c.classes.member(classroom.class_id, owner) is None:
+        raise ResourceNotFound()
+    return await c.assessment_service.override(attempt_id, body, class_id=classroom.class_id, teacher_id=p.user_id)
 
 
 @router.get("/classes/{class_id}/dashboard", response_model=ClassDashboard)
