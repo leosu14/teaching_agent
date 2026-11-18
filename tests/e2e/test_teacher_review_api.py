@@ -293,3 +293,124 @@ def test_deleting_the_learner_erases_their_releases_and_overrides(board_world) -
         assert a.get(f"/classes/{ids['class']}/lessons", headers=teacher(auth)).json() == []
     assert c.assessment_service.override_of(ids["uncertain_attempt"]) is None
     assert c.lesson_releases.repository.get(task["task_id"]) is None
+
+
+# --- review findings of PR #57 ----------------------------------------------------------------------------------
+
+
+def _flaky(container):
+    """Fail the first release request (a transient database error), then behave."""
+    real = container.lesson_releases.request
+    calls = {"n": 0}
+
+    def flaky(task_id, learner_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient database error")
+        return real(task_id, learner_id)
+
+    container.lesson_releases.request = flaky
+    return calls
+
+
+def test_a_failed_release_request_creates_no_task_and_a_retry_is_held(world) -> None:
+    """F2: the release is stored before the task, so a failure leaves no task to run released."""
+    from fastapi.testclient import TestClient
+
+    env, ids, auth = world
+    c = env.container
+    with client_for(c, LEARNER, auth=auth) as a:
+        a.patch(f"/classes/{ids['class']}", json={"lesson_approval": True}, headers=teacher(auth))
+        before = {t.task_id for t in c.task_service.list_for_learner(LEARNER)}
+        calls = _flaky(c)
+        body, key = {"request": "Teach me the preterite", "learner_id": LEARNER}, {"Idempotency-Key": "retry-me"}
+        raw = TestClient(a.app, raise_server_exceptions=False, headers=dict(a.headers))
+        assert raw.post("/tasks", json=body, headers=key).status_code == 500
+        assert {t.task_id for t in c.task_service.list_for_learner(LEARNER)} == before  # no task without its release
+        task = settle(a, a.post("/tasks", json=body, headers=key))
+        assert task["release"] == "PENDING" and calls["n"] == 2
+        assert [e["task_id"] for e in a.get(f"/classes/{ids['class']}/lessons", headers=teacher(auth)).json()] == \
+            [task["task_id"]]
+
+
+def test_a_cycle_whose_release_request_failed_still_waits_for_the_teacher(cycle_env_at) -> None:
+    from fastapi.testclient import TestClient
+
+    from tests.auth import TestAuth
+
+    env = cycle_env_at("base")
+    c = env.container
+    auth = TestAuth()
+    with client_for(c, LEARNER, roles=(AUTHOR,), auth=auth) as a:
+        created = a.post("/classes", json={"name": "Spanish B1"}, headers=teacher(auth)).json()
+        a.post(f"/learners/{LEARNER}/classes", json={"join_code": created["join_code"]})
+        a.patch(f"/classes/{created['class_id']}", json={"lesson_approval": True}, headers=teacher(auth))
+        _flaky(c)
+        raw = TestClient(a.app, raise_server_exceptions=False, headers=dict(a.headers))
+        view = raw.post(f"/learners/{LEARNER}/learning-cycles", json={"idempotency_key": "k"})
+        if view.status_code >= 300:  # the failure surfaced on this request: the client asks again
+            view = a.post(f"/learners/{LEARNER}/learning-cycles", json={"idempotency_key": "k"})
+        view = drive_to_block(a, view.json())
+        if view["status"] == "RUNNING":
+            view = a.post(f"/learning-cycles/{view['cycle_id']}/resume").json()
+            view = drive_to_block(a, view)
+        assert view["status"] == "BLOCKED" and view["failure"]["kind"] == "APPROVAL", view
+        lesson_task = {s["kind"]: s["child_id"] for s in view["steps"]}["LESSON"]
+        assert c.lesson_releases.held(lesson_task) is not None
+
+
+def test_a_hold_that_returns_before_the_session_blocks_the_cycle(approval_world) -> None:
+    """F5: the lesson step completed (approved), and the lesson is held again when the session is to start (as when
+    the learner rejoins another approving class): the cycle waits BLOCKED on the session step instead of answering a
+    raw 409, and carries on once the hold is gone."""
+    from app.schemas.review import LessonHeld
+
+    env, ids, auth, _ = approval_world
+    c = env.container
+    with client_for(c, LEARNER, auth=auth) as a:
+        a.post(f"/classes/{ids['class']}/lessons/{ids['task']}/approve", headers=teacher(auth))
+        real = c.lesson_releases.check
+
+        def held_again(task_id):
+            raise LessonHeld(HELD["detail"])
+
+        c.lesson_releases.check = held_again
+        r = a.post(f"/learning-cycles/{ids['cycle']}/resume")
+        assert r.status_code == 200, r.text
+        view = r.json()
+        session_step = next(s for s in view["steps"] if s["kind"] == "TEACHING_SESSION")
+        assert view["status"] == "BLOCKED" and view["failure"]["kind"] == "APPROVAL", view
+        assert view["failure"]["step_id"] == session_step["step_id"]
+        c.lesson_releases.check = real
+        view = a.post(f"/learning-cycles/{ids['cycle']}/resume").json()
+        assert view["prompt"]["kind"] == "SESSION_QUESTION", view
+
+
+def test_an_override_counts_only_once_its_evidence_is_recorded(board_world) -> None:
+    """F3: the override row is stored, then recording its evidence fails. Until a replay records it, the override
+    counts for nothing: the grade is still to review and the learner's view claims no mastery change."""
+    from fastapi.testclient import TestClient
+
+    env, ids, auth = board_world
+    c = env.container
+    attempt = ids["uncertain_attempt"]
+    path = f"/classes/{ids['class']}/attempts/{attempt}/override"
+    real = c.memory.record_evidence
+
+    def failing(*args, **kwargs):
+        raise RuntimeError("learner memory unavailable")
+
+    c.memory.record_evidence = failing
+    with client_for(c, LEARNER, auth=auth) as a:
+        raw = TestClient(a.app, raise_server_exceptions=False, headers=dict(a.headers))
+        assert raw.post(path, json={"outcome": "CORRECT"}, headers=teacher(auth)).status_code == 500
+        assert c.assessment_service.override_of(attempt) is not None  # the row was stored
+        view = a.get(f"/assessment-attempts/{attempt}").json()
+        assert view["override"] is None and view["mastery_updated"] is False and view["retry_recommended"] is True
+        [open_grade] = a.get(f"/classes/{ids['class']}/uncertain-grades", headers=teacher(auth)).json()
+        assert open_grade["attempt_id"] == attempt and open_grade["resolved"] is False
+        c.memory.record_evidence = real
+        healed = a.post(path, json={"outcome": "CORRECT"}, headers=teacher(auth))
+        assert healed.status_code == 200 and healed.json()["replayed"] is True
+        assert a.get(f"/assessment-attempts/{attempt}").json()["override"]["outcome"] == "CORRECT"
+        assert a.get(f"/classes/{ids['class']}/uncertain-grades", headers=teacher(auth)).json() == []

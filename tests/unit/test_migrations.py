@@ -149,3 +149,43 @@ def test_a_stamped_but_older_revision_is_refused(tmp_path) -> None:
     with pytest.raises(SchemaNotCurrent, match="revision 0000_older"):
         check(engine)
     engine.dispose()
+
+
+def _database_from_before_teacher_review(u: str) -> None:
+    """A database an earlier version made: classes without `lesson_approval`, no release or override tables."""
+    dispose(create_db(u))
+    engine = create_engine(u)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE lesson_releases"))
+        conn.execute(text("DROP TABLE grade_overrides"))
+        conn.execute(text("ALTER TABLE classes DROP COLUMN lesson_approval"))
+        conn.execute(text("INSERT INTO classes (class_id, teacher_id, tenant_id, name, join_code_hash, created_at) "
+                          "VALUES ('cls_old', 't1', NULL, 'Old class', 'h1', '2026-01-01 00:00:00')"))
+    engine.dispose()
+
+
+def test_create_mode_adds_lesson_approval_to_an_earlier_database(tmp_path) -> None:
+    """Review finding F1 of PR #57: without the column, every lesson request failed in `create` mode."""
+    from app.storage.repositories import SqlClassRepository
+
+    u = url(tmp_path)
+    _database_from_before_teacher_review(u)
+    sessions = create_db(u)
+    try:
+        repo = SqlClassRepository(sessions)
+        assert repo.get("cls_old").lesson_approval is False
+        assert repo.approving_class("anyone") is None
+    finally:
+        dispose(sessions)
+
+
+def test_an_earlier_create_all_database_is_adopted_with_lesson_approval(tmp_path) -> None:
+    u = url(tmp_path)
+    _database_from_before_teacher_review(u)
+    report = upgrade(u)
+    assert report.adopted and report.after == HEAD
+    assert diffs(u) == [] and revision(u) == HEAD
+    engine = create_engine(u)
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT lesson_approval FROM classes WHERE class_id = 'cls_old'")).scalar() == 0
+    engine.dispose()

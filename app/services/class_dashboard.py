@@ -114,6 +114,11 @@ class ClassDashboardService:
         rows = self._assessment.graded_attempts(m.learner_id for m in members)
         overridden = self._overrides.for_attempts(
             a.attempt_id for a, g in rows if g.outcome == AssessmentOutcome.UNCERTAIN) if self._overrides else {}
+        recorded: dict[str, set[str]] = {}  # learner -> evidence ids: an override counts once its evidence is recorded
+        for o in overridden.values():
+            if o.learner_id not in recorded:
+                recorded[o.learner_id] = {e.evidence_id for e in self._memory.evidence(o.learner_id)}
+        overridden = {k: o for k, o in overridden.items() if o.evidence_id in recorded[o.learner_id]}
         items: dict[str, AssessmentItem | None] = {}
         found: list[UncertainGrade] = []
         for i, (attempt, grade) in enumerate(rows):

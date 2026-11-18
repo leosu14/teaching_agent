@@ -58,17 +58,18 @@ class LessonReleaseService:
 
     # --- requesting and the gate ---------------------------------------------------------------------------------
 
-    def request(self, task: Task) -> LessonRelease | None:
-        """A PENDING release for a newly created lesson task when a class of its learner requires approval. Called
-        inside the creating request's learner-writes guard; idempotent (a task keeps its first release)."""
-        existing = self.repository.get(task.task_id)
+    def request(self, task_id: str, learner_id: str) -> LessonRelease | None:
+        """A PENDING release for a lesson task about to be created, when a class of its learner requires approval.
+        Called inside the creating request's learner-writes guard and before the task row is written, so a lesson
+        task never exists without the release it was owed; idempotent (a task keeps its first release)."""
+        existing = self.repository.get(task_id)
         if existing is not None:
             return existing
-        class_id = self._classes.approving_class(task.learner_id)
+        class_id = self._classes.approving_class(learner_id)
         if class_id is None:
             return None
         release = self.repository.request(LessonRelease(
-            task_id=task.task_id, learner_id=task.learner_id, class_id=class_id, status=ReleaseStatus.PENDING,
+            task_id=task_id, learner_id=learner_id, class_id=class_id, status=ReleaseStatus.PENDING,
             requested_at=self._clock()))
         self._emit(EventType.LESSON_RELEASE_REQUESTED, release)
         return release
@@ -167,7 +168,7 @@ class LessonReleaseService:
     def _view(self, release: LessonRelease, names: dict[str, str]) -> LessonReleaseView | None:
         try:
             task = self._tasks.get(release.task_id)
-        except NotFound:
+        except NotFound:  # its task was never created (the request failed after the release): nothing to show
             return None
         if release.learner_id not in names:
             try:

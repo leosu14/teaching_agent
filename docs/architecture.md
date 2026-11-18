@@ -1122,12 +1122,15 @@ changes them) is unchanged ([security](security.md#teacher-review)).
 **Lesson approval** (`app/services/releases.py`, `LessonReleaseService`):
 
 - `classes.lesson_approval`, off by default, set with `PATCH /classes/{id}`. The decision is taken when a lesson is
-  requested: `TaskService` creates a lesson task (`POST /tasks`, a cycle's lesson step) and, in the same request and
-  learner-writes guard, `request` stores a PENDING `lesson_releases` row for the first class of the learner that
-  requires approval. No row means released, so nothing changes for a learner in no such class, or for a lesson
+  requested: when `TaskService` creates a lesson task (`POST /tasks`, a cycle's lesson step), it first, in the
+  same request and learner-writes guard, has `request` store a PENDING `lesson_releases` row for the first class of
+  the learner that requires approval, and only then writes the task. So a lesson task never exists without the
+  release it was owed: a failure in between leaves no task (the request is retried) or a release of no task (never
+  shown). No row means released, so nothing changes for a learner in no such class, or for a lesson
   requested before the setting was turned on (turning it off later does not release a pending lesson either).
 - A lesson is **held** while its release is PENDING or REJECTED and its learner is still on that class's roster
-  (leaving or being removed lifts that class's hold). Held, every learner surface refuses it with `409 LessonHeld`
+  (leaving or being removed lifts that class's hold, by the consent rule of classes: a learner who leaves also
+  ends the teacher's access; a learner in two approving classes is held by the first one they joined). Held, every learner surface refuses it with `409 LessonHeld`
   and a fixed message: the reading, starting a teaching session, creating its evaluation, an attempt on an item
   registered on it, and `GET /artifacts/{id}/content` of its artifacts for the learner's own scope (the class's
   teacher still reads them, for the preview's images). `GET /tasks/{id}` shows `release`. Authors may still register
@@ -1148,7 +1151,9 @@ changes them) is unchanged ([security](security.md#teacher-review)).
 stored grade stays as it was (grades are immutable). The override is a `grade_overrides` row, one per attempt, and
 one piece of `LearningEvidence` (`source_type="teacher_review"`, score 1, 0.5 or 0, a stable id per attempt)
 recorded through learner memory's MasteryUpdater, inside the learner-writes guard. The same override again is a
-replay that records the evidence again (a no-op), so a crash between the two writes heals; a different one, or a
+replay that records the evidence again (a no-op), so a crash between the two writes heals; until the evidence
+is recorded the override counts for nothing (the learner's view and the dashboard ignore it, so the teacher's page
+offers the buttons again); a different one, or a
 grade that is not UNCERTAIN, is 409. The learner's attempt view carries `override` (`retry_recommended` false), and
 the dashboard counts an overridden grade as resolved. Overriding a grade that already counted would need retracting
 evidence from the append-only evidence model, and is not offered.

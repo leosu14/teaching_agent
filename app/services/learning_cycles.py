@@ -56,7 +56,7 @@ from app.schemas.learning_cycle import (
     StartLearningCycle,
     StepKind,
 )
-from app.schemas.review import HELD_MESSAGE, REJECTED_MESSAGE, ReleaseStatus
+from app.schemas.review import HELD_MESSAGE, REJECTED_MESSAGE, LessonHeld, ReleaseStatus
 from app.schemas.task import Task, TaskStatus
 from app.schemas.teaching import (
     LearnerInput,
@@ -506,6 +506,11 @@ class LearningCycleService:
             except InvalidGoal as exc:  # the curriculum moved under the action
                 return await self._commit(cycle, engine.fail(
                     cycle, self._failure(FailureKind.VALIDATION, str(exc), step), self._clock()), token)
+            except LessonHeld:  # the lesson is held again (e.g. its learner rejoined the class): as on the lesson step
+                rejected = self._tasks.releases is not None and self._tasks.releases.rejected(self._lesson_task_id(cycle))
+                return await self._commit(cycle, engine.fail(cycle, self._failure(
+                    FailureKind.APPROVAL, REJECTED_MESSAGE if rejected else HELD_MESSAGE, step,
+                    retryable=not rejected), self._clock()), token)
         return await self._commit(cycle, engine.attach_child(cycle, step.step_id, child_id, self._clock(),
                                                              reused=reused), token)
 

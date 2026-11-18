@@ -314,6 +314,8 @@ class AssessmentService:
         assert grade is not None
         evidence = list(a.outcome.evidence_ids) if a.outcome else []
         override = self.override_of(a.attempt_id) if grade.outcome == AssessmentOutcome.UNCERTAIN else None
+        if override is not None and not self.override_recorded(override, a.assessment_item_id):
+            override = None  # its evidence is not recorded yet (a failure in between): the same override heals it
         if override is not None:
             evidence.append(override.evidence_id)
         return AttemptView(attempt_id=a.attempt_id, assessment_item_id=a.assessment_item_id, learner_id=a.learner_id,
@@ -332,6 +334,15 @@ class AssessmentService:
 
     def overrides_for(self, attempt_ids) -> dict[str, GradeOverride]:
         return self._overrides.for_attempts(attempt_ids) if self._overrides is not None else {}
+
+    def override_recorded(self, override: GradeOverride, item_id: str) -> bool:
+        """Whether the override's evidence is in learner memory. The override row is written first; until its evidence
+        is recorded it counts for nothing, and the same override again (a replay) records it."""
+        item = self._repo.item(item_id)
+        if item is None:
+            return False
+        return any(e.evidence_id == override.evidence_id for e in self._memory.evidence(override.learner_id,
+                                                                                         item.concept_id))
 
     async def override(self, attempt_id: str, data: OverrideGrade, *, class_id: str,
                        teacher_id: str) -> OverrideResult:

@@ -68,14 +68,14 @@ class TaskService:
             digest = hashlib.sha256(json.dumps(["task", user_id, idempotency_key]).encode()).hexdigest()
             task_id = f"task_{digest[:24]}"
         existed = task_id is not None and self._exists(task_id)
+        task_id = task_id or new_id("task")
+        if not existed:  # a retry of an earlier request keeps what was decided for it then
+            self._request_release(task_id, learner_id)
         task = self._orchestrator.create_task(request=request, learner_id=learner_id, user_id=user_id,
                                               task_id=task_id)
-        if task_id is not None and (task.request != request or task.learner_id != learner_id
-                                    or task.user_id != user_id):
+        if existed and (task.request != request or task.learner_id != learner_id or task.user_id != user_id):
             raise JobConflict(task.task_id)
-        if not existed:  # a retry of an earlier request keeps what was decided for it then
-            self._request_release(task)
-        if task_id is not None and task.status != TaskStatus.CREATED:  # a retry of a request that already ran
+        if existed and task.status != TaskStatus.CREATED:  # a retry of a request that already ran
             job = self._job_store().latest_for_task(task.task_id)
             if job is not None:
                 return task, job
@@ -157,18 +157,21 @@ class TaskService:
     # --- in-process execution --------------------------------------------------------------------------------------
 
     async def create_and_run(self, *, request: str, learner_id: str, user_id: str) -> Task:
-        task = self._orchestrator.create_task(request=request, learner_id=learner_id, user_id=user_id)
+        task_id = new_id("task")
+        self._request_release(task_id, learner_id)
+        task = self._orchestrator.create_task(request=request, learner_id=learner_id, user_id=user_id,
+                                              task_id=task_id)
         return await self._orchestrator.run(task.task_id)
 
     def create_lesson(self, *, lesson_request: LessonRequest, learner_id: str, user_id: str,
                       metadata: dict | None = None) -> Task:
         """A lesson task whose request is already structured (no interpretation step). `metadata` may carry the
         task's budget."""
-        task = self._orchestrator.create_planned_task(
+        task_id = new_id("task")
+        self._request_release(task_id, learner_id)
+        return self._orchestrator.create_planned_task(
             request=lesson_request.raw_request, learner_id=learner_id, user_id=user_id, workflow_id=LESSON_WORKFLOW,
-            lesson_request=lesson_request, inputs={}, metadata=metadata)
-        self._request_release(task)
-        return task
+            lesson_request=lesson_request, inputs={}, metadata=metadata, task_id=task_id)
 
     def _exists(self, task_id: str) -> bool:
         try:
@@ -177,9 +180,12 @@ class TaskService:
         except NotFound:
             return False
 
-    def _request_release(self, task: Task) -> None:
+    def _request_release(self, task_id: str, learner_id: str) -> None:
+        """Before the lesson task is created (Important item 2): the release, when one is due, is stored first, so a
+        task never exists without the release it was owed. A failure here creates no task and the request can be
+        retried; a task that failed to be created after it leaves a release of no task, never shown."""
         if self.releases is not None:
-            self.releases.request(task)
+            self.releases.request(task_id, learner_id)
 
     def create_planned(self, *, request: LessonRequest, learner_id: str, user_id: str, workflow_id: str,
                        inputs: dict[str, str], metadata: dict | None = None, task_id: str | None = None) -> Task:
