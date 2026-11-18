@@ -73,9 +73,9 @@ class TaskService:
             self._request_release(task_id, learner_id)
         task = self._orchestrator.create_task(request=request, learner_id=learner_id, user_id=user_id,
                                               task_id=task_id)
-        if existed and (task.request != request or task.learner_id != learner_id or task.user_id != user_id):
+        if idempotency_key is not None and (task.request != request or task.learner_id != learner_id or task.user_id != user_id):
             raise JobConflict(task.task_id)
-        if existed and task.status != TaskStatus.CREATED:  # a retry of a request that already ran
+        if idempotency_key is not None and task.status != TaskStatus.CREATED:  # a retry of a request that already ran
             job = self._job_store().latest_for_task(task.task_id)
             if job is not None:
                 return task, job

@@ -333,6 +333,22 @@ def test_a_failed_release_request_creates_no_task_and_a_retry_is_held(world) -> 
             [task["task_id"]]
 
 
+def test_a_racing_retry_with_another_request_under_the_same_key_conflicts(world) -> None:
+    """Re-review R1: the conflict check does not depend on whether the task existed before this call. Two requests
+    racing under one key both see no task; the second still gets JobConflict for a different request."""
+    from app.schemas.job import JobConflict
+
+    env, ids, auth = world
+    svc = env.container.task_service
+    first, _ = svc.enqueue_task(request="Teach me the preterite", learner_id=LEARNER, user_id="u", idempotency_key="race")
+    svc._exists = lambda task_id: False  # the second request looked before the first inserted its row
+    with pytest.raises(JobConflict):
+        svc.enqueue_task(request="Something else entirely", learner_id=LEARNER, user_id="u", idempotency_key="race")
+    again, job = svc.enqueue_task(request="Teach me the preterite", learner_id=LEARNER, user_id="u",
+                                  idempotency_key="race")
+    assert again.task_id == first.task_id and job is not None
+
+
 def test_a_cycle_whose_release_request_failed_still_waits_for_the_teacher(cycle_env_at) -> None:
     from fastapi.testclient import TestClient
 

@@ -717,6 +717,7 @@ async function renderGoalForm() {
 
 async function renderCycle(cycleId, view) {
   if (!location.hash.startsWith(`#/cycle/${encodeURIComponent(cycleId)}`)) return; // the learner moved on
+  const generation = app.view;
   const show = painter();
   if (!view) show(busy("Loading…"));
   let cycle = view;
@@ -745,6 +746,9 @@ async function renderCycle(cycleId, view) {
     },
   }, "Stop this session")) : null;
   show(header, body, footer);
+  // A newer rendering (two routes in a row, e.g. the start's own and a hash change) owns the page and its stream:
+  // this one painted nothing, so it must not take the stream over (its progress would go to a panel never shown).
+  if (generation !== app.view) return;
   if (cycle.status !== "RUNNING") return;
   // A RUNNING cycle is followed through its progress stream until the stream ends. When nobody drives it (between
   // two requests) the page resumes it, as before, and keeps showing the progress while that request runs. Without
