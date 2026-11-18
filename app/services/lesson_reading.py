@@ -100,8 +100,12 @@ class LessonReadingService:
                 answers += answer_strings(task.model_dump(mode="json", include={"workflow", "waiting"}))
         return answers
 
-    def reading(self, lesson_id: str) -> LessonReading:
+    def reading(self, lesson_id: str, *, preview: bool = False) -> LessonReading:
+        """The learner's reading; refused (LessonHeld, 409) while the lesson waits for its teacher's release.
+        `preview`: the same reading for the teacher deciding on that release (the caller checked the class)."""
         m = load_lesson(self._artifacts, self._tasks, lesson_id)
+        if not preview and self._tasks.releases is not None:
+            self._tasks.releases.check(m.task.task_id)
         items = self._assessment.items_for_lesson(m.artifact.artifact_id, m.task.task_id)
         always = [*answer_keys(m.lesson), *(a for i in items for a in [i.expected_answer, *i.acceptable_answers])]
         open_now = [a for a in self.open_answers(m.task.learner_id) if normalize(a)]

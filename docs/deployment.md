@@ -55,7 +55,8 @@ On the offline mock providers there is no vendor and nothing to declare.
 
 The schema is versioned with Alembic (`app/storage/migrations/`). Revision `0001_baseline` is the schema of MVP items
 1 to 7; `0002_object_holds` adds the object holds and the object-deletion queue of the learner data deletion (MVP
-item 9). `python -m app.storage.migrate`:
+item 9); `0003_teacher_review` adds `classes.lesson_approval` (off) and the `lesson_releases` and `grade_overrides`
+tables of teacher review (Important item 2). `python -m app.storage.migrate`:
 
 - `upgrade`: an empty database gets the whole schema; a database at an older revision is upgraded; a database that
   an earlier version made with `create_all` (no `alembic_version` table) is adopted: the tables and the columns of

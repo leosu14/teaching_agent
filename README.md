@@ -234,6 +234,10 @@ development tokens and the test mechanism.
 | POST/GET | `/learners/{id}/classes` | Join a class with its code / the learner's classes |
 | GET | `/classes/{id}/dashboard` | The teacher dashboard: each learner on the roster with mastery, goal and curriculum progress, cycle state and open UNCERTAIN grades (read-only) |
 | GET | `/classes/{id}/uncertain-grades` | The roster's answers the grader could not decide, newest first: question and answer, never the answer key (`?include_resolved=true` adds those a later graded attempt settled) |
+| PATCH | `/classes/{id}` | The class's settings: `lesson_approval` (lessons wait for the teacher's approval before learners see them) |
+| GET | `/classes/{id}/lessons` · `/classes/{id}/lessons/{task_id}` · `.../preview` | The lessons held for the teacher's release, one of them, and its preview (the learner's answer-isolated reading) |
+| POST | `/classes/{id}/lessons/{task_id}/approve` · `.../reject` | Release a lesson to its learner, or not (final) |
+| POST | `/classes/{id}/attempts/{attempt_id}/override` | The teacher's outcome for an UNCERTAIN grade: one piece of evidence through the MasteryUpdater, once |
 | GET | `/app/` · `/app/teacher.html` · `/app/privacy.html` | The student web app, the teacher dashboard and the privacy notice (static, public; the apps' data comes from the routes above) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 

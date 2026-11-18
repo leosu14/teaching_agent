@@ -309,8 +309,11 @@ class CurriculumService:
                                                    FOCUS_KEY: focus.model_dump(mode="json")})
 
     def lesson_for(self, learner_id: str, goal_id: str, concept_id: str) -> Task | None:
-        """The learner's newest completed lesson for a goal's concept (started from one of its actions), if any."""
+        """The learner's newest completed lesson for a goal's concept (started from one of its actions), if any; a
+        lesson its teacher did not release is never reused (a pending one is, and the cycle waits for it)."""
+        releases = self._tasks.releases
         found = [t for t in self._tasks.list_for_learner(learner_id)
                  if t.status == TaskStatus.COMPLETED and t.metadata.get(GOAL_KEY) == goal_id
-                 and (t.metadata.get(FOCUS_KEY) or {}).get("concept_id") == concept_id]
+                 and (t.metadata.get(FOCUS_KEY) or {}).get("concept_id") == concept_id
+                 and not (releases is not None and releases.rejected(t.task_id))]  # never a lesson not released
         return max(found, key=lambda t: (t.created_at, t.task_id), default=None)

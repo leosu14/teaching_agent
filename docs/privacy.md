@@ -39,6 +39,7 @@ Everything below is keyed by the learner id the gateway asserts (`X-Auth-Learner
 | Assessment items on the learner's lessons, attempts and grades | `assessment_items`, `assessment_attempts`, `assessment_grades` | |
 | Learning cycles | `learning_cycles`, `learning_cycle_slots`, `learning_cycle_requests`, their artifacts and events | the cycle's records |
 | Class memberships | `class_members` | |
+| Teacher reviews: lessons held for a teacher's release and their decisions (with the teacher's note), teacher overrides of UNCERTAIN grades | `lesson_releases`, `grade_overrides` | |
 | Events outside a task that name the learner (goal created or changed) | `events` | |
 | Spend ledger: ids and amounts of paid provider calls | `spend_entries`, `spend_counters` | |
 

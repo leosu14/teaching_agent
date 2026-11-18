@@ -54,6 +54,7 @@ class FailureKind(str, Enum):
     VALIDATION = "VALIDATION"  # deterministic: a stale or invalid action, an objective already mastered, bad state
     PROVIDER = "PROVIDER"  # a model/provider failure (retryable under the existing provider policy)
     WORKFLOW = "WORKFLOW"  # a child workflow failed; retryable only where its own recovery allows it
+    APPROVAL = "APPROVAL"  # the lesson waits for its teacher's release (retryable), or was not released (final)
 
 
 class CycleResult(str, Enum):

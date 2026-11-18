@@ -367,6 +367,7 @@ class ClassRow(Base):
     name: Mapped[str] = mapped_column(String(200))
     join_code_hash: Mapped[str] = mapped_column(String(64), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lesson_approval: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
 
 
 class ClassMemberRow(Base):
@@ -376,6 +377,31 @@ class ClassMemberRow(Base):
     class_id: Mapped[str] = mapped_column(String(64), ForeignKey("classes.class_id"), primary_key=True)
     learner_id: Mapped[str] = mapped_column(String(128), primary_key=True, index=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class LessonReleaseRow(Base):
+    """A lesson requested while a class of its learner required approval (app/schemas/review.py). One per lesson
+    task; `status` moves from PENDING to APPROVED or REJECTED once, by a compare-and-set on PENDING."""
+
+    __tablename__ = "lesson_releases"
+    task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    learner_id: Mapped[str] = mapped_column(String(128), index=True)
+    class_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class GradeOverrideRow(Base):
+    """A teacher's outcome for an UNCERTAIN grade (app/schemas/review.py). The primary key makes it one per attempt."""
+
+    __tablename__ = "grade_overrides"
+    attempt_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    learner_id: Mapped[str] = mapped_column(String(128), index=True)
+    class_id: Mapped[str] = mapped_column(String(64), index=True)
+    body: Mapped[str] = mapped_column(Text)
 
 
 class ObjectHoldRow(Base):

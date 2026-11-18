@@ -27,6 +27,7 @@ from app.schemas.assessment import (
     ItemConflict,
 )
 from app.schemas.classroom import ClassMember, Classroom
+from app.schemas.review import GradeOverride, LessonRelease, ReleaseStatus
 from app.schemas.curriculum import (
     CurriculumProgress,
     CurriculumRecord,
@@ -84,6 +85,8 @@ from app.storage.orm import (
     AssessmentRubricRow,
     ClassMemberRow,
     ClassRow,
+    GradeOverrideRow,
+    LessonReleaseRow,
     CurriculumProgressRow,
     CurriculumRow,
     CurriculumVersionRow,
@@ -1457,7 +1460,8 @@ class SqlClassRepository:
     def create(self, classroom: Classroom, join_code_hash: str) -> None:
         with self._sessions.begin() as s:
             s.add(ClassRow(class_id=classroom.class_id, teacher_id=classroom.teacher_id, tenant_id=classroom.tenant_id,
-                           name=classroom.name, join_code_hash=join_code_hash, created_at=classroom.created_at))
+                           name=classroom.name, join_code_hash=join_code_hash, created_at=classroom.created_at,
+                           lesson_approval=classroom.lesson_approval))
 
     def get(self, class_id: str) -> Classroom | None:
         with self._sessions() as s:
@@ -1475,6 +1479,19 @@ class SqlClassRepository:
             done = s.execute(update(ClassRow).where(ClassRow.class_id == class_id)
                              .values(join_code_hash=join_code_hash))
             return done.rowcount == 1
+
+    def set_lesson_approval(self, class_id: str, on: bool) -> bool:
+        with self._sessions.begin() as s:
+            done = s.execute(update(ClassRow).where(ClassRow.class_id == class_id).values(lesson_approval=on))
+            return done.rowcount == 1
+
+    def approving_class(self, learner_id: str) -> str | None:
+        """The class whose teacher approves this learner's lessons: the first class they joined, of those that
+        require approval (None when none does)."""
+        with self._sessions() as s:
+            return s.scalars(select(ClassMemberRow.class_id).join(ClassRow, ClassRow.class_id == ClassMemberRow.class_id)
+                             .where(ClassMemberRow.learner_id == learner_id, ClassRow.lesson_approval.is_(True))
+                             .order_by(ClassMemberRow.joined_at, ClassMemberRow.class_id).limit(1)).first()
 
     def join(self, join_code_hash: str, learner_id: str, at: datetime,
              tenant_id: str | None) -> tuple[Classroom, ClassMember, bool] | None:
@@ -1539,11 +1556,108 @@ class SqlClassRepository:
     @staticmethod
     def _class(row: ClassRow) -> Classroom:
         return Classroom(class_id=row.class_id, name=row.name, teacher_id=row.teacher_id, tenant_id=row.tenant_id,
-                         created_at=_aware(row.created_at))
+                         created_at=_aware(row.created_at), lesson_approval=bool(row.lesson_approval))
 
     @staticmethod
     def _member(row: ClassMemberRow) -> ClassMember:
         return ClassMember(learner_id=row.learner_id, joined_at=_aware(row.joined_at))
+
+
+class SqlLessonReleaseRepository:
+    """Lesson releases (Important item 2). A release is inserted once per lesson task, in the transaction guarded for
+    the learner (a deletion that committed first refuses it), and decided once: `decide` is a compare-and-set on
+    PENDING, so of two racing decisions exactly one wins."""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def request(self, release: LessonRelease) -> LessonRelease:
+        """Insert the release unless the task has one; returns the stored release."""
+        try:
+            with self._sessions.begin() as s:
+                _guard(s)
+                current = s.get(LessonReleaseRow, release.task_id)
+                if current is not None:
+                    return self._release(current)
+                s.add(LessonReleaseRow(task_id=release.task_id, learner_id=release.learner_id,
+                                       class_id=release.class_id, status=release.status.value,
+                                       requested_at=release.requested_at))
+                return release
+        except IntegrityError:  # a concurrent request inserted it first
+            found = self.get(release.task_id)
+            if found is None:
+                raise
+            return found
+
+    def get(self, task_id: str) -> LessonRelease | None:
+        with self._sessions() as s:
+            row = s.get(LessonReleaseRow, task_id)
+            return self._release(row) if row is not None else None
+
+    def for_class(self, class_id: str, status: ReleaseStatus | None = None) -> list[LessonRelease]:
+        with self._sessions() as s:
+            query = select(LessonReleaseRow).where(LessonReleaseRow.class_id == class_id)
+            if status is not None:
+                query = query.where(LessonReleaseRow.status == status.value)
+            rows = s.scalars(query.order_by(LessonReleaseRow.requested_at.desc(), LessonReleaseRow.task_id))
+            return [self._release(r) for r in rows]
+
+    def decide(self, task_id: str, status: ReleaseStatus, *, at: datetime, by: str, note: str | None) -> bool:
+        """PENDING -> `status`. False when the release was already decided (or is gone)."""
+        with self._sessions.begin() as s:
+            _guard(s)
+            done = s.execute(update(LessonReleaseRow)
+                             .where(LessonReleaseRow.task_id == task_id,
+                                    LessonReleaseRow.status == ReleaseStatus.PENDING.value)
+                             .values(status=status.value, decided_at=at, decided_by=by, note=note))
+            return done.rowcount == 1
+
+    @staticmethod
+    def _release(row: LessonReleaseRow) -> LessonRelease:
+        return LessonRelease(task_id=row.task_id, learner_id=row.learner_id, class_id=row.class_id,
+                             status=ReleaseStatus(row.status), requested_at=_aware(row.requested_at),
+                             decided_at=_aware(row.decided_at) if row.decided_at else None,
+                             decided_by=row.decided_by, note=row.note)
+
+
+class SqlGradeOverrideRepository:
+    """Grade overrides (Important item 2): one per attempt (the primary key), immutable, inserted in the transaction
+    guarded for the learner."""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def save(self, override: GradeOverride) -> tuple[GradeOverride, bool]:
+        """Insert the override unless the attempt has one; returns the stored override and whether this call
+        inserted it."""
+        try:
+            with self._sessions.begin() as s:
+                _guard(s)
+                current = s.get(GradeOverrideRow, override.attempt_id)
+                if current is not None:
+                    return GradeOverride.model_validate_json(current.body), False
+                s.add(GradeOverrideRow(attempt_id=override.attempt_id, learner_id=override.learner_id,
+                                       class_id=override.class_id, body=override.model_dump_json()))
+                return override, True
+        except IntegrityError:
+            found = self.get(override.attempt_id)
+            if found is None:
+                raise
+            return found, False
+
+    def get(self, attempt_id: str) -> GradeOverride | None:
+        with self._sessions() as s:
+            row = s.get(GradeOverrideRow, attempt_id)
+            return GradeOverride.model_validate_json(row.body) if row is not None else None
+
+    def for_attempts(self, attempt_ids: Iterable[str]) -> dict[str, GradeOverride]:
+        ids = list(attempt_ids)
+        out: dict[str, GradeOverride] = {}
+        with self._sessions() as s:
+            for chunk in _chunks(ids):
+                for row in s.scalars(select(GradeOverrideRow).where(GradeOverrideRow.attempt_id.in_(chunk))):
+                    out[row.attempt_id] = GradeOverride.model_validate_json(row.body)
+        return out
 
 
 def _tenant_is(tenant_id: str | None):
@@ -1560,7 +1674,7 @@ ERASED_TABLES = (
     "curriculum_progress", "tasks", "task_jobs", "events", "artifacts", "teaching_sessions", "teaching_turns",
     "interaction_evidence", "teaching_requests", "teaching_outbox", "assessment_items", "assessment_attempts",
     "assessment_grades", "learning_cycles", "learning_cycle_slots", "learning_cycle_requests", "class_members",
-    "object_holds",
+    "object_holds", "lesson_releases", "grade_overrides",
 )
 # Not learner data, or kept on purpose: classes and rubrics belong to teachers and authors; the spend ledger holds ids
 # and amounts only and is what the budgets and daily caps count, so a deletion must not reset them. The object
@@ -1713,7 +1827,8 @@ class SqlLearnerDataRepository:
             each("task_jobs", TaskJobRow, TaskJobRow.task_id, ids.tasks)
             each("tasks", TaskRow, TaskRow.task_id, ids.tasks)
             for row_type, table in ((LearningEvidenceRow, "learning_evidence"), (LearningEventRow, "learning_events"),
-                                    (ClassMemberRow, "class_members"), (LearnerRow, "learners")):
+                                    (ClassMemberRow, "class_members"), (LessonReleaseRow, "lesson_releases"),
+                                    (GradeOverrideRow, "grade_overrides"), (LearnerRow, "learners")):
                 run(table, delete(row_type).where(row_type.learner_id == learner_id))
             now = self._clock()
             queued = []

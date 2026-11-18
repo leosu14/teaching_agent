@@ -123,6 +123,8 @@ class TeachingSessionService:
         """Create a session on a lesson and produce the teacher's opening turns. The same idempotency key returns the
         same session (finishing its opening if a failure interrupted it); without a key every call starts one."""
         m = self._lesson(lesson_id)
+        if self._tasks.releases is not None:
+            self._tasks.releases.check(m.task.task_id)  # a lesson held for its teacher's release (LessonHeld, 409)
         # Every write of the session (and of the grading it does) is refused once the learner or the lesson is
         # deleted, checked inside the write's own transaction (LearnerDataGone, 404): nothing is left behind.
         with learner_writes(m.task.learner_id, m.task.task_id):

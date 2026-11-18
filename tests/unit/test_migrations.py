@@ -42,7 +42,7 @@ def diffs(u: str) -> list:
         engine.dispose()
 
 
-HEAD = "0002_object_holds"  # the newest revision: object holds and the object-deletion queue (MVP item 9)
+HEAD = "0003_teacher_review"  # the newest revision: lesson releases and grade overrides (Important item 2)
 
 
 def test_one_head_on_top_of_the_baseline() -> None:

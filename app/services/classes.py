@@ -49,7 +49,7 @@ class ClassService:
         code = new_join_code()
         self.repository.create(classroom, hash_join_code(code))
         return ClassJoinCode(class_id=classroom.class_id, name=classroom.name, created_at=classroom.created_at,
-                             join_code=code)
+                             join_code=code, lesson_approval=classroom.lesson_approval)
 
     def owned(self, class_id: str, *, teacher_id: str, tenant_id: str | None) -> Classroom:
         """The class, when this teacher (in this tenant) created it; ClassNotFound otherwise."""
@@ -63,7 +63,14 @@ class ClassService:
 
     def view(self, classroom: Classroom) -> ClassView:
         return ClassView(class_id=classroom.class_id, name=classroom.name, created_at=classroom.created_at,
-                         learners=self.repository.members(classroom.class_id))
+                         lesson_approval=classroom.lesson_approval, learners=self.repository.members(classroom.class_id))
+
+    def set_lesson_approval(self, classroom: Classroom, on: bool) -> ClassView:
+        """Whether lessons requested from now on for this class's learners wait for the teacher's approval. Lessons
+        requested before keep what was decided for them then."""
+        if not self.repository.set_lesson_approval(classroom.class_id, on):
+            raise ClassNotFound()
+        return self.view(classroom.model_copy(update={"lesson_approval": on}))
 
     def rotate_join_code(self, classroom: Classroom) -> ClassJoinCode:
         code = new_join_code()

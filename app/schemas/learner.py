@@ -261,7 +261,8 @@ class LearnerProgress(Schema):
 
 # --- Evidence, learning events and goals -----------------------------------------------------------------------------
 
-EvidenceSource = Literal["diagnostic", "lesson", "evaluation", "exercise", "manual", "interaction", "assessment"]
+EvidenceSource = Literal["diagnostic", "lesson", "evaluation", "exercise", "manual", "interaction", "assessment",
+                         "teacher_review"]  # teacher_review: a teacher's outcome for an UNCERTAIN grade
 Correctness = Literal["correct", "partial", "incorrect"]
 
 

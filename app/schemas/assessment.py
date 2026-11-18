@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import ConfigDict, Field, model_validator
 
 from app.schemas.common import Schema
+from app.schemas.review import OverrideView
 
 # --- enums ---------------------------------------------------------------------------------------------------------
 
@@ -517,6 +518,7 @@ class AttemptView(Schema):
     mastery_updated: bool
     evidence_ids: list[str]
     retry_recommended: bool  # UNCERTAIN: the answer could not be graded, another attempt is welcome
+    override: OverrideView | None = None  # a teacher's outcome for an UNCERTAIN grade (Important item 2)
 
 
 class AttemptResult(Schema):

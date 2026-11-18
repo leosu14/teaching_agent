@@ -6,6 +6,8 @@ computed now, nothing recorded, as `GET /goals/{id}/curriculum` does), the learn
 reconciliation: `GET /learning-cycles/{id}` reconciles, this does not) and the assessment attempts with their grades.
 It never calls a model and never writes, so a teacher's dashboard cannot change a learner's state.
 
+An override (Important item 2) settles an UNCERTAIN grade: it is listed as resolved, with the teacher's outcome.
+
 The caller has already established that the class is the principal's (`taught_class`): its roster is exactly the set
 of learners the teacher may read (the rule of `Access.check`), so nothing outside it is read."""
 
@@ -23,14 +25,18 @@ from app.schemas.common import utcnow
 from app.schemas.dashboard import ClassDashboard, GoalOverview, LearnerOverview, UncertainGrade
 from app.schemas.learner import GoalStatus, LearnerProfile
 from app.schemas.learning_cycle import ACTIVE_CYCLE_STATUSES
+from app.schemas.review import OverrideView
 from app.services.classes import ClassService
 from app.services.curriculum import CurriculumService
+from app.storage.repositories import SqlGradeOverrideRepository
 
 
 class ClassDashboardService:
     def __init__(self, *, classes: ClassService, memory: LearnerMemoryService, curriculum: CurriculumService,
                  cycles: LearningCycleRepository, assessment: AssessmentRepository,
+                 overrides: SqlGradeOverrideRepository | None = None,
                  clock: Callable[[], datetime] = utcnow) -> None:
+        self._overrides = overrides
         self._classes = classes
         self._memory = memory
         self._curriculum = curriculum
@@ -106,6 +112,8 @@ class ClassDashboardService:
     def _uncertain(self, members: list[ClassMember],
                    profiles: dict[str, LearnerProfile | None]) -> list[UncertainGrade]:
         rows = self._assessment.graded_attempts(m.learner_id for m in members)
+        overridden = self._overrides.for_attempts(
+            a.attempt_id for a, g in rows if g.outcome == AssessmentOutcome.UNCERTAIN) if self._overrides else {}
         items: dict[str, AssessmentItem | None] = {}
         found: list[UncertainGrade] = []
         for i, (attempt, grade) in enumerate(rows):
@@ -132,6 +140,11 @@ class ClassDashboardService:
                 response_type=item.response_type, choices=list(item.choices), learner_answer=attempt.learner_answer,
                 source=attempt.source, attempt_number=attempt.attempt_number, submitted_at=attempt.submitted_at,
                 grader_type=grade.grader_type, confidence=grade.confidence, later_attempts=len(later),
-                resolved=any(g.counts for g in later)))
+                resolved=attempt.attempt_id in overridden or any(g.counts for g in later),
+                override=_override_view(overridden.get(attempt.attempt_id))))
         found.sort(key=lambda u: (u.submitted_at, u.attempt_id), reverse=True)
         return found
+
+
+def _override_view(found) -> OverrideView | None:
+    return OverrideView(outcome=found.outcome, note=found.note, created_at=found.created_at) if found else None

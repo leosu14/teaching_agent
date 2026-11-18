@@ -14,6 +14,7 @@ from pydantic import Field
 
 from app.schemas.assessment import AttemptSource, GraderType, ResponseType
 from app.schemas.common import Schema
+from app.schemas.review import OverrideView
 
 
 class GoalOverview(Schema):
@@ -81,4 +82,5 @@ class UncertainGrade(Schema):
     grader_type: GraderType
     confidence: float
     later_attempts: int = 0  # attempts on the same item after this one
-    resolved: bool = False
+    resolved: bool = False  # a later attempt on the item was graded, or the teacher overrode this grade
+    override: OverrideView | None = None  # the teacher's outcome (Important item 2)

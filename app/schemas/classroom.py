@@ -21,6 +21,7 @@ class Classroom(Schema):
     teacher_id: str
     tenant_id: str | None = None
     created_at: datetime
+    lesson_approval: bool = False  # lessons requested for its learners wait for the teacher's approval
 
 
 class ClassMember(Schema):
@@ -38,6 +39,7 @@ class ClassView(Schema):
     class_id: str
     name: str
     created_at: datetime
+    lesson_approval: bool = False
     learners: list[ClassMember] = Field(default_factory=list)
 
 
@@ -48,6 +50,7 @@ class ClassJoinCode(Schema):
     name: str
     created_at: datetime
     join_code: str
+    lesson_approval: bool = False
     learners: list[ClassMember] = Field(default_factory=list)
 
 

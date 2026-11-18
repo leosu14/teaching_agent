@@ -56,6 +56,7 @@ from app.schemas.learning_cycle import (
     StartLearningCycle,
     StepKind,
 )
+from app.schemas.review import HELD_MESSAGE, REJECTED_MESSAGE, ReleaseStatus
 from app.schemas.task import Task, TaskStatus
 from app.schemas.teaching import (
     LearnerInput,
@@ -581,6 +582,12 @@ class LearningCycleService:
 
     def _task_observation(self, task: Task, step: CycleStep) -> Observation:
         if task.status == TaskStatus.COMPLETED:
+            held = self._tasks.releases.held(task.task_id) \
+                if step.kind == StepKind.LESSON and self._tasks.releases is not None else None
+            if held == ReleaseStatus.PENDING:  # BLOCKED until the teacher decides; `resume` looks again
+                return self._failed(FailureKind.APPROVAL, True, HELD_MESSAGE, step)
+            if held == ReleaseStatus.REJECTED:
+                return self._failed(FailureKind.APPROVAL, False, REJECTED_MESSAGE, step)
             return Observation("completed")
         if task.status == TaskStatus.WAITING and task.waiting is not None and task.waiting.kind in LEARNER_WAITS:
             return Observation("waiting", waiting=(task.waiting.kind, task.waiting.node_id))  # type: ignore[arg-type]

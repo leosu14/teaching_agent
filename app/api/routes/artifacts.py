@@ -7,7 +7,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from app.api.authorization import owned_artifact
+from app.api.authorization import Access, access, owned_artifact
 from app.api.deps import container
 from app.services.container import Container
 
@@ -21,9 +21,12 @@ CONTENT_HEADERS = {
 }
 
 
-@router.get("/{artifact_id}/content", response_class=StreamingResponse, dependencies=[Depends(owned_artifact)],
+@router.get("/{artifact_id}/content", response_class=StreamingResponse,
             responses={200: {"content": {"application/octet-stream": {}}, "description": "The artifact's content"}})
-def artifact_content(artifact_id: str, c: Container = Depends(container)) -> StreamingResponse:
+def artifact_content(artifact_id: str, owner: str = Depends(owned_artifact), a: Access = Depends(access),
+                     c: Container = Depends(container)) -> StreamingResponse:
+    if a.principal.may_access(owner):  # the learner: nothing of a lesson held for its teacher's release (409)
+        c.lesson_releases.check_artifact(artifact_id)
     content = c.artifact_content.open(artifact_id)
     return StreamingResponse(content.chunks(), media_type=content.media_type, headers={
         **CONTENT_HEADERS, "Content-Disposition": f'attachment; filename="{content.filename}"'})
