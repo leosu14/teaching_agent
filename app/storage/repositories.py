@@ -180,6 +180,23 @@ def _guard_lock(s: Session) -> None:
                   {"key": _deletion_lock_key(guard.learner_id)})
 
 
+# The event-order lock's key: the two-key form of PostgreSQL's advisory locks, a key space apart from the one-key
+# (`hashtextextended`) locks above, so it can never collide with a learner's or an object's lock.
+EVENT_ORDER_LOCK = (54, 1)
+
+
+def _lock_event_order(s: Session) -> None:
+    """Inside an event append's transaction, as its last lock and before its INSERT: the event table's write order
+    (PostgreSQL). Held until that transaction commits or rolls back, so the next append allocates its `seq` only after
+    this one is visible or gone: rows become visible in `seq` order (a rolled-back `seq` is a gap that never fills).
+    PostgreSQL makes a commit visible before it releases the transaction's locks. Nothing else takes this lock, and its
+    holder waits on nothing else (its own lookup, INSERT and commit), so it cannot be part of a deadlock. Event appends
+    take turns for those few milliseconds. On SQLite every write takes the database's write lock: already in order."""
+    if s.get_bind().dialect.name == "postgresql":
+        s.execute(text("SELECT pg_advisory_xact_lock(CAST(:space AS integer), CAST(:key AS integer))"),
+                  {"space": EVENT_ORDER_LOCK[0], "key": EVENT_ORDER_LOCK[1]})
+
+
 def _lock_object(s: Session, uri: str) -> None:
     """The lock of one stored object, until the caller's transaction ends: taken to add a reference to it (a hold, an
     artifact row) and to check that nothing references it before it is deleted (`SqlLearnerDataRepository.purge`).
@@ -400,20 +417,49 @@ class SqlEventRepository:
 
     def append(self, event: Event, fence: Lease | None = None) -> None:
         """Store an event once. With `fence` (written by a task's worker) only while that worker's lease is current;
-        otherwise LeaseLost and nothing is stored."""
+        otherwise LeaseLost and nothing is stored.
+
+        Event writes commit in `seq` order (`_lock_event_order`, taken after every other lock of this transaction and
+        just before the INSERT that allocates `seq`), so the rows visible at any moment are all those up to the
+        highest visible `seq`: the progress stream's cursor cannot pass a row that becomes visible later."""
         with self._sessions.begin() as s:
             if fence is not None:
                 _require_fence(s, fence, self._clock())
             _guard(s)
+            _lock_event_order(s)
             if s.scalar(select(EventRow.seq).where(EventRow.event_id == event.event_id)) is not None:
                 return  # an event with a stable id published again (e.g. after a restart) is stored once
             s.add(EventRow(event_id=event.event_id, task_id=event.task_id, type=event.type, at=event.at,
                            body=event.model_dump_json()))
+            s.flush()  # the INSERT, and `seq`'s allocation, in this transaction, under the lock, before the commit
 
     def list_for_task(self, task_id: str) -> list[Event]:
         with self._sessions() as s:
             rows = s.scalars(select(EventRow).where(EventRow.task_id == task_id).order_by(EventRow.seq))
             return [Event.model_validate_json(r.body) for r in rows]
+
+    # --- reads for the progress stream (app/services/progress_stream.py) ----------------------------------------
+
+    def max_seq(self) -> int:
+        """The highest `seq` visible now (0 for an empty table). Appends commit in `seq` order (`_lock_event_order`),
+        so every row up to it is visible or will never be; the stream still delivers only up to a value read at least
+        its settle time earlier (defence in depth)."""
+        with self._sessions() as s:
+            return int(s.scalar(select(func.max(EventRow.seq))) or 0)
+
+    def after(self, positions: dict[str, int], upto: int, *, limit: int = 500) -> list[tuple[int, Event]]:
+        """(seq, event) of the events stored under each key of `positions` (a task or cycle id) with
+        position < seq <= upto, in `seq` order, at most `limit`. Keys not given are not read."""
+        if not positions or upto <= 0:
+            return []
+        clauses = [and_(EventRow.task_id == key, EventRow.seq > after) for key, after in positions.items()
+                   if after < upto]
+        if not clauses:
+            return []
+        with self._sessions() as s:
+            rows = s.execute(select(EventRow.seq, EventRow.body).where(EventRow.seq <= upto, or_(*clauses))
+                             .order_by(EventRow.seq).limit(limit))
+            return [(int(seq), Event.model_validate_json(body)) for seq, body in rows]
 
 
 class SqlArtifactRepository:

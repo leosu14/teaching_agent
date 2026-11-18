@@ -175,6 +175,53 @@ def poll_task(client: httpx.Client, task_id: str, headers: dict, timeout: float 
     raise AssertionError(f"task {task_id} did not settle")
 
 
+def read_stream(client: httpx.Client, task_id: str, headers: dict, cursor: str | None = None,
+                timeout: float = 900) -> tuple[dict, str, list[str]]:
+    """Read GET /tasks/{id}/stream (issue #54) through the gateway to its `end` frame, following `reconnect` frames
+    with the cursor: (final task view, cursor, progress event ids). Frames must arrive while the worker runs: the read
+    timeout is far below the lesson's time, so only frames and heartbeats arriving unbuffered keep it alive."""
+    deadline = time.time() + timeout
+    ids: list[str] = []
+    while time.time() < deadline:
+        ended, cursor, more = _read_once(client, task_id, headers, cursor, deadline)
+        ids += more
+        if ended is not None:
+            return ended, cursor, ids
+    raise AssertionError("the task stream did not end")
+
+
+def _read_once(client: httpx.Client, task_id: str, headers: dict, cursor: str | None,
+               deadline: float) -> tuple[dict | None, str | None, list[str]]:
+    """One connection: (the `end` view or None after `reconnect`, the last cursor, progress ids)."""
+    h = dict(headers, **({"Last-Event-ID": cursor} if cursor else {}))
+    kinds, ids, buffer = [], [], ""
+    with client.stream("GET", f"/tasks/{task_id}/stream", headers=h,
+                       timeout=httpx.Timeout(60.0, connect=10.0)) as r:
+        assert r.status_code == 200, r.read()
+        assert r.headers["content-type"].startswith("text/event-stream"), r.headers
+        assert r.headers.get("x-accel-buffering") == "no", r.headers
+        for chunk in r.iter_text():
+            assert time.time() < deadline, "the task stream did not end"
+            buffer += chunk
+            while "\n\n" in buffer:
+                block, buffer = buffer.split("\n\n", 1)
+                fields = dict(line.split(": ", 1) for line in block.split("\n") if ": " in line and line[0] != ":")
+                if "event" not in fields:
+                    continue  # a heartbeat
+                kinds.append(fields["event"])
+                data = json.loads(fields["data"])
+                if "id" in fields:
+                    cursor = fields["id"]
+                if fields["event"] == "progress":
+                    ids.append(data["event"]["event_id"])
+                if fields["event"] == "end":
+                    assert kinds[0] == "status", kinds
+                    return data, cursor, ids
+                if fields["event"] == "reconnect":
+                    return None, cursor, ids
+    raise AssertionError(f"the task stream closed without `end` or `reconnect`: {kinds[-5:]}")
+
+
 def diagnostic_answers(task: dict) -> list[dict]:
     answers = json.loads((FIXTURES / "answers.json").read_text(encoding="utf-8"))
     sheet = task["waiting"]["prompt"]
@@ -209,10 +256,17 @@ def run(port: str, build: bool = True) -> None:
         assert c.put(f"/learners/{lid}", json=learner["profile"], headers=me).status_code == 200
         created = c.post("/tasks", json={"request": learner["request"], "learner_id": lid}, headers=me)
         assert created.status_code == 202, created.text
-        task = poll_task(c, created.json()["task_id"], me)
+        # The progress stream (issue #54) through the gateway, read to `end` while the worker runs the lesson;
+        # each reconnect resumes after its cursor, so no event is shown twice. Polling still answers the same.
+        task, cursor, shown = read_stream(c, created.json()["task_id"], me)
+        assert shown, "the task stream sent no progress"
+        assert poll_task(c, task["task_id"], me)["status"] == task["status"]
         while task["status"] == "WAITING":
             r = c.post(f"/tasks/{task['task_id']}/answers", json={"answers": diagnostic_answers(task)}, headers=me)
             assert r.status_code == 202, r.text
+            task, cursor, more = read_stream(c, task["task_id"], me, cursor)
+            assert not set(more) & set(shown), "a resumed stream repeated progress"
+            shown += more
             task = poll_task(c, task["task_id"], me)
         assert task["status"] == "COMPLETED", json.dumps(task)[:2000]
         artifacts = c.get(f"/tasks/{task['task_id']}/artifacts", headers=me).json()

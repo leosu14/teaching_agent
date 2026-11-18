@@ -15,6 +15,7 @@ from app.api.app import create_app
 from app.api.auth import AUTHOR, TEACHER
 from app.schemas.learner import LearnerProfileInput
 from app.schemas.learning_cycle import LearnerPrompt
+from tests import sse
 from tests.auth import TestAuth, client_for, settle
 from tests.learning_cycle_fixtures import CONCEPT, LEARNER, ScriptedLearner
 
@@ -40,14 +41,19 @@ def assert_no_internals(response) -> None:
     """No answer key, internal grading state, workflow state, provider record or host path in a learner-facing
     response (event routes included: they serve `LearnerEvent`, never the internal payload)."""
     assert SENTINEL not in response.text
-    found = keys_in(response.json()) & FORBIDDEN_KEYS
+    if response.headers.get("content-type", "").startswith("text/event-stream"):  # a progress stream: every frame
+        body = [f.get("data") for f in sse.parse(response.text)]
+        assert body and all(f is not None or "comment" in f for f in sse.parse(response.text))
+    else:
+        body = response.json()
+    found = keys_in(body) & FORBIDDEN_KEYS
     assert not found, (response.request.url, found)
 
 
 @pytest.fixture
 def world(cycle_env_at):
     """Learner A mid-cycle with every kind of resource; B a separate learner. Yields (env, ids, auth)."""
-    env = cycle_env_at("session")
+    env = cycle_env_at("session", stream_settle_seconds=0.05, stream_poll_seconds=0.02)  # streams end quickly
     c = env.container
     c.learner_service.upsert(INTRUDER, LearnerProfileInput(display_name="B"))
     [cycle] = c.learning_cycle_service.repository.for_learner(LEARNER)
@@ -107,6 +113,7 @@ def routes(ids: dict) -> list[tuple[str, str, dict | None]]:
         ("POST", f"/tasks/{eid}/cancel", None),
         ("GET", f"/tasks/{tid}/artifacts", None),
         ("GET", f"/tasks/{tid}/events", None),
+        ("GET", f"/tasks/{tid}/stream", None),
         ("POST", f"/lessons/{ids['lesson']}/teaching-session", {"idempotency_key": "intrusion"}),
         ("GET", f"/lessons/{ids['lesson']}/reading", None),
         ("GET", f"/teaching-sessions/{sid}", None),
@@ -128,6 +135,7 @@ def routes(ids: dict) -> list[tuple[str, str, dict | None]]:
         ("POST", f"/learning-cycles/{cid}/resume", None),
         ("POST", f"/learning-cycles/{cid}/cancel", None),
         ("GET", f"/learning-cycles/{cid}/events", None),
+        ("GET", f"/learning-cycles/{cid}/stream", None),
         ("GET", f"/learning-cycles/{cid}/artifacts", None),
         ("GET", f"/artifacts/{ids['artifact']}/content", None),
         ("POST", "/classes", {"name": "Another class"}),

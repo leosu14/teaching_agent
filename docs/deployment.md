@@ -215,9 +215,31 @@ https://docs.tavily.com/documentation/api-credits), at or above it; the reposito
 
 Set `TTS_MODEL`, `IMAGE_MODEL`, `IMAGE_QUALITY` and `IMAGE_SIZE` before the prices, and price those exact values.
 
+## Progress streams
+
+`GET /tasks/{id}/stream` and `GET /learning-cycles/{id}/stream` are long-lived `text/event-stream` responses
+(docs/architecture.md, Progress streams). The gateway streams them as they come (it proxies every response
+unbuffered). A login proxy, load balancer or ingress in front of the gateway must not buffer `text/event-stream`
+either, and its read timeout must exceed the heartbeat (`TA_STREAM_HEARTBEAT_SECONDS`, 15 s): nginx honours the
+API's `X-Accel-Buffering: no`; elsewhere turn response buffering off for these paths. The gateway's own read timeout
+(`TA_GATEWAY_TIMEOUT_SECONDS`, 300 s) is well above the heartbeat. A stream asks the client to reconnect after
+`TA_STREAM_MAX_SECONDS` (10 minutes), so a token that expires is checked again by the gateway on the next
+connection. Open streams are capped per principal (`TA_STREAM_MAX_PER_PRINCIPAL`) and in total
+(`TA_STREAM_MAX_STREAMS`), with 429 above either (see "Stream caps" below). `deploy/smoke.py` reads a task's stream
+through the gateway to its end while the worker runs the lesson.
+
+### Stream caps
+
+Both caps are counted in the memory of one API process (`StreamSlots` in `app/services/progress_stream.py`): the
+per-principal cap and the "global" cap are per process. The pilot runs one API replica as one Uvicorn process
+(`deploy/entrypoint.sh`), so today they hold for the whole deployment. Running several Uvicorn workers (`--workers`
+or `WEB_CONCURRENCY`) or several API replicas would multiply both limits by the number of processes. Do not run more
+than one API process until the caps are counted in a shared store; that belongs with the multi-replica readiness work
+below.
+
 ## Known limits
 
-- One API replica and one worker: the multi-replica items (database-time leases, a shared rate limiter) come after
-  the MVP.
+- One API replica (one Uvicorn process) and one worker: the multi-replica items (database-time leases, a shared rate
+  limiter, shared progress-stream caps) come after the MVP.
 - No metrics or alerting yet; `/health` and `check` are the readiness signals.
 - The login proxy is the deployment's choice and is not part of the image.

@@ -108,6 +108,7 @@ from app.services.artifact_content import ArtifactContentService
 from app.services.learner_deletion import LearnerDeletionService
 from app.services.lesson_reading import LessonReadingService
 from app.services.ownership import OwnershipService
+from app.services.progress_stream import ProgressStreamService, StreamLimits
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
 from app.services.sweeper import TaskSweeper
@@ -408,6 +409,7 @@ class Container:
     learning_cycle_service: LearningCycleService
     assessment_service: AssessmentService
     ownership: OwnershipService
+    progress_streams: ProgressStreamService  # the task and learning-cycle progress streams (SSE; read-only)
     classes: ClassService  # classes and rosters: whose learners a teacher may read
     class_dashboard: ClassDashboardService  # the teacher dashboard: a class's progress and UNCERTAIN grades (read-only)
     artifact_content: ArtifactContentService
@@ -421,6 +423,7 @@ class Container:
     object_store: object = None  # the artifacts' store (filesystem or S3), for readiness checks and closing
 
     def close(self) -> None:
+        self.progress_streams.close()
         dispose(self._sessions)
         close = getattr(self.object_store, "close", None)
         if close is not None:
@@ -647,6 +650,13 @@ def build_container(
         assessment_service=assessment_service,
         ownership=OwnershipService(tasks=task_service, artifacts=artifacts, memory=memory, teaching=teaching_service,
                                    assessment=assessment_service, cycles=learning_cycle_service),
+        progress_streams=ProgressStreamService(
+            tasks=task_service, cycles=learning_cycle_service, events=event_repo,
+            limits=StreamLimits(max_seconds=settings.stream_max_seconds, poll_seconds=settings.stream_poll_seconds,
+                                settle_seconds=settings.stream_settle_seconds,
+                                heartbeat_seconds=settings.stream_heartbeat_seconds,
+                                max_per_principal=settings.stream_max_per_principal,
+                                max_streams=settings.stream_max_streams)),
         classes=classes,
         class_dashboard=ClassDashboardService(classes=classes, memory=memory, curriculum=curriculum_service,
                                               cycles=learning_cycle_service.repository,

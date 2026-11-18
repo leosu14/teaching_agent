@@ -232,6 +232,9 @@ class LearningCycleView(Schema):
     created: bool = False  # this request created the cycle
     replayed: bool = False  # this response had been received before
     busy_until: datetime | None = None  # another request is driving the cycle (its lease); read it again later
+    # The record's optimistic-lock version (read-only): raised by every stored change of the cycle, never lowered.
+    # A client passes it back only as the progress stream's `after_version`; it is not an event cursor.
+    version: int = 1
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None

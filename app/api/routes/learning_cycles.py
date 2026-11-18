@@ -3,11 +3,13 @@ evaluations work exactly as before without one)."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Header, Query, Response
+from fastapi.responses import StreamingResponse
 
 from app.api.auth import Principal
-from app.api.authorization import owned_cycle, principal, require_learner
+from app.api.authorization import Access, access, owned_cycle, principal, require_learner
 from app.api.deps import container
+from app.api.streaming import EventStreamResponse, principal_key
 from app.schemas.artifact import ArtifactView
 from app.schemas.events import LearnerEvent
 from app.schemas.learning_cycle import CycleResponse, LearningCycleView, StartLearningCycle
@@ -73,3 +75,19 @@ def cycle_events(cycle_id: str, c: Container = Depends(container)) -> list[Learn
             dependencies=[Depends(owned_cycle)])
 def cycle_artifacts(cycle_id: str, c: Container = Depends(container)) -> list[ArtifactView]:
     return [ArtifactView.of(a) for a in c.learning_cycle_service.artifacts(cycle_id)]
+
+
+@router.get("/learning-cycles/{cycle_id}/stream", response_class=StreamingResponse,
+            dependencies=[Depends(owned_cycle)], responses={200: {"content": {"text/event-stream": {}}}})
+async def cycle_stream(cycle_id: str, p: Principal = Depends(principal), a: Access = Depends(access),
+                       c: Container = Depends(container),
+                       after_version: int | None = Query(default=None, ge=0),
+                       last_event_id: str | None = Header(default=None)) -> EventStreamResponse:  # long: the cursor 400s
+    """The cycle's progress as server-sent events: its own events and its child tasks' (sources `cycle` and
+    `task:<id>` in the cursor). `after_version`: the `version` of the view the client showed when it sent a POST;
+    WAITING or BLOCKED at that version or below does not end the stream (it is the state before the POST). It is
+    never part of the cursor. Otherwise as `GET /tasks/{id}/stream`."""
+    stream = c.progress_streams.cycle(cycle_id, principal=principal_key(p), cursor=last_event_id,
+                                      after_version=after_version,
+                                      check_access=lambda: a.check(c.ownership.learning_cycle(cycle_id)))
+    return EventStreamResponse(stream)

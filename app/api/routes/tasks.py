@@ -3,16 +3,20 @@ provider requests, metadata) never leaves the service layer.
 
 Routes that would run a task's workflow (create, answers, evaluation, resume) only validate and queue the work, then
 answer 202 Accepted with the task and its job; the worker runs it (app/services/worker.py). Clients poll
-`GET /tasks/{task_id}` (the `Location` header) until `job.status` is no longer QUEUED or RUNNING."""
+`GET /tasks/{task_id}` (the `Location` header) until `job.status` is no longer QUEUED or RUNNING, or read
+`GET /tasks/{task_id}/stream` (server-sent events: status, progress, end; app/services/progress_stream.py) instead.
+Polling keeps working as before."""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, Response
+from fastapi.responses import StreamingResponse
 from pydantic import Field
 
 from app.api.auth import Principal
 from app.api.authorization import Access, access, owned_task, principal
 from app.api.deps import container
+from app.api.streaming import EventStreamResponse, principal_key
 from app.schemas.artifact import ArtifactView
 from app.schemas.common import Schema
 from app.schemas.events import LearnerEvent
@@ -101,3 +105,17 @@ def task_artifacts(task_id: str, c: Container = Depends(container)) -> list[Arti
 @router.get("/{task_id}/events", response_model=list[LearnerEvent], dependencies=[Depends(owned_task)])
 def task_events(task_id: str, c: Container = Depends(container)) -> list[LearnerEvent]:
     return [LearnerEvent.of(e) for e in c.task_service.events(task_id)]
+
+
+@router.get("/{task_id}/stream", response_class=StreamingResponse, dependencies=[Depends(owned_task)],
+            responses={200: {"content": {"text/event-stream": {}}}})
+async def task_stream(task_id: str, p: Principal = Depends(principal), a: Access = Depends(access),
+                      c: Container = Depends(container),
+                      last_event_id: str | None = Header(default=None)) -> EventStreamResponse:  # long: the cursor 400s
+    """The task's progress as server-sent events (`status`, `progress`, `end`, `reconnect`; docs/architecture.md).
+    `Last-Event-ID` resumes after a cursor the stream sent (400 when it cannot be read); 429 when too many streams
+    are open. Access is checked again, with this route's rule, before every send: when it fails the stream stops
+    without another frame."""
+    stream = c.progress_streams.task(task_id, principal=principal_key(p), cursor=last_event_id,
+                                     check_access=lambda: a.check(c.ownership.task(task_id)))
+    return EventStreamResponse(stream)
