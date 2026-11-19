@@ -22,6 +22,7 @@ from app.learner.memory import LearnerMemoryService, UnknownLearner
 from app.schemas.assessment import AssessmentItem, AssessmentOutcome
 from app.schemas.classroom import Classroom, ClassMember
 from app.schemas.common import utcnow
+from app.schemas.assignment import ASSIGNMENT_KEY, CLASS_KEY
 from app.schemas.dashboard import ClassDashboard, GoalOverview, LearnerOverview, UncertainGrade
 from app.schemas.learner import GoalStatus, LearnerProfile
 from app.schemas.learning_cycle import ACTIVE_CYCLE_STATUSES
@@ -52,7 +53,8 @@ class ClassDashboardService:
         for u in uncertain:
             if not u.resolved:
                 open_by_learner[u.learner_id] = open_by_learner.get(u.learner_id, 0) + 1
-        learners = [self._overview(m, profiles[m.learner_id], open_by_learner.get(m.learner_id, 0)) for m in members]
+        learners = [self._overview(m, profiles[m.learner_id], open_by_learner.get(m.learner_id, 0), classroom.class_id)
+                    for m in members]
         learners.sort(key=lambda o: (o.display_name.casefold(), o.learner_id))
         return ClassDashboard(class_id=classroom.class_id, name=classroom.name, created_at=classroom.created_at,
                               as_of=self._clock(), learners=learners, uncertain_open=sum(open_by_learner.values()))
@@ -72,7 +74,8 @@ class ClassDashboardService:
         except UnknownLearner:  # joined, then the profile went away: still on the roster, nothing to show
             return None
 
-    def _overview(self, member: ClassMember, profile: LearnerProfile | None, uncertain_open: int) -> LearnerOverview:
+    def _overview(self, member: ClassMember, profile: LearnerProfile | None, uncertain_open: int,
+                  class_id: str) -> LearnerOverview:
         learner_id = member.learner_id
         if profile is None:
             return LearnerOverview(learner_id=learner_id, display_name=learner_id, joined_at=member.joined_at,
@@ -82,17 +85,20 @@ class ClassDashboardService:
         cycles = self._cycles.for_learner(learner_id)  # newest first
         current = next((c for c in cycles if c.status in ACTIVE_CYCLE_STATUSES), None)
         latest = cycles[0] if cycles else None
+        goals = self._goals(learner_id, class_id)
         return LearnerOverview(
             learner_id=learner_id, display_name=profile.display_name or learner_id, joined_at=member.joined_at,
             average_mastery=progress.average_mastery, mastered=len(progress.mastered), weak=len(progress.weak),
             due_for_review=len(progress.due_for_review), lessons_completed=progress.lessons_completed,
-            assessments_taken=progress.assessments_taken, goals=self._goals(learner_id), cycles=len(cycles),
+            assessments_taken=progress.assessments_taken, goals=goals, cycles=len(cycles),
+            assignments_overdue=sum(g.overdue for g in goals),
             current_cycle_status=current.status.value if current else None,
             last_cycle_status=latest.status.value if latest else None,
             last_active_at=max(latest.updated_at, profile.updated_at) if latest else profile.updated_at,
             uncertain_open=uncertain_open)
 
-    def _goals(self, learner_id: str) -> list[GoalOverview]:
+    def _goals(self, learner_id: str, class_id: str) -> list[GoalOverview]:
+        now = self._clock()
         out = []
         for goal in self._curriculum.goals(learner_id):
             if goal.status == GoalStatus.CANCELLED:
@@ -106,6 +112,11 @@ class ClassDashboardService:
                 base = base.model_copy(update={"objectives_mastered": p.mastered, "objectives_required": p.required,
                                                "percent_complete": p.percent_complete,
                                                "goal_complete": p.goal_complete})
+            if goal.metadata.get(CLASS_KEY) == class_id and goal.metadata.get(ASSIGNMENT_KEY):
+                late = goal.target_date is not None and now > goal.target_date
+                done = goal.status == GoalStatus.COMPLETED or base.goal_complete
+                base = base.model_copy(update={"assignment_id": goal.metadata[ASSIGNMENT_KEY],
+                                               "overdue": late and not done})
             out.append(base)
         return out
 

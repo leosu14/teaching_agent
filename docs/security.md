@@ -236,6 +236,32 @@ are the same `404`).
   refuses them, and the deletion erases `lesson_releases` and `grade_overrides`.
 - All seven routes are in the security matrix (`tests/e2e/test_security_api.py`).
 
+### Class assignments
+
+Important item 3 ([architecture](architecture.md#class-assignments)). The teacher of a class assigns goals or course
+topics with deadlines to the whole class. As with teacher review, `Access.check` is unchanged: a teacher still never
+changes a learner route (`PATCH /goals/{id}` from a teacher is `403`). Every teacher write is a class route through
+`taught_class` (a class of another teacher or tenant, or no teacher role: the uniform `404`; an assignment of
+another class is the same `404`).
+
+| Route | Who |
+|---|---|
+| `POST`/`GET /classes/{id}/assignments`, `GET`/`PATCH /classes/{id}/assignments/{aid}`, `POST .../cancel` | The class's teacher only |
+| `GET /learners/{id}/assignments` | The learner's own scope (their classes now), or a teacher of theirs (only that teacher's classes) |
+
+- **The learner's goal stays theirs, within limits.** On a goal an assignment made, the learner may change only its
+  priority and pause or resume it while they are on the roster; everything else is `409 GoalLocked`, checked against
+  the stored goal inside the atomic update, so a racing request cannot slip a change past it. A COMPLETED or CANCELLED
+  assigned goal cannot be reopened. A learner cannot mark a goal of their own as assigned (the keys are dropped from
+  their metadata). Leaving the class unlocks the goal and ends the teacher's view of it (the consent rule of classes).
+- **No cross-learner exposure.** A learner's view lists their own progress only, never the class's other learners;
+  the teacher's views list the roster only (a learner who left is not shown).
+- **Writes are guarded** (`learner_writes`): a deletion that committed first refuses a materialization or a
+  propagation, which then skips that learner; `assignment_learners` is erased with the learner, and the PostgreSQL
+  race tests check that nothing of a learner deleted mid-propagation is left.
+- **Events and logs** carry ids, status and counts only: never the assignment's title or description.
+- All six routes are in the security matrix (`tests/e2e/test_security_api.py`) and the deletion write-window test.
+
 ### The teacher dashboard
 
 MVP item 7. Two read-only routes aggregate a class for its teacher; both take the class through `taught_class`, so a

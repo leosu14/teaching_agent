@@ -238,6 +238,10 @@ development tokens and the test mechanism.
 | GET | `/classes/{id}/lessons` · `/classes/{id}/lessons/{task_id}` · `.../preview` | The lessons held for the teacher's release, one of them, and its preview (the learner's answer-isolated reading) |
 | POST | `/classes/{id}/lessons/{task_id}/approve` · `.../reject` | Release a lesson to its learner, or not (final) |
 | POST | `/classes/{id}/attempts/{attempt_id}/override` | The teacher's outcome for an UNCERTAIN grade: one piece of evidence through the MasteryUpdater, once |
+| POST/GET | `/classes/{id}/assignments` | Assign a goal (a level) or course topics with a deadline to the whole class / the class's assignments with totals |
+| GET/PATCH | `/classes/{id}/assignments/{assignment_id}` | One assignment with each learner's progress / change its title, description or deadline (no replanning; targets cannot change) |
+| POST | `/classes/{id}/assignments/{assignment_id}/cancel` | Cancel it: the learners' open goals for it are cancelled |
+| GET | `/learners/{id}/assignments` | The learner's assignments in their classes, with their progress |
 | GET | `/app/` · `/app/teacher.html` · `/app/privacy.html` | The student web app, the teacher dashboard and the privacy notice (static, public; the apps' data comes from the routes above) |
 | GET | `/health` · `/agents` · `/tools` · `/providers` | Introspection |
 

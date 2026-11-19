@@ -30,7 +30,8 @@ from tests.learning_cycle_fixtures import LEARNER
 world = test_security_api.world
 
 PLACEHOLDER = {"learner": LEARNER, "goal": "G", "task": "T", "evaluation": "E", "session": "S", "item": "I",
-               "attempt": "A", "lesson": "L", "cycle": "C", "artifact": "R", "class": "K", "join_code": "J"}
+               "attempt": "A", "lesson": "L", "cycle": "C", "artifact": "R", "class": "K", "join_code": "J",
+               "assignment": "N"}
 # PUT /learners/{id} creates a profile on purpose ("Start again"); DELETE /learners/{id} is the deletion itself.
 ROUTES = [(m, p) for m, p, _ in routes(PLACEHOLDER)
           if not (m == "PUT" and p.startswith("/learners/")) and not (m == "DELETE" and p == f"/learners/{LEARNER}")]

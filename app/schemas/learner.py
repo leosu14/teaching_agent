@@ -410,6 +410,10 @@ class LearningGoal(Schema):
     status: GoalStatus = GoalStatus.ACTIVE
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # Set once, when the completion rule (mastery) first marks the goal COMPLETED: the time of the latest learner
+    # evidence supporting that mastery, not the time the refresh noticed it (#62, D8 and D11). None for goals that
+    # completed before it existed, and for goals not completed.
+    completed_at: datetime | None = None
     metadata: dict = Field(default_factory=dict)
 
     @field_validator("status", mode="before")

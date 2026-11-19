@@ -6,6 +6,7 @@ in-memory versions here serve tests and single-process use.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from app.schemas.learner import EvidenceConflict, LearningEvent, LearningEvidence, LearningGoal
@@ -37,6 +38,11 @@ class GoalRepository(Protocol):
     def get(self, goal_id: str) -> LearningGoal | None: ...
 
     def for_learner(self, learner_id: str) -> list[LearningGoal]: ...
+
+    def update(self, goal_id: str, change: Callable[[LearningGoal], LearningGoal | None]) -> LearningGoal | None:
+        """Read the goal and save `change(goal)` atomically (no write in between can be lost). `change` returning
+        None writes nothing. Returns the goal as stored afterwards (None when there is no such goal)."""
+        ...
 
 
 class InMemoryEvidenceRepository:
@@ -84,3 +90,13 @@ class InMemoryGoalRepository:
 
     def for_learner(self, learner_id: str) -> list[LearningGoal]:
         return [g.model_copy(deep=True) for g in self._rows.values() if g.learner_id == learner_id]
+
+    def update(self, goal_id: str, change: Callable[[LearningGoal], LearningGoal | None]) -> LearningGoal | None:
+        current = self.get(goal_id)
+        if current is None:
+            return None
+        changed = change(current)
+        if changed is None:
+            return current
+        self.save(changed)
+        return changed.model_copy(deep=True)

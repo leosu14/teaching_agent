@@ -44,6 +44,7 @@ from app.services.assessment import (
     ItemConflict,
 )
 from app.services.budgets import BudgetExhausted
+from app.schemas.assignment import AssignmentConflict, AssignmentNotFound, GoalLocked, InvalidAssignment
 from app.services.classes import ClassNotFound
 from app.services.container import Container, build_container
 from app.services.curriculum import InvalidGoal
@@ -98,7 +99,8 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
                              (CycleNotFound, 404), (CycleConflict, 409), (InvalidCycleTransition, 409),
                              (InvalidCycleRequest, 422), (LeaseLost, 409), (WriteConflict, 409), (JobConflict, 409),
                              (LessonNotReady, 409), (LessonHeld, 409), (ReleaseConflict, 409), (OverrideConflict, 409),
-                             (LearnerDataBusy, 409), (InvalidCursor, 400), (TooManyStreams, 429)):
+                             (LearnerDataBusy, 409), (InvalidCursor, 400), (TooManyStreams, 429),
+                             (AssignmentConflict, 409), (InvalidAssignment, 422), (GoalLocked, 409)):
         app.add_exception_handler(exc_type, _handler(status))
     app.add_exception_handler(AuthenticationFailed, _unauthenticated)
     app.add_exception_handler(Forbidden, _handler(403))
@@ -106,6 +108,7 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
     app.add_exception_handler(ArtifactContentNotFound, _handler(404, error="NotFound"))
     app.add_exception_handler(ClassNotFound, _handler(404, error="NotFound"))
     app.add_exception_handler(ReleaseNotFound, _handler(404, error="NotFound"))
+    app.add_exception_handler(AssignmentNotFound, _handler(404, error="NotFound"))
     app.add_exception_handler(LearnerDataGone, _handler(404, error="NotFound"))
     app.add_exception_handler(ArtifactContentUnavailable, _handler(500, error="ContentUnavailable"))
 

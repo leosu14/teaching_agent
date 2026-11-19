@@ -9,7 +9,11 @@ or retired join code.
 Teacher review (Important item 2): the class's teacher may require approving lessons before its learners see them,
 previews and approves or rejects them, and overrides the UNCERTAIN grades of its learners. These are the only changes
 a teacher makes for a learner, and every one is a class route through `taught_class`, for a learner still on that
-class's roster: `Access.check` (a teacher reads a learner's routes, never changes them) is unchanged."""
+class's roster: `Access.check` (a teacher reads a learner's routes, never changes them) is unchanged.
+
+Class assignments (Important item 3, #62): the class's teacher assigns a goal or course topics, with a deadline, to
+the whole class; each learner on the roster, and each who joins later, gets it as one of their goals. The teacher
+changes or cancels it through the class routes only, and reads each learner's progress on it."""
 
 from __future__ import annotations
 
@@ -18,6 +22,13 @@ from fastapi import APIRouter, Depends, Query, Response
 from app.api.auth import TEACHER, Principal
 from app.api.authorization import ResourceNotFound, authorize, principal, require_learner, require_role, taught_class
 from app.api.deps import container
+from app.schemas.assignment import (
+    AssignmentDetail,
+    AssignmentView,
+    CreateAssignment,
+    LearnerAssignment,
+    UpdateAssignment,
+)
 from app.schemas.classroom import ClassJoinCode, Classroom, ClassView, CreateClass, Enrollment, JoinClass
 from app.schemas.dashboard import ClassDashboard, UncertainGrade
 from app.schemas.reading import LessonReading
@@ -133,6 +144,48 @@ def uncertain_grades(classroom: Classroom = Depends(taught_class), include_resol
     return c.class_dashboard.uncertain_grades(classroom, include_resolved=include_resolved)
 
 
+@router.post("/classes/{class_id}/assignments", response_model=AssignmentView, status_code=201)
+async def create_assignment(body: CreateAssignment, response: Response, classroom: Classroom = Depends(taught_class),
+                            p: Principal = Depends(principal), c: Container = Depends(container)) -> AssignmentView:
+    """Assign a goal (a target level) or course topics, with a deadline, to every learner on the roster (and to each
+    who joins later). The same `idempotency_key` (or, without one, the same content) returns the stored assignment
+    (200) and completes giving it to the roster; a key used for something else is 409."""
+    view, created = await c.assignments.create(classroom, body, teacher_id=p.user_id)
+    if not created:
+        response.status_code = 200
+    return view
+
+
+@router.get("/classes/{class_id}/assignments", response_model=list[AssignmentView])
+def class_assignments(classroom: Classroom = Depends(taught_class),
+                      c: Container = Depends(container)) -> list[AssignmentView]:
+    """The class's assignments, soonest deadline first, with totals over the learners on the roster now."""
+    return c.assignments.for_class(classroom)
+
+
+@router.get("/classes/{class_id}/assignments/{assignment_id}", response_model=AssignmentDetail)
+def class_assignment(assignment_id: str, classroom: Classroom = Depends(taught_class),
+                     c: Container = Depends(container)) -> AssignmentDetail:
+    """The assignment and the progress of each learner on the roster now (read-only: nothing is recorded)."""
+    return c.assignments.detail(classroom, assignment_id)
+
+
+@router.patch("/classes/{class_id}/assignments/{assignment_id}", response_model=AssignmentView)
+async def update_assignment(assignment_id: str, body: UpdateAssignment, classroom: Classroom = Depends(taught_class),
+                            c: Container = Depends(container)) -> AssignmentView:
+    """Change the title, description or deadline: every current learner's goal gets the change, with no replanning
+    and no model call. The targets cannot change (422): cancel and assign again. A cancelled assignment is 409."""
+    return await c.assignments.update(classroom, assignment_id, body)
+
+
+@router.post("/classes/{class_id}/assignments/{assignment_id}/cancel", response_model=AssignmentView)
+async def cancel_assignment(assignment_id: str, classroom: Classroom = Depends(taught_class),
+                            c: Container = Depends(container)) -> AssignmentView:
+    """Cancel the assignment: the goals of the learners on the roster that are not completed are cancelled. Learners
+    who left keep theirs. Cancelling again returns it as it is."""
+    return await c.assignments.cancel(classroom, assignment_id)
+
+
 @router.post("/classes/{class_id}/join-code", response_model=ClassJoinCode)
 def rotate_join_code(classroom: Classroom = Depends(taught_class),
                      c: Container = Depends(container)) -> ClassJoinCode:
@@ -159,11 +212,13 @@ def remove_learner(class_id: str, learner_id: str, p: Principal = Depends(princi
 
 @router.post("/learners/{learner_id}/classes", response_model=Enrollment, status_code=201,
              dependencies=[Depends(require_learner)])
-def join_class(learner_id: str, body: JoinClass, response: Response, p: Principal = Depends(principal),
-               c: Container = Depends(container)) -> Enrollment:
-    """Join the class the code names: the learner consents to its teacher reading their data. Joining again
-    returns the same enrollment (200)."""
+async def join_class(learner_id: str, body: JoinClass, response: Response, p: Principal = Depends(principal),
+                     c: Container = Depends(container)) -> Enrollment:
+    """Join the class the code names: the learner consents to its teacher reading their data, and gets the class's
+    active assignments with their original deadlines (one whose course topics are gone is not assigned to them; the
+    join still succeeds). Joining again returns the same enrollment (200), and completes any assignment not given."""
     enrollment, created = c.classes.join(learner_id, body.join_code, tenant_id=p.tenant_id)
+    await c.assignments.on_join(enrollment.class_id, learner_id)
     if not created:
         response.status_code = 200
     return enrollment
@@ -176,3 +231,16 @@ def learner_classes(learner_id: str, p: Principal = Depends(principal),
     other classes."""
     authorize(p, learner_id)
     return c.classes.enrollments(learner_id, tenant_id=p.tenant_id)
+
+
+@router.get("/learners/{learner_id}/assignments", response_model=list[LearnerAssignment],
+            dependencies=[Depends(require_learner)])
+def learner_assignments(learner_id: str, p: Principal = Depends(principal),
+                        c: Container = Depends(container)) -> list[LearnerAssignment]:
+    """The learner's assignments in the classes they are in now, with their progress. A teacher reading a learner
+    sees only the assignments of their own classes."""
+    found = c.assignments.for_learner(learner_id, tenant_id=p.tenant_id)
+    if not p.may_access(learner_id):
+        mine = {k.class_id for k in c.classes.for_teacher(teacher_id=p.user_id, tenant_id=p.tenant_id)}
+        found = [a for a in found if a.class_id in mine]
+    return found

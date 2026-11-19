@@ -170,6 +170,7 @@ async function api(method, path, body, { allow = [] } = {}) {
 
 const get = (path, opts) => api("GET", path, undefined, opts).then((r) => (opts ? r : r.data));
 const post = (path, body, opts) => api("POST", path, body, opts).then((r) => (opts ? r : r.data));
+const patch = (path, body) => api("PATCH", path, body).then((r) => r.data);
 
 async function blobUrl(path) {
   const headers = {};
@@ -491,9 +492,10 @@ function route() {
 async function renderToday() {
   const show = painter();
   show(busy("Loading…"));
-  let goals, cycles, next;
+  let goals, cycles, next, assignments;
   try {
-    [goals, cycles, next] = await Promise.all([get(`${L()}/goals`), get(`${L()}/learning-cycles`), get(`${L()}/next-action`)]);
+    [goals, cycles, next, assignments] = await Promise.all([get(`${L()}/goals`), get(`${L()}/learning-cycles`),
+      get(`${L()}/next-action`), get(`${L()}/assignments`).catch(() => [])]);
   } catch (err) {
     return show(h("h1", { text: "Today" }), errorBox(err));
   }
@@ -516,7 +518,8 @@ async function renderToday() {
   nodes.push(h("div", { class: "row spread" }, h("h2", { text: "Your goals" }), h("a", { href: "#/goal/new" }, "Add a goal")));
   goals.forEach((g) => {
     const i = activeGoals.indexOf(g);
-    nodes.push(goalCard(g, i >= 0 ? curricula[i] : null));
+    const assigned = assignments.find((a) => a.progress.goal_id === g.goal_id) || null;
+    nodes.push(goalCard(g, i >= 0 ? curricula[i] : null, assigned));
   });
   show(nodes);
 }
@@ -615,11 +618,29 @@ async function startCycle(button, feedback) {
   }
 }
 
-function goalCard(goal, curriculum) {
-  const card = h("div", { class: "card", "data-testid": "goal" },
+// A goal the learner's teacher assigned to their class (Important item 3): the class and the due date are shown, and
+// the learner may change only its priority, or pause and resume it.
+function assignmentBadges(assigned) {
+  const p = assigned.progress;
+  if (p.status === "OVERDUE") return h("span", { class: "badge bad", "data-testid": "overdue" }, "overdue");
+  if (p.status === "COMPLETED" && p.completed_late) return h("span", { class: "badge warn", "data-testid": "completed-late" }, "completed late");
+  return null;
+}
+
+function goalCard(goal, curriculum, assigned) {
+  const card = h("div", { class: "card", "data-testid": "goal", "data-goal": goal.goal_id },
     h("div", { class: "row spread" }, h("h3", { text: goal.title }),
-      h("span", { class: goal.status === "COMPLETED" ? "badge good" : "badge" }, goal.status.toLowerCase())),
+      h("span", { class: "row" }, assigned ? assignmentBadges(assigned) : null,
+        h("span", { class: goal.status === "COMPLETED" ? "badge good" : "badge" }, goal.status.toLowerCase()))),
     h("p", { class: "muted small" }, [goal.domain, goal.target_level].filter(Boolean).join(" · ")));
+  if (assigned) {
+    card.append(h("p", { class: "small", "data-testid": "assigned-by" },
+      `Assigned by your teacher in ${assigned.class_name} · due ${fmtDate(assigned.due_at)}`));
+    if (assigned.description) card.append(h("p", { class: "small", text: assigned.description }));
+    if (assigned.assignment_status === "ACTIVE" && (goal.status === "ACTIVE" || goal.status === "PAUSED")) {
+      card.append(assignedControls(goal));
+    }
+  }
   if (curriculum) {
     const p = curriculum.progress;
     card.append(meter(p.percent_complete / 100, p.goal_complete),
@@ -628,6 +649,26 @@ function goalCard(goal, curriculum) {
     card.append(h("p", { class: "small muted" }, "No path planned yet."));
   }
   return card;
+}
+
+function assignedControls(goal) {
+  const feedback = h("div");
+  const change = (body) => async () => {
+    try {
+      await patch(`/goals/${encodeURIComponent(goal.goal_id)}`, body);
+      route();
+    } catch (err) {
+      feedback.replaceChildren(errorBox(err));
+    }
+  };
+  const priority = h("select", { "aria-label": "Priority", "data-testid": "goal-priority" },
+    [1, 2, 3, 4, 5].map((n) => h("option", { value: n, selected: n === goal.priority }, n === 1 ? "1 (highest)" : n === 5 ? "5 (lowest)" : String(n))));
+  priority.addEventListener("change", () => change({ priority: Number(priority.value) })());
+  const paused = goal.status === "PAUSED";
+  return h("div", {}, h("div", { class: "row" },
+    h("button", { type: "button", class: "secondary", "data-testid": paused ? "resume-goal" : "pause-goal",
+      on: { click: change({ status: paused ? "ACTIVE" : "PAUSED" }) } }, paused ? "Resume" : "Pause"),
+    h("label", { class: "choice small" }, "Priority", priority)), feedback);
 }
 
 async function planCurriculum(goalId) {
@@ -1021,6 +1062,7 @@ async function renderProgress() {
         h("td", {}, h("div", { text: o.name }), meter(o.current_mastery / (o.target_mastery || 1), o.status === "MASTERED")),
         h("td", {}, h("span", { class: statusClass(o.status) }, o.status.replace(/_/g, " ").toLowerCase()))))))));
   }
+  nodes.push(h("h2", { text: "Your assignments" }), assignmentsCard());
   nodes.push(h("h2", { text: "Your classes" }), classesCard());
   nodes.push(h("h2", { text: "Your data" }), dataCard());
   show(nodes);
@@ -1080,6 +1122,21 @@ function renderDeleted() {
 
 // A teacher's class: the learner joins with the code the teacher gave them, which lets that teacher see (never change)
 // their progress on the teacher dashboard.
+function assignmentsCard() {
+  const card = h("div", { class: "card", "data-testid": "assignments" }, busy("Loading…"));
+  get(`${L()}/assignments`).then((items) => {
+    card.replaceChildren(items.length ? h("ul", { class: "plain" }, items.map((a) => h("li", { "data-testid": "assignment" },
+      h("div", { class: "row spread" }, h("strong", { text: a.title }),
+        h("span", { class: "row" }, assignmentBadges(a),
+          h("span", { class: a.progress.status === "COMPLETED" ? "badge good" : "badge" },
+            a.assignment_status === "CANCELLED" ? "cancelled" : a.progress.status.replace(/_/g, " ").toLowerCase()))),
+      h("p", { class: "muted small" }, `${a.class_name} · due ${fmtDate(a.due_at)}` +
+        (a.progress.planned ? ` · ${a.progress.objectives_mastered} of ${a.progress.objectives_required} objectives` : "")))))
+      : h("p", { class: "muted small" }, "No assignments from your classes."));
+  }).catch((err) => card.replaceChildren(errorBox(err)));
+  return card;
+}
+
 function classesCard() {
   const card = h("div", { class: "card", "data-testid": "classes" }, busy("Loading…"));
   const code = h("input", { type: "text", id: "join-code", maxlength: 64, autocomplete: "off", "data-testid": "join-code" });

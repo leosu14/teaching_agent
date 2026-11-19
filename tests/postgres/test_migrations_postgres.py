@@ -27,7 +27,7 @@ from app.storage.orm import Base
 from tests.conftest import LEARNER
 
 URL = os.environ.get("TA_TEST_POSTGRES_URL")
-HEAD = "0003_teacher_review"  # the newest revision: lesson releases and grade overrides (Important item 2)
+HEAD = "0004_class_assignments"  # the newest revision: class assignments (Important item 3)
 pytestmark = pytest.mark.skipif(not URL, reason="set TA_TEST_POSTGRES_URL to run the PostgreSQL migration tests")
 
 

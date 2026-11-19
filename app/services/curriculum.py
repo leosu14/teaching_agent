@@ -40,6 +40,7 @@ from app.schemas.curriculum import (
     ReplanReason,
     curriculum_id_for,
 )
+from app.schemas.assignment import ASSIGNMENT_KEY, CLASS_KEY, GoalLocked
 from app.schemas.events import EventType
 from app.schemas.learner import GoalStatus, LearningGoal, stable_id
 from app.schemas.lesson import LessonRequest
@@ -56,9 +57,27 @@ class InvalidGoal(ValueError):
     """The goal cannot be planned: unknown concepts, an unknown level, or a conflicting idempotency key."""
 
 
+LEARNER_ASSIGNED_FIELDS = frozenset({"priority", "status"})  # what a learner may change on an assigned goal (D7)
+
+
+def check_assigned_update(goal: LearningGoal, data: GoalUpdate) -> None:
+    """The learner's change to a goal their teacher assigned (#62, D7 and D13): only `priority`, and pausing or
+    resuming (`ACTIVE` <-> `PAUSED`). Nothing of a COMPLETED or CANCELLED assigned goal changes. GoalLocked (409)
+    otherwise, before anything is written."""
+    if not data.model_fields_set <= LEARNER_ASSIGNED_FIELDS:
+        raise GoalLocked()
+    if goal.status not in (GoalStatus.ACTIVE, GoalStatus.PAUSED):
+        raise GoalLocked()
+    if data.status is not None and data.status not in (GoalStatus.ACTIVE, GoalStatus.PAUSED):
+        raise GoalLocked()
+
+
 class CurriculumService:
     def __init__(self, memory: LearnerMemoryService, knowledge: KnowledgeBase, engine: CurriculumEngine,
                  tasks: TaskService, events: EventBus, clock: Callable[[], datetime] = utcnow) -> None:
+        # Whether a goal is locked by an active class assignment of a class its learner is on (set by the container to
+        # AssignmentService.locks; None: no goal is locked).
+        self.goal_lock: Callable[[LearningGoal], bool] | None = None
         self._memory = memory
         self._knowledge = knowledge
         self._engine = engine
@@ -111,6 +130,14 @@ class CurriculumService:
                            target_level=goal.target_level, targets=len(targets), priority=goal.priority)
         return goal, True
 
+    async def resolve_targets(self, domain: str, concepts: list[str], level: str | None,
+                              framework_id: str) -> tuple[list[str], str]:
+        """The target concepts of a goal: the given knowledge-base concepts, or those up to a level (InvalidGoal)."""
+        return await self._targets(domain, concepts, level, framework_id)
+
+    async def graph(self, domain: str) -> ConceptGraph:
+        return await self._knowledge.graph(domain)
+
     async def _targets(self, domain: str, concepts: list[str], level: str | None,
                        framework_id: str) -> tuple[list[str], str]:
         graph = await self._knowledge.graph(domain)
@@ -142,6 +169,9 @@ class CurriculumService:
     async def _update_goal(self, goal_id: str, data: GoalUpdate, *, user_id: str) -> tuple[LearningGoal, Task | None]:
         """Apply the change; a changed definition or target date replans an existing curriculum (a new version)."""
         goal = self._memory.goal(goal_id)
+        locked = self.goal_lock is not None and self.goal_lock(goal)
+        if locked:  # before anything is resolved or written: a teacher-controlled field is a 409, not a 422
+            check_assigned_update(goal, data)
         if goal.status == GoalStatus.COMPLETED and data.status is None:
             raise InvalidGoal(f"goal {goal_id} is completed")
         update = data.model_dump(exclude_unset=True, exclude={"clear_target_date"})
@@ -153,11 +183,20 @@ class CurriculumService:
             concepts = update.get("target_concepts") or ([] if "target_level" in update else goal.target_concepts)
             update["target_concepts"], update["target_source"] = await self._targets(goal.domain, concepts, level,
                                                                                       framework)
-        if "metadata" in update:
-            update["metadata"] = {**update["metadata"], FRAMEWORK_KEY: goal.metadata.get(FRAMEWORK_KEY)}
-        changed = goal.model_copy(update={**update, "updated_at": self._clock()})
-        changed = LearningGoal.model_validate(changed.model_dump())
-        self._memory.save_goal(changed)
+        if "metadata" in update:  # the framework and an assignment link are not the learner's to change (#62)
+            kept = {k: goal.metadata[k] for k in (ASSIGNMENT_KEY, CLASS_KEY) if k in goal.metadata}
+            given = {k: v for k, v in update["metadata"].items() if k not in (ASSIGNMENT_KEY, CLASS_KEY)}
+            update["metadata"] = {**given, FRAMEWORK_KEY: goal.metadata.get(FRAMEWORK_KEY), **kept}
+        now = self._clock()
+
+        def apply(current: LearningGoal) -> LearningGoal:
+            if locked:  # the lock's status rules hold against the goal as stored now (D7, D13)
+                check_assigned_update(current, data)
+            return LearningGoal.model_validate(current.model_copy(update={**update, "updated_at": now}).model_dump())
+
+        # One atomic update of the stored goal: a concurrent change (a teacher's new deadline, a refresh completing
+        # it) is applied before or after this one, never overwritten by a stale copy.
+        changed = self._memory.update_goal(goal_id, apply)
         if changed.status != goal.status:
             self._engine.set_status(curriculum_id_for(goal_id), CurriculumStatus.ARCHIVED
                                     if changed.status == GoalStatus.CANCELLED else CurriculumStatus.ACTIVE)
@@ -248,6 +287,12 @@ class CurriculumService:
                           version_id=version.version_id, versions=len(self._engine.versions(record.curriculum_id)),
                           status=record.status, created_at=record.created_at, updated_at=record.updated_at,
                           progress=progress, warnings=version.warnings)
+
+    def completion_time(self, goal: LearningGoal, as_of: datetime) -> datetime | None:
+        """When the learner reached the mastery that completes the goal's current curriculum (D11; read-only, for a
+        completion no refresh has recorded yet). None without a curriculum."""
+        version = self._engine.current(curriculum_id_for(goal.goal_id))
+        return self._tracker.completion_time(goal, version, as_of) if version is not None else None
 
     def versions(self, goal_id: str) -> list[CurriculumVersion]:
         self._memory.goal(goal_id)

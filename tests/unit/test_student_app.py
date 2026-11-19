@@ -87,13 +87,17 @@ def test_the_page_has_no_inline_script_markup_injection_or_third_party_origin(pa
 def test_the_teacher_dashboard_changes_only_through_class_routes() -> None:
     """The dashboard reads learners' data through the learner routes a teacher may read, and every change it sends is
     a class route of the teacher (`taught_class`): creating a class, rotating its join code, the lesson-approval
-    setting, and the reviews of Important item 2 (approving or rejecting a lesson, overriding an UNCERTAIN grade).
+    setting, the reviews of Important item 2 (approving or rejecting a lesson, overriding an UNCERTAIN grade), and the
+    class assignments of Important item 3 (creating one, changing its due date, cancelling it).
     It never asks for the next action (a read that stores progress) and never answers for a learner."""
     js = (web.WEB_DIR / "teacher.js").read_text(encoding="utf-8")
     assert sorted(re.findall(r'\bpost\(`?"?([^`",]+)', js)) == [
-        "/classes", "/classes/${enc(classId)}/attempts/${enc(u.attempt_id)}/override",
+        "/classes", "/classes/${enc(classId)}/assignments",
+        "/classes/${enc(classId)}/assignments/${enc(assignmentId)}/cancel",
+        "/classes/${enc(classId)}/attempts/${enc(u.attempt_id)}/override",
         "/classes/${enc(classId)}/join-code", "/classes/${enc(classId)}/lessons/${enc(l.task_id)}/${verb}"]
-    assert re.findall(r'\bpatch\(`?"?([^`",]+)', js) == ["/classes/${enc(classId)}"]
+    assert sorted(re.findall(r'\bpatch\(`?"?([^`",]+)', js)) == [
+        "/classes/${enc(classId)}", "/classes/${enc(classId)}/assignments/${enc(assignmentId)}"]
     assert set(re.findall(r'api\("([A-Z]+)"', js)) == {"GET", "POST", "PATCH"}
     assert js.count('api("POST"') == 1 and js.count('api("PATCH"') == 1  # only inside the helpers
     assert "next-action" not in js and "/responses" not in js and "/assessment-items" not in js

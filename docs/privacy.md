@@ -40,10 +40,12 @@ Everything below is keyed by the learner id the gateway asserts (`X-Auth-Learner
 | Learning cycles | `learning_cycles`, `learning_cycle_slots`, `learning_cycle_requests`, their artifacts and events | the cycle's records |
 | Class memberships | `class_members` | |
 | Teacher reviews: lessons held for a teacher's release and their decisions (with the teacher's note), teacher overrides of UNCERTAIN grades | `lesson_releases`, `grade_overrides` | |
-| Events outside a task that name the learner (goal created or changed) | `events` | |
+| Class assignments given to the learner: which assignment, their goal for it, when and how they got it (their goal itself is with the goals) | `assignment_learners` | |
+| Events outside a task that name the learner (goal created or changed, an assignment given to them) | `events` | |
 | Spend ledger: ids and amounts of paid provider calls | `spend_entries`, `spend_counters` | |
 
-Not learner data: `classes` (a teacher's), `assessment_rubrics` (an author's). Every table is in one of two lists in
+Not learner data: `classes` and `class_assignments` (a teacher's: an assignment names no learner),
+`assessment_rubrics` (an author's). Every table is in one of two lists in
 `app/storage/repositories.py`, `ERASED_TABLES` and `KEPT_TABLES`, and `tests/unit/test_learner_deletion.py` fails
 when a table is in neither, so a new table cannot hold learner data without deciding how it is deleted.
 

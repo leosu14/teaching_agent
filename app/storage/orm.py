@@ -404,6 +404,37 @@ class GradeOverrideRow(Base):
     body: Mapped[str] = mapped_column(Text)
 
 
+class ClassAssignmentRow(Base):
+    """A teacher's assignment to a class (app/schemas/assignment.py): teacher data, kept on a learner's deletion, and
+    naming no learner. `body` is the ClassAssignment; `due_at` and `status` are columns too, for queries. `version`
+    rises with every change, and a change of the deadline or the status is made under the row's write lock, which the
+    goal updates that carry it to the learners take as well (`SqlAssignmentRepository.sync_goal`)."""
+
+    __tablename__ = "class_assignments"
+    assignment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    class_id: Mapped[str] = mapped_column(String(64), ForeignKey("classes.class_id"), index=True)
+    status: Mapped[str] = mapped_column(String(16))
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    body: Mapped[str] = mapped_column(Text)
+
+
+class AssignmentLearnerRow(Base):
+    """Which learner got an assignment, and their goal (or NOT_ASSIGNED): learner data, erased with the learner. The
+    primary key makes materializing idempotent."""
+
+    __tablename__ = "assignment_learners"
+    assignment_id: Mapped[str] = mapped_column(String(64), ForeignKey("class_assignments.assignment_id"),
+                                               primary_key=True)
+    learner_id: Mapped[str] = mapped_column(String(128), primary_key=True, index=True)
+    goal_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state: Mapped[str] = mapped_column(String(16))
+    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(16))
+
+
 class ObjectHoldRow(Base):
     """A durable reference to a stored object by one owner (a task or a learning cycle), made before the object is put
     or reused and kept with the owner. Content-addressed objects (`objects/sha256/...`) are shared by identical bytes,

@@ -26,6 +26,7 @@ from app.schemas.assessment import (
     AttemptOutcome,
     ItemConflict,
 )
+from app.schemas.assignment import AssignmentLearner, ClassAssignment, MaterializedState
 from app.schemas.classroom import ClassMember, Classroom
 from app.schemas.review import GradeOverride, LessonRelease, ReleaseStatus
 from app.schemas.curriculum import (
@@ -83,6 +84,8 @@ from app.storage.orm import (
     AssessmentGradeRow,
     AssessmentItemRow,
     AssessmentRubricRow,
+    AssignmentLearnerRow,
+    ClassAssignmentRow,
     ClassMemberRow,
     ClassRow,
     GradeOverrideRow,
@@ -637,6 +640,37 @@ class SqlGoalRepository:
             rows = s.scalars(select(LearningGoalRow).where(LearningGoalRow.learner_id == learner_id)
                              .order_by(LearningGoalRow.goal_id))
             return [LearningGoal.model_validate_json(r.body) for r in rows]
+
+    def update(self, goal_id: str, change: Callable[[LearningGoal], LearningGoal | None]) -> LearningGoal | None:
+        """Read-modify-write of one goal in one transaction, under the goal row's write lock: two concurrent changes
+        (a teacher's deadline, the learner's pause, a refresh completing it) apply one after the other, and neither
+        overwrites the other with a stale copy. `change` returning None writes nothing."""
+        with self._sessions.begin() as s:
+            _fence_current(s, self._clock)
+            return _update_goal(s, goal_id, change)
+
+
+def _lock_goal(s: Session, goal_id: str) -> LearningGoalRow | None:
+    """The goal row, under its write lock until the caller's transaction ends (a no-op UPDATE first: on SQLite it
+    takes the database's write lock, on PostgreSQL the row's)."""
+    if s.execute(update(LearningGoalRow).where(LearningGoalRow.goal_id == goal_id)
+                 .values(status=LearningGoalRow.status)).rowcount != 1:
+        return None
+    return s.get(LearningGoalRow, goal_id, populate_existing=True)
+
+
+def _update_goal(s: Session, goal_id: str, change: Callable[[LearningGoal], LearningGoal | None]) -> LearningGoal | None:
+    row = _lock_goal(s, goal_id)
+    if row is None:
+        return None
+    current = LearningGoal.model_validate_json(row.body)
+    changed = change(current)
+    if changed is None:
+        return current
+    if changed.goal_id != goal_id or changed.learner_id != current.learner_id:
+        raise ValueError("a goal update cannot change the goal's id or learner")
+    row.status, row.domain, row.body = changed.status.value, changed.domain, changed.model_dump_json()
+    return changed
 
 
 class SqlCurriculumRepository:
@@ -1664,6 +1698,147 @@ def _tenant_is(tenant_id: str | None):
     return ClassRow.tenant_id.is_(None) if tenant_id is None else ClassRow.tenant_id == tenant_id
 
 
+class SqlAssignmentRepository:
+    """Class assignments (Important item 3) and the learners they were materialized for.
+
+    An assignment row is changed only under its write lock (`update`). A goal update that carries the assignment's
+    teacher-controlled fields to a learner (`sync_goal`) takes the same lock and reads the assignment's current values
+    in that transaction, so propagations racing with each other or with a newer change all leave every goal at the
+    assignment's latest values: whichever writes a goal last writes what the assignment says then. Lock order, the same
+    as every other guarded write: the learner's deletion lock (shared) and learner row (`_guard`), then the assignment
+    row, then the goal row."""
+
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+        self._sessions = sessions
+        self._clock = clock
+
+    # --- assignments (teacher data) ------------------------------------------------------------------------------
+
+    def create(self, assignment: ClassAssignment) -> tuple[ClassAssignment, bool]:
+        """Insert the assignment unless one with its id exists; returns the stored one and whether it is new."""
+        try:
+            with self._sessions.begin() as s:
+                current = s.get(ClassAssignmentRow, assignment.assignment_id)
+                if current is not None:
+                    return self._assignment(current), False
+                s.add(ClassAssignmentRow(assignment_id=assignment.assignment_id, class_id=assignment.class_id,
+                                         status=assignment.status.value, due_at=assignment.due_at,
+                                         created_at=assignment.created_at, updated_at=assignment.updated_at,
+                                         version=1, body=assignment.model_copy(update={"version": 1}).model_dump_json()))
+                return assignment.model_copy(update={"version": 1}), True
+        except IntegrityError:  # a concurrent create of the same assignment committed first
+            found = self.get(assignment.assignment_id)
+            if found is None:
+                raise
+            return found, False
+
+    def get(self, assignment_id: str) -> ClassAssignment | None:
+        with self._sessions() as s:
+            row = s.get(ClassAssignmentRow, assignment_id)
+            return self._assignment(row) if row is not None else None
+
+    def for_class(self, class_id: str) -> list[ClassAssignment]:
+        """The class's assignments, by deadline (soonest first)."""
+        with self._sessions() as s:
+            rows = s.scalars(select(ClassAssignmentRow).where(ClassAssignmentRow.class_id == class_id)
+                             .order_by(ClassAssignmentRow.due_at, ClassAssignmentRow.assignment_id))
+            return [self._assignment(r) for r in rows]
+
+    def update(self, assignment_id: str,
+               change: Callable[[ClassAssignment], ClassAssignment | None]) -> ClassAssignment | None:
+        """Read-modify-write under the row's write lock, raising its version (None: no such assignment). `change`
+        returning None writes nothing and returns the assignment as it is."""
+        with self._sessions.begin() as s:
+            row = self._lock(s, assignment_id)
+            if row is None:
+                return None
+            current = self._assignment(row)
+            changed = change(current)
+            if changed is None:
+                return current
+            changed = changed.model_copy(update={"version": row.version + 1})
+            row.status, row.due_at, row.updated_at = changed.status.value, changed.due_at, changed.updated_at
+            row.version, row.body = changed.version, changed.model_dump_json()
+            return changed
+
+    # --- learners (learner data) ---------------------------------------------------------------------------------
+
+    def record_learner(self, record: AssignmentLearner) -> AssignmentLearner:
+        """Insert the learner's record unless there is one, in the transaction guarded for the learner. A stored
+        NOT_ASSIGNED record becomes ASSIGNED when the goal could be made after all (a later join, once the course has
+        the concepts again); an ASSIGNED one never changes."""
+        try:
+            with self._sessions.begin() as s:
+                _guard(s)
+                row = s.get(AssignmentLearnerRow, (record.assignment_id, record.learner_id))
+                if row is None:
+                    s.add(AssignmentLearnerRow(assignment_id=record.assignment_id, learner_id=record.learner_id,
+                                               goal_id=record.goal_id, state=record.state.value,
+                                               assigned_at=record.assigned_at, source=record.source))
+                    return record
+                if row.state == MaterializedState.NOT_ASSIGNED.value and record.state == MaterializedState.ASSIGNED:
+                    row.state, row.goal_id = record.state.value, record.goal_id
+                    return self._learner(row)
+                return self._learner(row)
+        except IntegrityError:  # a concurrent materialization inserted it first
+            found = self.learner(record.assignment_id, record.learner_id)
+            if found is None:
+                raise
+            return found
+
+    def learner(self, assignment_id: str, learner_id: str) -> AssignmentLearner | None:
+        with self._sessions() as s:
+            row = s.get(AssignmentLearnerRow, (assignment_id, learner_id))
+            return self._learner(row) if row is not None else None
+
+    def learners(self, assignment_id: str) -> list[AssignmentLearner]:
+        with self._sessions() as s:
+            rows = s.scalars(select(AssignmentLearnerRow).where(AssignmentLearnerRow.assignment_id == assignment_id)
+                             .order_by(AssignmentLearnerRow.assigned_at, AssignmentLearnerRow.learner_id))
+            return [self._learner(r) for r in rows]
+
+    def for_learner(self, learner_id: str) -> list[tuple[ClassAssignment, AssignmentLearner]]:
+        with self._sessions() as s:
+            rows = s.execute(select(ClassAssignmentRow, AssignmentLearnerRow)
+                             .join(AssignmentLearnerRow,
+                                   AssignmentLearnerRow.assignment_id == ClassAssignmentRow.assignment_id)
+                             .where(AssignmentLearnerRow.learner_id == learner_id)
+                             .order_by(ClassAssignmentRow.due_at, ClassAssignmentRow.assignment_id))
+            return [(self._assignment(a), self._learner(m)) for a, m in rows]
+
+    def sync_goal(self, assignment_id: str, goal_id: str,
+                  apply: Callable[[ClassAssignment, LearningGoal], LearningGoal | None]) -> LearningGoal | None:
+        """In one transaction guarded for the goal's learner: lock the assignment row and read it as it is now, then
+        update the goal with `apply(assignment, goal)` (None writes nothing). Returns the goal as stored afterwards;
+        None when the assignment or the goal is gone."""
+        with self._sessions.begin() as s:
+            _fence_current(s, self._clock)
+            row = self._lock(s, assignment_id)
+            if row is None:
+                return None
+            assignment = self._assignment(row)
+            return _update_goal(s, goal_id, lambda goal: apply(assignment, goal))
+
+    # --- helpers ---------------------------------------------------------------------------------------------------
+
+    @staticmethod
+    def _lock(s: Session, assignment_id: str) -> ClassAssignmentRow | None:
+        if s.execute(update(ClassAssignmentRow).where(ClassAssignmentRow.assignment_id == assignment_id)
+                     .values(version=ClassAssignmentRow.version)).rowcount != 1:
+            return None
+        return s.get(ClassAssignmentRow, assignment_id, populate_existing=True)
+
+    @staticmethod
+    def _assignment(row: ClassAssignmentRow) -> ClassAssignment:
+        return ClassAssignment.model_validate_json(row.body).model_copy(update={"version": row.version})
+
+    @staticmethod
+    def _learner(row: AssignmentLearnerRow) -> AssignmentLearner:
+        return AssignmentLearner(assignment_id=row.assignment_id, learner_id=row.learner_id, goal_id=row.goal_id,
+                                 state=MaterializedState(row.state), assigned_at=_aware(row.assigned_at),
+                                 source=row.source)
+
+
 # --- learner data deletion (MVP item 9) ------------------------------------------------------------------------------
 
 # Every table, by what a learner's deletion does with it. A new table must be added to one of the two
@@ -1674,12 +1849,13 @@ ERASED_TABLES = (
     "curriculum_progress", "tasks", "task_jobs", "events", "artifacts", "teaching_sessions", "teaching_turns",
     "interaction_evidence", "teaching_requests", "teaching_outbox", "assessment_items", "assessment_attempts",
     "assessment_grades", "learning_cycles", "learning_cycle_slots", "learning_cycle_requests", "class_members",
-    "object_holds", "lesson_releases", "grade_overrides",
+    "object_holds", "lesson_releases", "grade_overrides", "assignment_learners",
 )
-# Not learner data, or kept on purpose: classes and rubrics belong to teachers and authors; the spend ledger holds ids
+# Not learner data, or kept on purpose: classes, their assignments (which name no learner) and rubrics belong to
+# teachers and authors; the spend ledger holds ids
 # and amounts only and is what the budgets and daily caps count, so a deletion must not reset them. The object
 # deletion queue holds the references of objects still to delete, each removed as soon as its object is.
-KEPT_TABLES = ("classes", "assessment_rubrics", "object_deletions") + RETAINED_RECORDS
+KEPT_TABLES = ("classes", "class_assignments", "assessment_rubrics", "object_deletions") + RETAINED_RECORDS
 CONTENT_ADDRESSED = "objects/sha256/"  # app/artifacts/service.py: media stored once and shared by identical bytes
 _CHUNK = 500  # ids per IN list
 OBJECT_RETRY = timedelta(seconds=30)  # the first wait before an object deletion that failed is tried again
@@ -1828,7 +2004,8 @@ class SqlLearnerDataRepository:
             each("tasks", TaskRow, TaskRow.task_id, ids.tasks)
             for row_type, table in ((LearningEvidenceRow, "learning_evidence"), (LearningEventRow, "learning_events"),
                                     (ClassMemberRow, "class_members"), (LessonReleaseRow, "lesson_releases"),
-                                    (GradeOverrideRow, "grade_overrides"), (LearnerRow, "learners")):
+                                    (GradeOverrideRow, "grade_overrides"), (AssignmentLearnerRow, "assignment_learners"),
+                                    (LearnerRow, "learners")):
                 run(table, delete(row_type).where(row_type.learner_id == learner_id))
             now = self._clock()
             queued = []
@@ -1900,7 +2077,8 @@ class SqlLearnerDataRepository:
             ids = self._ids(s, learner_id)
             if any((ids.tasks, ids.cycles, ids.sessions, ids.curricula, ids.goals, ids.items, ids.attempts)):
                 return True
-            direct = (LearnerRow, LearningEvidenceRow, LearningEventRow, ClassMemberRow, LearningCycleSlotRow)
+            direct = (LearnerRow, LearningEvidenceRow, LearningEventRow, ClassMemberRow, LearningCycleSlotRow,
+                      AssignmentLearnerRow)
             if any(s.scalar(select(func.count()).select_from(r).where(r.learner_id == learner_id)) for r in direct):
                 return True
             return any(s.scalar(select(func.count()).select_from(EventRow)

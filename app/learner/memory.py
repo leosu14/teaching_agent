@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Protocol, TypeVar
 
 from app.learner.frameworks import FrameworkRegistry
@@ -180,6 +180,13 @@ class LearnerMemoryService:
         self.get_or_create(goal.learner_id)
         self._goals.save(goal)
         return goal
+
+    def update_goal(self, goal_id: str, change: Callable[[LearningGoal], LearningGoal | None]) -> LearningGoal:
+        """Apply `change` to the stored goal atomically (see `GoalRepository.update`); UnknownGoal when it is gone."""
+        updated = self._goals.update(goal_id, change)
+        if updated is None:
+            raise UnknownGoal(goal_id)
+        return updated
 
     def goal(self, goal_id: str) -> LearningGoal:
         goal = self._goals.get(goal_id)
@@ -518,6 +525,17 @@ class LearnerMemoryService:
         for cid in concept_ids:
             concept = profile.concepts[cid]
             profile.concepts[cid] = self._replay(profile.learner_id, cid, concept.name, concept.subject)
+
+    def mastery_at(self, learner_id: str, concept_id: str, at: datetime) -> ConceptMastery:
+        """The concept's state as it was right after everything recorded up to `at` (evidence and exposures),
+        rebuilt as `rebuild` does: when a goal's mastery was reached (#62, D11)."""
+        def aware(value: datetime) -> datetime:
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+        exposures = [e.at for e in self.history(learner_id)
+                     if e.type == "lesson_completed" and concept_id in e.concept_ids and aware(e.at) <= at]
+        evidence = [e for e in self._evidence.for_learner(learner_id, concept_id) if aware(e.timestamp) <= at]
+        return self.updater.replay(self.updater.initial(concept_id, concept_id, ""), evidence, exposures)
 
     def _replay(self, learner_id: str, concept_id: str, name: str, subject: str) -> ConceptMastery:
         exposures = [e.at for e in self.history(learner_id)
