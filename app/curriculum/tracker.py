@@ -8,23 +8,40 @@ ignored: a learner without curricula keeps the adaptive lesson loop exactly as b
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.curriculum.engine import ArtifactWriter, CurriculumEngine
 from app.curriculum.next_action import GoalCurriculum, NextActionEngine
-from app.learner.memory import LearnerMemoryService
+from app.learner.memory import LearnerMemoryService, UnknownGoal
 from app.observability.scope import ExecutionScope
 from app.pedagogy.graph import ConceptGraph
-from app.schemas.curriculum import NextLearningAction, ProgressUpdate, curriculum_id_for
+from app.schemas.curriculum import (
+    CurriculumConfig,
+    CurriculumObjective,
+    CurriculumStatus,
+    CurriculumVersion,
+    NextLearningAction,
+    ProgressUpdate,
+    curriculum_id_for,
+)
 from app.schemas.events import EventType
-from app.schemas.learner import GoalStatus, LearningGoal
+from app.schemas.learner import GoalStatus, LearningEvidence, LearningGoal
 from app.schemas.lease import LearnerDataGone
 from app.schemas.pedagogy import LearnerModel
 
 DEFAULT_FRAMEWORK = "mastery"  # the generic level scale, for a subject the learner's profile does not list
 FRAMEWORK_KEY = "framework_id"  # goal metadata key: the level framework a goal's target level belongs to
+
+
+def _mastered(state, objective: CurriculumObjective) -> bool:
+    """`objective_status`'s MASTERED test (app/curriculum/progress.py) on one concept state."""
+    return state.mastery >= objective.target_mastery and state.evidence_count >= objective.evidence_required
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 @dataclass
@@ -36,6 +53,24 @@ class TrackedGoals:
     models: dict[str, LearnerModel] = field(default_factory=dict)  # by domain
     updates: list[ProgressUpdate] = field(default_factory=list)
     completed_now: frozenset[str] = frozenset()
+
+
+def completion_concepts(version: CurriculumVersion, config: CurriculumConfig) -> set[str]:
+    """The concepts whose objectives the completion rule counts (app/curriculum/progress.py `goal_complete`)."""
+    return {o.concept_id for o in counted_objectives(version, config)}
+
+
+def counted_objectives(version: CurriculumVersion, config: CurriculumConfig) -> list[CurriculumObjective]:
+    if config.completion_rule == "targets_mastered":
+        return [o for o in version.objectives if o.role == "target"]
+    return [o for o in version.objectives if o.required]
+
+
+def completion_time(evidence: Iterable[LearningEvidence], concepts: set[str], as_of: datetime) -> datetime:
+    """The timestamp of the latest evidence on the counted concepts recorded up to `as_of` (`as_of` without any): the
+    fallback of `CurriculumTracker.completion_time` when the replay cannot tell."""
+    times = [_aware(e.timestamp) for e in evidence if e.concept_id in concepts and _aware(e.timestamp) <= as_of]
+    return max(times, default=as_of)
 
 
 class CurriculumTracker:
@@ -52,6 +87,40 @@ class CurriculumTracker:
     def model(self, goal: LearningGoal, universe: list[str], as_of: datetime) -> LearnerModel:
         return self.memory.learner_model(goal.learner_id, goal.domain, self.framework_for(goal), goal.target_level,
                                          universe, as_of=as_of)
+
+    def completion_time(self, goal: LearningGoal, version: CurriculumVersion, as_of: datetime) -> datetime:
+        """When the learner first reached the mastery that completes the goal (D11): the timestamp of the earliest
+        piece of evidence after which the completion rule held. Mastery is replayed forward from the learner's
+        evidence and exposures (the MasteryUpdater's own rebuild), so this is the learner's moment: never the time a
+        refresh noticed it (a refresh long after the deadline does not make a goal mastered in time late), and never
+        moved forward by practice after it (nor by a dip and a regain before the refresh). Never after `as_of`. When
+        the replay never shows the rule holding (a state not rebuilt from evidence alone), the latest evidence's time
+        up to `as_of`."""
+        objectives = counted_objectives(version, self.engine.config)
+        concepts = {o.concept_id for o in objectives}
+        if objectives:
+            for at, states in self.memory.mastery_history(goal.learner_id, concepts, as_of):
+                if all(_mastered(states[o.concept_id], o) for o in objectives):
+                    return at
+        return _aware(completion_time(self.memory.evidence(goal.learner_id), concepts, as_of))
+
+    def complete(self, goal: LearningGoal, version: CurriculumVersion, as_of: datetime) -> LearningGoal:
+        """Store a goal the completion rule (mastery, D8) completed: COMPLETED, and `completed_at` set once, to when
+        the learner reached that mastery (`completion_time`, D11), never to the time this refresh noticed. Only those
+        fields change, in one atomic update of the stored goal, so a concurrent change of another field (a teacher's
+        new deadline) is not lost. A goal no longer ACTIVE meanwhile (paused, cancelled) is left alone."""
+        at = self.completion_time(goal, version, as_of)
+
+        def done(current: LearningGoal) -> LearningGoal | None:
+            if current.status != GoalStatus.ACTIVE:
+                return None
+            return current.model_copy(update={"status": GoalStatus.COMPLETED, "updated_at": as_of,
+                                              "completed_at": current.completed_at or at})
+
+        try:
+            return self.memory.update_goal(goal.goal_id, done)
+        except UnknownGoal:  # deleted since it was read: with the learner's data
+            raise LearnerDataGone() from None
 
     @staticmethod
     def review_counts(model: LearnerModel, evidence_required: Mapping[str, int]) -> dict[str, int]:
@@ -87,9 +156,12 @@ class CurriculumTracker:
             if update is None:  # its curriculum was deleted since it was read: with the learner's data
                 raise LearnerDataGone()
             if update.goal_completed:
-                goal = self.memory.save_goal(goal.model_copy(update={"status": GoalStatus.COMPLETED,
-                                                                     "updated_at": as_of}))
-                completed.add(goal.goal_id)
+                goal = self.complete(goal, version, as_of)
+                if goal.status == GoalStatus.COMPLETED:
+                    completed.add(goal.goal_id)
+                else:  # paused or cancelled meanwhile: not completed, and its curriculum follows the goal
+                    self.engine.set_status(curriculum_id_for(goal.goal_id), CurriculumStatus.ARCHIVED
+                                           if goal.status == GoalStatus.CANCELLED else CurriculumStatus.ACTIVE)
             current = self.engine.current(curriculum_id_for(goal.goal_id))
             if current is None:  # as above
                 raise LearnerDataGone()

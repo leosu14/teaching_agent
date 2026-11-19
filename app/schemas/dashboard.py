@@ -31,6 +31,8 @@ class GoalOverview(Schema):
     objectives_required: int = 0
     percent_complete: float = 0.0
     goal_complete: bool = False
+    assignment_id: str | None = None  # set by an assignment of this class (#62)
+    overdue: bool = False  # an assigned goal past its deadline and not complete (display only, D4)
 
 
 class LearnerOverview(Schema):
@@ -51,6 +53,7 @@ class LearnerOverview(Schema):
     last_cycle_status: str | None = None  # the latest cycle's status, whatever it is
     last_active_at: datetime | None = None  # the latest cycle's last change, else the profile's
     uncertain_open: int = 0  # UNCERTAIN grades not settled by a later graded attempt
+    assignments_overdue: int = 0  # this class's assigned goals past their deadline and not complete (#62)
 
 
 class ClassDashboard(Schema):

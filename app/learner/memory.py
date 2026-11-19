@@ -12,9 +12,9 @@ kept. Every change is idempotent (evidence by id, records per task), which makes
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Protocol, TypeVar
 
 from app.learner.frameworks import FrameworkRegistry
@@ -180,6 +180,13 @@ class LearnerMemoryService:
         self.get_or_create(goal.learner_id)
         self._goals.save(goal)
         return goal
+
+    def update_goal(self, goal_id: str, change: Callable[[LearningGoal], LearningGoal | None]) -> LearningGoal:
+        """Apply `change` to the stored goal atomically (see `GoalRepository.update`); UnknownGoal when it is gone."""
+        updated = self._goals.update(goal_id, change)
+        if updated is None:
+            raise UnknownGoal(goal_id)
+        return updated
 
     def goal(self, goal_id: str) -> LearningGoal:
         goal = self._goals.get(goal_id)
@@ -518,6 +525,40 @@ class LearnerMemoryService:
         for cid in concept_ids:
             concept = profile.concepts[cid]
             profile.concepts[cid] = self._replay(profile.learner_id, cid, concept.name, concept.subject)
+
+    def mastery_history(self, learner_id: str, concept_ids: Iterable[str],
+                        until: datetime) -> Iterator[tuple[datetime, dict[str, ConceptMastery]]]:
+        """The concepts' states as they were right after each moment evidence on them was recorded, up to `until`,
+        oldest first: (timestamp, states). Rebuilt from evidence and exposures alone, in the order `rebuild` replays
+        them (per concept: time order, evidence before exposures on ties, then recording order), in one pass. For when
+        a goal's mastery was first reached (#62, D11)."""
+        def aware(value: datetime) -> datetime:
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+        ids = sorted(set(concept_ids))
+        history = self.history(learner_id)
+        timeline = []
+        for cid in ids:
+            for i, e in enumerate(self._evidence.for_learner(learner_id, cid)):
+                if aware(e.timestamp) <= until:
+                    timeline.append((aware(e.timestamp), 0, cid, i, e))
+            exposures = [aware(e.at) for e in history if e.type == "lesson_completed" and cid in e.concept_ids]
+            for i, at in enumerate(exposures):
+                if at <= until:
+                    timeline.append((at, 1, cid, i, None))
+        timeline.sort(key=lambda x: x[:4])
+        states = {cid: self.updater.initial(cid, cid, "") for cid in ids}
+        evidence_now = False  # evidence was recorded at the current timestamp (an exposure alone changes no mastery)
+        for n, (at, _, cid, _, item) in enumerate(timeline):
+            if item is not None:
+                states[cid] = self.updater.apply(states[cid], item)
+                evidence_now = True
+            else:
+                states[cid] = self.updater.expose(states[cid], at)
+            if n + 1 == len(timeline) or timeline[n + 1][0] != at:  # everything recorded at `at` is in
+                if evidence_now:
+                    yield at, dict(states)
+                evidence_now = False
 
     def _replay(self, learner_id: str, concept_id: str, name: str, subject: str) -> ConceptMastery:
         exposures = [e.at for e in self.history(learner_id)

@@ -64,7 +64,10 @@ def test_the_teacher_sees_their_class_at_a_glance(board_world) -> None:
         assert me["mastered"] == len(progress["mastered"]) and me["weak"] == len(progress["weak"])
         assert me["lessons_completed"] == progress["lessons_completed"]
         assert me["current_cycle_status"] in ("RUNNING", "WAITING", "BLOCKED") and me["cycles"] == 1
-        [goal] = me["goals"]
+        goal, assigned = sorted(me["goals"], key=lambda g: g["assignment_id"] is not None)
+        assert goal["assignment_id"] is None and assigned["assignment_id"] == ids["assignment"]  # #62
+        assert assigned["target_date"].startswith("2099-01-01") and assigned["overdue"] is False
+        assert me["assignments_overdue"] == 0
         plan = a.get(f"/goals/{ids['goal']}/curriculum").json()["progress"]
         assert goal["goal_id"] == ids["goal"] and goal["planned"]
         assert (goal["objectives_mastered"], goal["objectives_required"]) == (plan["mastered"], plan["required"])

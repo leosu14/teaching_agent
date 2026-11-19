@@ -79,6 +79,11 @@ class EventType:
     LESSON_RELEASE_REQUESTED = "lesson_release.requested"
     LESSON_RELEASE_APPROVED = "lesson_release.approved"
     LESSON_RELEASE_REJECTED = "lesson_release.rejected"
+    # Class assignments (Important item 3, #62). Ids, status and counts only: never a title or description.
+    ASSIGNMENT_CREATED = "assignment.created"
+    ASSIGNMENT_UPDATED = "assignment.updated"
+    ASSIGNMENT_CANCELLED = "assignment.cancelled"
+    ASSIGNMENT_MATERIALIZED = "assignment.materialized"  # one learner got it (or it is NOT_ASSIGNED for them)
     EVALUATION_STARTED = "evaluation.started"
     EVALUATION_COMPLETED = "evaluation.completed"
     RECOMMENDATION_CREATED = "recommendation.created"

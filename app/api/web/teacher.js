@@ -7,7 +7,9 @@ The page reads learners' data: the class dashboard and UNCERTAIN grades (GET /cl
 /uncertain-grades) and the learner routes a teacher may read (profile, progress, goals, curricula, cycle history). The
 changes it sends are the teacher's own (creating a class, rotating its join code, the lesson-approval setting) and the
 teacher reviews of Important item 2, all on class routes: approving or rejecting a lesson after previewing it, and
-deciding an answer the grader could not (an override of an UNCERTAIN grade). */
+deciding an answer the grader could not (an override of an UNCERTAIN grade). Class assignments (Important item 3) are
+the teacher's too: a goal or course topics with a deadline for the whole class, its deadline changed or the assignment
+cancelled, and each learner's progress on it read. */
 "use strict";
 
 const TOKEN_KEY = "ta.token";
@@ -60,7 +62,11 @@ function busy(text) {
 
 function errorBox(err) {
   const status = err && err.status;
-  const text = ERROR_MESSAGES[status] || (status ? `Something went wrong (${status}).` : "The service could not be reached.");
+  const raw = err && err.body && (status === 409 || status === 422) ? err.body.detail : null;
+  // the API's reason, when it gives one: a sentence, or the first validation message
+  const detail = typeof raw === "string" ? raw
+    : Array.isArray(raw) && raw[0] && typeof raw[0].msg === "string" ? raw[0].msg.replace(/^Value error, /, "") : null;
+  const text = detail || ERROR_MESSAGES[status] || (status ? `Something went wrong (${status}).` : "The service could not be reached.");
   return h("div", { class: "error", role: "alert", "data-testid": "error" }, text);
 }
 
@@ -201,6 +207,7 @@ function route() {
   const [page, classId, sub, learnerId] = (location.hash.replace(/^#\/?/, "") || "").split("/").map(decodeURIComponent);
   for (const a of document.querySelectorAll("nav a")) a.classList.toggle("active", !page);
   if (page === "class" && classId && sub === "learner" && learnerId) return renderLearner(classId, learnerId);
+  if (page === "class" && classId && sub === "assignment" && learnerId) return renderAssignment(classId, learnerId);
   if (page === "class" && classId) return renderClass(classId);
   return renderClasses();
 }
@@ -267,13 +274,15 @@ async function renderClass(classId, opts = {}) {
   const show = painter();
   show(busy("Loading the class…"));
   const settled = Boolean(opts.settled);
-  let board, uncertain, info, pending;
+  let board, uncertain, info, pending, assignments, courses;
   try {
-    [board, uncertain, info, pending] = await Promise.all([
+    [board, uncertain, info, pending, assignments, courses] = await Promise.all([
       get(`/classes/${enc(classId)}/dashboard`),
       get(`/classes/${enc(classId)}/uncertain-grades${settled ? "?include_resolved=true" : ""}`),
       get(`/classes/${enc(classId)}`),
-      get(`/classes/${enc(classId)}/lessons?status=PENDING`)]);
+      get(`/classes/${enc(classId)}/lessons?status=PENDING`),
+      get(`/classes/${enc(classId)}/assignments`),
+      get("/courses").catch(() => [])]);
   } catch (err) {
     return show(h("p", {}, h("a", { href: "#/" }, "← Classes")), h("h1", { text: "Class" }), errorBox(err));
   }
@@ -318,6 +327,9 @@ async function renderClass(classId, opts = {}) {
     h("div", { class: "row spread" }, h("h1", { text: board.name }), rotate),
     code ? joinCodeCard(code) : null,
     summary, roster,
+    h("h2", { id: "assignments", text: "Assignments" }),
+    assignmentList(classId, assignments),
+    newAssignmentForm(classId, courses, () => renderClass(classId, opts)),
     approvalCard(classId, info, opts),
     info.lesson_approval || pending.length ? h("h2", { id: "lessons", text: "Lessons to approve" }) : null,
     info.lesson_approval || pending.length ? pendingLessons(classId, pending, opts) : null,
@@ -327,6 +339,199 @@ async function renderClass(classId, opts = {}) {
       "a later graded answer settles one."),
     toggle,
     uncertainList(uncertain, settled, true, classId, () => renderClass(classId, opts)));
+}
+
+// --- class assignments (Important item 3) ------------------------------------------------------------------------
+
+const ASSIGNMENT_STATUS = {
+  COMPLETED: ["badge good", "completed"], IN_PROGRESS: ["badge", "in progress"], NOT_STARTED: ["badge", "not started"],
+  OVERDUE: ["badge bad", "overdue"], NOT_ASSIGNED: ["badge warn", "not assigned"], CANCELLED: ["badge", "cancelled"],
+};
+
+function assignmentBadge(status) {
+  const [cls, label] = ASSIGNMENT_STATUS[status] || ["badge", String(status).toLowerCase()];
+  return h("span", { class: cls, "data-testid": "assignment-status" }, label);
+}
+
+// A deadline the teacher picks in their own time zone; the API is sent the instant, in UTC.
+function localInput(iso) {
+  const d = iso ? new Date(iso) : new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function defaultDue() {
+  const d = new Date();
+  d.setDate(d.getDate() + 7);
+  d.setHours(23, 59, 0, 0);
+  return localInput(d.toISOString());
+}
+
+function assignmentTotals(t) {
+  const parts = [`${t.completed} of ${plural(t.learners, "learner")} completed`];
+  if (t.overdue) parts.push(`${t.overdue} overdue`);
+  if (t.not_assigned) parts.push(`${t.not_assigned} not assigned`);
+  return parts.join(" · ");
+}
+
+function assignmentList(classId, items) {
+  if (!items.length) {
+    return h("div", { class: "card", "data-testid": "assignments" }, h("p", { class: "muted" },
+      "No assignments yet. Assign course topics or a level, with a due date, to the whole class below."));
+  }
+  return h("div", { class: "card", "data-testid": "assignments" }, h("div", { class: "table-wrap" }, h("table", {},
+    h("tbody", {}, items.map((a) => h("tr", { "data-testid": "assignment-row", "data-assignment": a.assignment_id },
+      h("td", {}, h("a", { href: `#/class/${enc(classId)}/assignment/${enc(a.assignment_id)}`, "data-testid": "assignment-link" }, a.title),
+        h("div", { class: "muted small" }, a.topics.length ? a.topics.join(", ") : `${a.domain} · level ${a.target_level}`)),
+      h("td", { class: "small" }, h("span", { "data-testid": "assignment-due" }, `Due ${fmtDate(a.due_at)}`)),
+      h("td", {}, a.status === "CANCELLED" ? assignmentBadge("CANCELLED")
+        : a.overdue ? h("span", { class: "badge bad" }, "past due") : h("span", { class: "badge" }, "open")),
+      h("td", { class: "small muted", "data-testid": "assignment-totals" }, assignmentTotals(a.totals))))))));
+}
+
+function newAssignmentForm(classId, courses, done) {
+  const feedback = h("div");
+  const title = h("input", { type: "text", id: "assignment-title", maxlength: 200, required: true, "data-testid": "assignment-title" });
+  const description = h("textarea", { id: "assignment-description", maxlength: 2000, rows: 2, "data-testid": "assignment-description" });
+  const due = h("input", { type: "datetime-local", id: "assignment-due", required: true, value: defaultDue(), "data-testid": "assignment-due-input" });
+  const targets = h("div", { "data-testid": "assignment-targets" });
+  const kind = h("select", { id: "assignment-kind", "data-testid": "assignment-kind" },
+    h("option", { value: "topics" }, "Course topics"), h("option", { value: "level" }, "A level"));
+  let subject;
+  if (courses.length) {
+    subject = h("select", { id: "assignment-subject", "data-testid": "assignment-subject" },
+      courses.map((c) => h("option", { value: c.subject }, `${c.title} (${c.subject})`)));
+  } else {
+    subject = h("input", { type: "text", id: "assignment-subject", maxlength: 128, required: true, "data-testid": "assignment-subject" });
+  }
+  const course = () => courses.find((c) => c.subject === subject.value) || null;
+  const fillTargets = () => {
+    const c = course();
+    if (kind.value === "level") {
+      targets.replaceChildren(h("label", { for: "assignment-level", text: "Level" }), c
+        ? h("select", { id: "assignment-level", "data-testid": "assignment-level" }, c.levels.map((l) => h("option", { value: l }, l)))
+        : h("input", { type: "text", id: "assignment-level", maxlength: 32, "data-testid": "assignment-level" }));
+    } else if (c) {
+      targets.replaceChildren(h("p", { class: "small" }, "Topics"),
+        c.topics.map((t) => h("label", { class: "choice" }, h("input", { type: "checkbox", value: t, "data-testid": "assignment-topic" }), t)));
+    } else {
+      targets.replaceChildren(h("label", { for: "assignment-topics", text: "Topics (separated by commas)" }),
+        h("input", { type: "text", id: "assignment-topics", maxlength: 2000, "data-testid": "assignment-topics" }));
+    }
+  };
+  kind.addEventListener("change", fillTargets);
+  if (courses.length) subject.addEventListener("change", fillTargets); // a course's own topics and levels
+  fillTargets();
+  const form = h("form", {
+    on: {
+      submit: async (e) => {
+        e.preventDefault();
+        const button = form.querySelector("button[type=submit]");
+        const when = new Date(due.value); // read in the teacher's own time zone
+        if (!title.value.trim() || isNaN(when)) return;
+        const body = { title: title.value.trim(), description: description.value.trim(), domain: subject.value.trim(),
+          due_at: when.toISOString() };
+        if (kind.value === "level") {
+          body.target_level = targets.querySelector("#assignment-level").value.trim();
+          if (course()) body.framework_id = course().framework;
+        } else {
+          const boxes = [...targets.querySelectorAll("input[type=checkbox]:checked")].map((b) => b.value);
+          const typed = targets.querySelector("#assignment-topics");
+          body.topics = typed ? typed.value.split(",").map((t) => t.trim()).filter(Boolean) : boxes;
+        }
+        button.disabled = true;
+        try {
+          await post(`/classes/${enc(classId)}/assignments`, body);
+          done();
+        } catch (err) {
+          feedback.replaceChildren(errorBox(err));
+          button.disabled = false;
+        }
+      },
+    },
+  }, feedback,
+  h("label", { for: "assignment-title", text: "Title" }), title,
+  h("label", { for: "assignment-description", text: "Instructions (optional)" }), description,
+  h("label", { for: "assignment-subject", text: "Course" }), subject,
+  h("label", { for: "assignment-kind", text: "Assign" }), kind, targets,
+  h("label", { for: "assignment-due", text: "Due (your time)" }), due,
+  h("p", { class: "muted small" }, "Every learner in the class gets it as a goal, and so does anyone who joins later, with this due date. " +
+    "Past the due date it shows as overdue; nothing is locked or cancelled."),
+  h("button", { type: "submit", "data-testid": "create-assignment" }, "Assign to the class"));
+  return h("div", { class: "card", "data-testid": "new-assignment" }, h("h3", { text: "New assignment" }), form);
+}
+
+async function renderAssignment(classId, assignmentId) {
+  const show = painter();
+  show(busy("Loading…"));
+  const back = h("p", {}, h("a", { href: `#/class/${enc(classId)}` }, "← Class"));
+  let detail;
+  try {
+    detail = await get(`/classes/${enc(classId)}/assignments/${enc(assignmentId)}`);
+  } catch (err) {
+    return show(back, h("h1", { text: "Assignment" }), errorBox(err));
+  }
+  const a = detail.assignment;
+  const open = a.status === "ACTIVE";
+  const feedback = h("div");
+  const due = h("input", { type: "datetime-local", id: "change-due", value: localInput(a.due_at), "data-testid": "change-due-input" });
+  const change = h("form", {
+    on: {
+      submit: async (e) => {
+        e.preventDefault();
+        const when = new Date(due.value);
+        if (isNaN(when)) return;
+        try {
+          await patch(`/classes/${enc(classId)}/assignments/${enc(assignmentId)}`, { due_at: when.toISOString() });
+          renderAssignment(classId, assignmentId);
+        } catch (err) {
+          feedback.replaceChildren(errorBox(err));
+        }
+      },
+    },
+  }, h("label", { for: "change-due", text: "Due (your time)" }), due,
+  h("p", { class: "muted small" }, "Every learner's goal gets the new date. Their plans stay as they are."),
+  h("button", { type: "submit", class: "secondary", "data-testid": "change-due" }, "Change due date"));
+  const cancel = h("button", {
+    type: "button", class: "secondary", "data-testid": "cancel-assignment",
+    on: {
+      click: async () => {
+        if (!window.confirm("Cancel this assignment? Learners' goals for it that are not completed are cancelled. This cannot be undone.")) return;
+        try {
+          await post(`/classes/${enc(classId)}/assignments/${enc(assignmentId)}/cancel`);
+          renderAssignment(classId, assignmentId);
+        } catch (err) {
+          feedback.replaceChildren(errorBox(err));
+        }
+      },
+    },
+  }, "Cancel assignment");
+  const rows = detail.learners.map((l) => h("tr", { "data-testid": "assignment-learner", "data-learner": l.learner_id },
+    h("td", {}, h("a", { href: `#/class/${enc(classId)}/learner/${enc(l.learner_id)}` }, l.display_name),
+      l.source === "joined" ? h("div", { class: "muted small" }, "joined later") : null),
+    h("td", {}, assignmentBadge(l.status), l.paused ? h("span", { class: "badge", "data-testid": "paused" }, "paused") : null,
+      l.completed_late ? h("span", { class: "badge warn", "data-testid": "completed-late" }, "completed late") : null),
+    h("td", { class: "small" }, l.planned ? [meter(l.percent_complete / 100, l.status === "COMPLETED"),
+      h("span", { class: "muted" }, `${l.objectives_mastered} of ${l.objectives_required} objectives`)]
+      : h("span", { class: "muted" }, l.status === "NOT_ASSIGNED" ? "the course no longer has these topics" : "no path planned yet")),
+    h("td", { class: "small muted" }, l.topics.map((t) => `${t.topic}: ${t.mastered}/${t.total}`).join(" · ")),
+    h("td", { class: "small muted" }, l.completed_at ? `Completed ${fmtDate(l.completed_at)}` : "")));
+  show(back,
+    h("div", { class: "row spread" }, h("h1", { text: a.title }), !open ? assignmentBadge("CANCELLED")
+      : a.overdue ? h("span", { class: "badge bad" }, "past due") : h("span", { class: "badge" }, "open")),
+    h("div", { class: "card", "data-testid": "assignment-summary" },
+      a.description ? h("p", { text: a.description }) : null,
+      h("p", { class: "small" }, a.topics.length ? `Topics: ${a.topics.join(", ")}` : `${a.domain} · level ${a.target_level}`),
+      h("p", { class: "small", "data-testid": "assignment-due" }, `Due ${fmtDate(a.due_at)}`),
+      h("p", { class: "muted small", "data-testid": "assignment-totals" }, assignmentTotals(a.totals))),
+    feedback,
+    open ? h("div", { class: "card" }, change, h("p", {}), cancel) : null,
+    h("h2", { text: "Learners" }),
+    h("div", { class: "card", "data-testid": "assignment-learners" }, rows.length
+      ? h("div", { class: "table-wrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, ["Learner", "Status", "Progress", "Topics", "Completed"].map((t) => h("th", { class: "small" }, t)))),
+        h("tbody", {}, rows)))
+      : h("p", { class: "muted" }, "No learners in the class.")));
 }
 
 // --- lesson approval (Important item 2) ----------------------------------------------------------------------------

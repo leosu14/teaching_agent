@@ -101,6 +101,7 @@ from app.schemas.providers import Capability
 from app.schemas.workflow import RevisionPolicy
 from app.services.catalog import CatalogService
 from app.services.class_dashboard import ClassDashboardService
+from app.services.assignments import AssignmentService
 from app.services.classes import ClassService
 from app.services.curriculum import CurriculumService
 from app.services.learners import LearnerService
@@ -133,6 +134,7 @@ from app.storage.repositories import (
     SqlTaskJobRepository,
     SqlTaskRepository,
     SqlAssessmentRepository,
+    SqlAssignmentRepository,
     SqlClassRepository,
     SqlGradeOverrideRepository,
     SqlLessonReleaseRepository,
@@ -415,6 +417,7 @@ class Container:
     progress_streams: ProgressStreamService  # the task and learning-cycle progress streams (SSE; read-only)
     classes: ClassService  # classes and rosters: whose learners a teacher may read
     lesson_releases: LessonReleaseService  # lesson approval before release (Important item 2)
+    assignments: AssignmentService  # goals and course topics with deadlines, assigned to a class (Important item 3)
     class_dashboard: ClassDashboardService  # the teacher dashboard: a class's progress and UNCERTAIN grades (read-only)
     artifact_content: ArtifactContentService
     lesson_reading: LessonReadingService  # the learner-safe text of a lesson (the student app's lesson player)
@@ -650,6 +653,9 @@ def build_container(
         clock=clock)
     artifact_content = ArtifactContentService(artifacts)
     classes = ClassService(class_repo, memory, clock)
+    assignments = AssignmentService(SqlAssignmentRepository(sessions, clock), class_repo, memory, curriculum_service,
+                                    courses=courses, events=events, clock=clock)
+    curriculum_service.goal_lock = assignments.locks  # D7: what a learner may change on an assigned goal
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
@@ -669,6 +675,7 @@ def build_container(
                                 max_streams=settings.stream_max_streams)),
         classes=classes,
         lesson_releases=lesson_releases,
+        assignments=assignments,
         class_dashboard=ClassDashboardService(classes=classes, memory=memory, curriculum=curriculum_service,
                                               cycles=learning_cycle_service.repository,
                                               assessment=assessment_service.repository,

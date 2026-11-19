@@ -1160,6 +1160,78 @@ evidence from the append-only evidence model, and is not offered.
 
 Both tables are learner data, erased by the learner data deletion (`ERASED_TABLES`).
 
+## Class assignments
+
+Important item 3 (issue #62). A class's teacher assigns a goal (a target level) or course topics (units), with a
+deadline, to the whole class, and follows each learner's progress on it. There is no new goal or lesson concept: an
+assignment is a class-level template that is **materialized as one ordinary `LearningGoal` per learner**, so
+curricula, next actions, learning cycles, completion by mastery, the dashboard and the learner data deletion all work
+on it unchanged (`app/schemas/assignment.py`, `app/services/assignments.py`).
+
+| Route | What |
+|---|---|
+| `POST /classes/{id}/assignments` | Create: `title`, `description`, `domain`, exactly one of `target_level` (with an optional `framework_id`) or `topics`, `due_at` (an aware time; stored in UTC), optional `idempotency_key`. No learner list: always the whole class |
+| `GET /classes/{id}/assignments`, `/assignments/{aid}` | The class's assignments with totals; one assignment with each roster learner's progress |
+| `PATCH /classes/{id}/assignments/{aid}` | `title`, `description`, `due_at` only; the targets cannot change (422): cancel and assign again |
+| `POST /classes/{id}/assignments/{aid}/cancel` | Cancel (idempotent) |
+| `GET /learners/{id}/assignments` | The learner's assignments in the classes they are in now (a teacher reading a learner sees only their own classes') |
+
+- **Data.** `class_assignments` (the assignment; teacher data, names no learner, kept on a learner's deletion) and
+  `assignment_learners` (one row per learner it was given to: their goal id, `ASSIGNED` or `NOT_ASSIGNED`, when and
+  how; learner data, erased). Migration `0004_class_assignments`. The goal carries `metadata.assignment_id` and
+  `metadata.class_id`, `target_date = due_at`, and the concepts the topics or level were resolved to **once, at
+  creation** (a topic is the knowledge base concepts with that `topic`; a level, `targets_for_level`), with
+  `target_source: explicit`. `LearningGoal.completed_at` is new (in the goal's JSON body, no column).
+- **Materializing.** Creating gives the assignment to every learner on the roster; a learner who joins later gets
+  every active one in `POST /learners/{id}/classes`, with the original deadline (D5). Both are idempotent: the goal
+  id is `stable_id("goal", learner, assignment)`, made through `CurriculumService.create_goal` with the assignment id as
+  its idempotency key, then the learner's row is written. Repeating the create, or joining again, completes a run
+  that stopped part way. A late joiner whose assigned concepts are no longer all in the knowledge base still joins;
+  the assignment is `NOT_ASSIGNED` for them and the teacher sees that (D12).
+- **Teacher changes, without replanning (D10).** A change is written to the assignment under its row lock (its
+  `version` rises), then carried to each current member's goal by `SqlAssignmentRepository.sync_goal`, which takes the
+  assignment row lock again and writes the assignment's values as they are *then*: concurrent changes, a
+  materialization racing a change, and a cancellation racing a change all leave every goal at the latest values
+  (`tests/postgres/test_class_assignments_postgres.py`). No curriculum is rebuilt and no model is called: the deadline
+  is read when next actions are ranked. A COMPLETED or CANCELLED goal is never changed. Cancelling cancels the open
+  goals of the learners on the roster and archives their curricula.
+- **Goal writes are atomic.** A goal's every update (the learner's PATCH, a refresh completing it, a teacher's change)
+  is one read-modify-write of the stored goal under its row lock (`GoalRepository.update`), so none overwrites
+  another with a stale copy. Lock order: the learner's deletion lock and learner row (`_guard`), the assignment row,
+  the goal row.
+- **What the learner may change (D7, D13).** `CurriculumService.goal_lock` is `AssignmentService.locks`: a goal
+  materialized for this learner from an assignment of a class they are still in. On it the learner may change only
+  `priority` and pause or resume (`ACTIVE` <-> `PAUSED`); anything else, and any change of a COMPLETED or CANCELLED
+  assigned goal, is `409 GoalLocked`, checked before anything is resolved or written and again inside the atomic
+  update. A learner cannot make a goal of their own look assigned (the metadata keys are dropped).
+- **Leaving (D9).** A learner who leaves (or is removed) keeps the goal, unlocked; the teacher's views list only the
+  roster, and the teacher's later changes and cancellation no longer reach it. Joining again locks it again and
+  brings its title, description and deadline back to the assignment's, while the assignment is open; an open goal of
+  an assignment cancelled while they were away stays theirs, unlocked.
+- **Repeating a create.** The same idempotency key (or, without one, the same content) with the same targets returns
+  the stored assignment as it is now, even after its title or deadline changed; the same key with other targets is
+  409. The same content after the assignment was cancelled is a new assignment.
+- **Status, derived when read (D4, D8).** Per learner: `CANCELLED`, `NOT_ASSIGNED`, `COMPLETED` (the goal is
+  COMPLETED, or its mastery completion rule holds now), `OVERDUE` (not completed and *after* `due_at`: exactly at it
+  is not), `IN_PROGRESS` (a curriculum with evidence or teaching on an objective), `NOT_STARTED`; plus `paused`, per
+  topic `mastered/total`, and `completed_late`. Overdue is display only: nothing is cancelled, locked or sent.
+  The views are read-only, as the dashboard is (`curriculum()` progress computed now, nothing recorded).
+- **When it was completed (D11).** `completed_at` is set once, when a refresh completes the goal, to the time the
+  learner *first* reached the mastery: the timestamp of the earliest piece of evidence after which the completion
+  rule held, found by replaying the counted concepts' evidence and exposures forward, in one pass, through the
+  MasteryUpdater (`CurriculumTracker.completion_time`, `LearnerMemoryService.mastery_history`). So a refresh long
+  after the deadline does not make a goal mastered in time late, and neither practice after mastery nor a dip and a
+  regain before the refresh moves it. The latest evidence's time is used only when the replay never shows the rule
+  holding. Until a refresh records it, the views compute the same time read-only. Evidence recorded before the goal
+  existed counts like any other: a learner who had mastered the topics already completes it at that earlier time.
+- **Events** `assignment.created|updated|cancelled|materialized` carry ids, the status and counts, never the title or
+  description.
+- **UI.** The teacher's class page has an Assignments section (a form with the course, its topics or a level, and a
+  due date in the teacher's own time zone, default a week ahead at 23:59; no learner picker) and a page per assignment
+  (each learner's status, progress by topic, completed late, a "Change due date" form and "Cancel assignment"). The
+  student app's Today shows an assigned goal as "Assigned by your teacher in {class}", its due date, an Overdue or
+  Completed late badge, and only Pause/Resume and Priority controls; Progress lists the assignments.
+
 ## Deployment
 
 MVP item 8 ([deployment](deployment.md)). The layers are unchanged; what changes is how the outer services are

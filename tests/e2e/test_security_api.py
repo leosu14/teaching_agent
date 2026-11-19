@@ -74,12 +74,19 @@ def world(cycle_env_at):
         assert created.status_code == 201, created.text
         joined = a.post(f"/learners/{LEARNER}/classes", json={"join_code": created.json()["join_code"]})
         assert joined.status_code == 201, joined.text
-    ids = {"learner": LEARNER, "goal": c.curriculum_service.goals(LEARNER)[0].goal_id, "cycle": cycle.cycle_id,
+        own_goal = c.curriculum_service.goals(LEARNER)[0].goal_id
+        assigned = a.post(f"/classes/{created.json()['class_id']}/assignments",  # Important item 3: A gets a goal
+                          json={"title": "Preterite", "domain": "spanish", "topics": ["preterite"],
+                                "due_at": "2099-01-01T00:00:00Z"},
+                          headers=auth.headers(user_id=TEACHER_ID, roles=(TEACHER,)))
+        assert assigned.status_code == 201, assigned.text
+    ids = {"learner": LEARNER, "goal": own_goal, "cycle": cycle.cycle_id,
            "task": lesson_task, "evaluation": evaluation, "session": session, "item": "sec-item",
            "attempt": "sec-attempt", "lesson": c.artifacts.find(lesson_task, "lesson").artifact_id,
            # a learning cycle's own artifact: owned through the cycle, not a task
            "artifact": c.learning_cycle_service.artifacts(cycle.cycle_id)[0].artifact_id,
-           "class": created.json()["class_id"], "join_code": created.json()["join_code"]}
+           "class": created.json()["class_id"], "join_code": created.json()["join_code"],
+           "assignment": assigned.json()["assignment_id"]}
     yield env, ids, auth
 
 
@@ -151,9 +158,16 @@ def routes(ids: dict) -> list[tuple[str, str, dict | None]]:
         ("POST", f"/classes/{ids['class']}/lessons/{tid}/approve", {"note": "fine"}),
         ("POST", f"/classes/{ids['class']}/lessons/{tid}/reject", {"note": "no"}),
         ("POST", f"/classes/{ids['class']}/attempts/{ids['attempt']}/override", {"outcome": "CORRECT"}),
+        ("POST", f"/classes/{ids['class']}/assignments",
+         {"title": "Another", "domain": "spanish", "topics": ["subjunctive"], "due_at": "2099-01-01T00:00:00Z"}),
+        ("GET", f"/classes/{ids['class']}/assignments", None),
+        ("GET", f"/classes/{ids['class']}/assignments/{ids['assignment']}", None),
+        ("PATCH", f"/classes/{ids['class']}/assignments/{ids['assignment']}", {"title": "hijacked"}),
+        ("POST", f"/classes/{ids['class']}/assignments/{ids['assignment']}/cancel", None),
         ("DELETE", f"/classes/{ids['class']}/learners/{lid}", None),
         ("POST", f"/learners/{lid}/classes", {"join_code": ids["join_code"]}),
         ("GET", f"/learners/{lid}/classes", None),
+        ("GET", f"/learners/{lid}/assignments", None),
     ]
 
 
@@ -166,7 +180,8 @@ def template(path: str, ids: dict) -> str:
     names = {ids["learner"]: "learner_id", ids["goal"]: "goal_id", ids["task"]: "task_id",
              ids["evaluation"]: "task_id", ids["session"]: "session_id", ids["cycle"]: "cycle_id",
              ids["item"]: "item_id", ids["attempt"]: "attempt_id", ids["lesson"]: "lesson_id",
-             ids["artifact"]: "artifact_id", ids["class"]: "class_id"}
+             ids["artifact"]: "artifact_id", ids["class"]: "class_id",
+             ids["assignment"]: "assignment_id"}
     return "/".join("{" + names[part] + "}" if part in names else part for part in path.split("/"))
 
 
@@ -180,7 +195,7 @@ def snapshot(client: TestClient, ids: dict) -> dict:
              f"/goals/{ids['goal']}/curriculum/versions", f"/tasks/{ids['task']}", f"/tasks/{ids['evaluation']}",
              f"/teaching-sessions/{ids['session']}", f"/learners/{ids['learner']}/learning-cycles",
              f"/assessment-items/{ids['item']}/attempts?learner_id={ids['learner']}",
-             f"/learners/{ids['learner']}/classes"]
+             f"/learners/{ids['learner']}/classes", f"/learners/{ids['learner']}/assignments"]
     out = {}
     for path in reads:
         r = client.get(path)
