@@ -1217,11 +1217,13 @@ on it unchanged (`app/schemas/assignment.py`, `app/services/assignments.py`).
   topic `mastered/total`, and `completed_late`. Overdue is display only: nothing is cancelled, locked or sent.
   The views are read-only, as the dashboard is (`curriculum()` progress computed now, nothing recorded).
 - **When it was completed (D11).** `completed_at` is set once, when a refresh completes the goal, to the time the
-  learner *reached* the mastery: the timestamp of the piece of evidence after which the completion rule held and kept
-  holding, found by replaying the counted concepts' evidence and exposures through the MasteryUpdater
-  (`CurriculumTracker.completion_time`, `LearnerMemoryService.mastery_at`). So a refresh long after the deadline, or
-  practice after mastery, does not make a goal mastered in time late. Until a refresh records it, the views compute
-  the same time read-only.
+  learner *first* reached the mastery: the timestamp of the earliest piece of evidence after which the completion
+  rule held, found by replaying the counted concepts' evidence and exposures forward, in one pass, through the
+  MasteryUpdater (`CurriculumTracker.completion_time`, `LearnerMemoryService.mastery_history`). So a refresh long
+  after the deadline does not make a goal mastered in time late, and neither practice after mastery nor a dip and a
+  regain before the refresh moves it. The latest evidence's time is used only when the replay never shows the rule
+  holding. Until a refresh records it, the views compute the same time read-only. Evidence recorded before the goal
+  existed counts like any other: a learner who had mastered the topics already completes it at that earlier time.
 - **Events** `assignment.created|updated|cancelled|materialized` carry ids, the status and counts, never the title or
   description.
 - **UI.** The teacher's class page has an Assignments section (a form with the course, its topics or a level, and a

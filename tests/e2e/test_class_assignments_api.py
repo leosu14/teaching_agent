@@ -706,3 +706,82 @@ def test_a_learners_own_key_never_takes_an_assigned_goals_id(world) -> None:
         assigned = world.assigned_goal(late, aid)
         assert assigned.goal_id != own.json()["goal_id"]
         assert x.patch(f"/goals/{assigned.goal_id}", json={"title": "x"}).status_code == 409
+
+
+# --- D11: the time mastery was *first* reached ----------------------------------------------------------------------
+
+
+def wrong(learner_id: str, concept_id: str, start: datetime, count: int, tag: str) -> list[LearningEvidence]:
+    return [e.model_copy(update={"correctness": "incorrect", "score": 0.0})
+            for e in evidence(learner_id, concept_id, start, count, tag)]
+
+
+def first_mastered_by_prefix_replay(c, goal_id: str, as_of: datetime) -> datetime:
+    """An independent oracle: replay every prefix of the evidence from scratch (no shared code with the tracker's
+    single forward pass) and return the first evidence time at which every counted objective was mastered."""
+    goal = c.curriculum_service.goal(goal_id)
+    version = c.curriculum_service.engine.current(curriculum_id_for(goal_id))
+    objectives = [o for o in version.objectives if o.required]
+    ups = c.memory.updater
+    by_concept = {o.concept_id: sorted(c.memory.evidence(goal.learner_id, o.concept_id), key=lambda e: e.timestamp)
+                  for o in objectives}
+    times = sorted({e.timestamp for es in by_concept.values() for e in es if e.timestamp <= as_of})
+    for t in times:
+        if all((s := ups.replay(ups.initial(o.concept_id, "", ""), [e for e in by_concept[o.concept_id]
+                                                                    if e.timestamp <= t])).mastery
+               >= o.target_mastery and s.evidence_count >= o.evidence_required for o in objectives):
+            return t
+    raise AssertionError("never mastered")
+
+
+async def test_d11_completed_at_is_the_evidence_that_first_satisfied_mastery(world) -> None:
+    """Mastered, then lost (wrong answers), then regained, all before a late refresh: `completed_at` is the first
+    moment mastery held, exactly the evidence that first satisfied the rule, not the latest evidence, not the regain
+    and not the refresh."""
+    c = world.c
+    start = utcnow()
+    due = start + timedelta(minutes=30)
+    with world.client() as a:
+        aid = world.create(a, due)["assignment_id"]
+        goal = world.assigned_goal(LEARNER, aid)
+        await master(world, goal.goal_id, start)  # 6 correct answers on each concept, one second apart
+        for concept in ("es.present", "es.preterite"):
+            await c.learner_service.record_evidence(LEARNER, "spanish",
+                                                    wrong(LEARNER, concept, start + timedelta(minutes=40), 8, "dip"))
+            await c.learner_service.record_evidence(LEARNER, "spanish",
+                                                    evidence(LEARNER, concept, start + timedelta(hours=2), 12, "back"))
+        refresh = start + timedelta(days=3)
+        oracle = first_mastered_by_prefix_replay(c, goal.goal_id, refresh)
+        assert start <= oracle <= start + timedelta(seconds=6)  # in the first run of correct answers
+        # the dip really lost mastery: the rule held again only after the regain
+        dipped = start + timedelta(minutes=40, seconds=8)
+        assert first_mastered_by_prefix_replay(c, goal.goal_id, dipped) == oracle
+        target = next(o for o in c.curriculum_service.engine.current(curriculum_id_for(goal.goal_id)).objectives
+                      if o.concept_id == "es.preterite")
+        _, after_dip = list(c.memory.mastery_history(LEARNER, ["es.preterite"], dipped))[-1]
+        assert after_dip["es.preterite"].mastery < target.target_mastery  # mastery was lost in between
+        latest = max(e.timestamp for e in c.memory.evidence(LEARNER) if e.concept_id in ("es.present", "es.preterite"))
+        assert latest > start + timedelta(hours=2)
+        await c.curriculum_service.tracked(LEARNER, as_of=refresh)
+        stored = c.curriculum_service.goal(goal.goal_id)
+        assert stored.status.value == "COMPLETED"
+        assert stored.completed_at == oracle  # the evidence that first satisfied the rule
+        assert stored.completed_at != latest and stored.completed_at < due
+        [entry] = a.get(f"/learners/{LEARNER}/assignments").json()
+        assert entry["progress"]["completed_late"] is False
+
+
+async def test_d11_the_read_only_view_agrees_with_the_stored_completion(world) -> None:
+    c = world.c
+    start = utcnow()
+    with world.client() as a:
+        aid = world.create(a, start + timedelta(minutes=30))["assignment_id"]
+        goal = world.assigned_goal(LEARNER, aid)
+        await master(world, goal.goal_id, start)
+        when = start + timedelta(hours=1)
+        oracle = first_mastered_by_prefix_replay(c, goal.goal_id, when)
+        classroom = c.classes.repository.get(world.class_id)
+        row = next(x for x in c.assignments.detail(classroom, aid, as_of=when).learners if x.learner_id == LEARNER)
+        assert row.completed_at == oracle
+        await c.curriculum_service.tracked(LEARNER, as_of=when)
+        assert c.curriculum_service.goal(goal.goal_id).completed_at == oracle
