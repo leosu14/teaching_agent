@@ -20,6 +20,7 @@ from app.pedagogy.graph import ConceptGraph
 from app.schemas.curriculum import (
     CurriculumConfig,
     CurriculumObjective,
+    CurriculumStatus,
     CurriculumVersion,
     NextLearningAction,
     ProgressUpdate,
@@ -161,7 +162,11 @@ class CurriculumTracker:
                 raise LearnerDataGone()
             if update.goal_completed:
                 goal = self.complete(goal, version, as_of)
-                completed.add(goal.goal_id)
+                if goal.status == GoalStatus.COMPLETED:
+                    completed.add(goal.goal_id)
+                else:  # paused or cancelled meanwhile: not completed, and its curriculum follows the goal
+                    self.engine.set_status(curriculum_id_for(goal.goal_id), CurriculumStatus.ARCHIVED
+                                           if goal.status == GoalStatus.CANCELLED else CurriculumStatus.ACTIVE)
             current = self.engine.current(curriculum_id_for(goal.goal_id))
             if current is None:  # as above
                 raise LearnerDataGone()

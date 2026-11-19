@@ -52,8 +52,12 @@ class CurriculumBuild(Schema):
 async def create_goal(learner_id: str, body: GoalInput, response: Response,
                       c: Container = Depends(container)) -> LearningGoal:
     # Only an assignment makes an assigned goal (#62): a learner's own goal cannot claim to be one.
-    body = body.model_copy(update={"metadata": {k: v for k, v in body.metadata.items()
-                                                if k not in (ASSIGNMENT_KEY, CLASS_KEY)}})
+    # An assigned goal's id is keyed by its assignment id: a learner's own key never takes it first.
+    key = body.idempotency_key
+    if key is not None and key.startswith("asg_"):
+        key = f"own:{key}"
+    body = body.model_copy(update={"idempotency_key": key, "metadata": {
+        k: v for k, v in body.metadata.items() if k not in (ASSIGNMENT_KEY, CLASS_KEY)}})
     goal, created = await c.curriculum_service.create_goal(learner_id, body)
     if not created:
         response.status_code = 200

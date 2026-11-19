@@ -112,7 +112,13 @@ class AssignmentService:
             topics=topics, target_concepts=targets, due_at=data.due_at, created_at=now, updated_at=now)
         stored, created = self.repository.create(assignment)
         if not created and not self._same(stored, assignment):
-            raise AssignmentConflict(f"idempotency key {data.idempotency_key!r} was used for a different assignment")
+            raise AssignmentConflict("this idempotency key was used for a different assignment")
+        while not created and not stored.is_active and data.idempotency_key is None:
+            # The same content as a cancelled assignment: a new one (D6: cancel and assign again), not the old one.
+            # Its id follows from the cancelled one's, so a repeated request finds it again.
+            assignment = assignment.model_copy(update={"assignment_id": stable_id("asg", stored.assignment_id,
+                                                                                    "after-cancel")})
+            stored, created = self.repository.create(assignment)
         if created:
             self._emit(EventType.ASSIGNMENT_CREATED, stored, targets=len(targets), topics=len(topics))
         if stored.is_active:
@@ -180,18 +186,19 @@ class AssignmentService:
         and its curriculum is archived. A learner who already left keeps theirs (D9)."""
         self.get(classroom, assignment_id)
         now = self._clock()
+        made = []
 
         def change(current: ClassAssignment) -> ClassAssignment | None:
             if not current.is_active:
                 return None
+            made.append(True)  # decided under the row lock: of two racing cancels, one makes the change
             return current.model_copy(update={"status": AssignmentStatus.CANCELLED, "cancelled_at": now,
                                               "updated_at": now})
 
-        before = self.repository.get(assignment_id)
         stored = self.repository.update(assignment_id, change)
         if stored is None:
             raise AssignmentNotFound()
-        if before is not None and before.is_active:
+        if made:
             self._emit(EventType.ASSIGNMENT_CANCELLED, stored)
         self._propagate(stored)  # again on a repeated cancel: completes a run that stopped part way
         return self._summary(stored, self._clock())
@@ -228,7 +235,8 @@ class AssignmentService:
     def locks(self, goal: LearningGoal) -> bool:
         """Whether the learner's changes to this goal are limited (D7, D13): it was materialized from an assignment,
         for this learner, and they are on its class roster. While the assignment is active they may change its
-        priority and pause or resume it; once it is COMPLETED or CANCELLED (a cancelled assignment cancels it), nothing.
+        priority and pause or resume it; once the goal is COMPLETED or CANCELLED (a cancelled assignment cancels the
+        goals of its roster), nothing. An open goal of a cancelled assignment is not locked.
         A learner who left keeps the goal, unlocked (D9). A goal whose metadata merely names an assignment is not
         locked."""
         assignment_id = goal.metadata.get(ASSIGNMENT_KEY)
@@ -240,13 +248,20 @@ class AssignmentService:
         record = self.repository.learner(assignment_id, goal.learner_id)
         if record is None or record.goal_id != goal.goal_id:
             return False
+        if not assignment.is_active and goal.status in (GoalStatus.ACTIVE, GoalStatus.PAUSED):
+            # Cancelled while the learner was away (D9): the cancellation never reached this goal, so it is theirs
+            # now, whole, even after they rejoin. A goal the cancellation (or mastery) finished stays locked (D13).
+            return False
         return self._classes.member(assignment.class_id, goal.learner_id) is not None
 
     # --- materializing and propagating ------------------------------------------------------------------------------
 
     async def _materialize(self, assignment: ClassAssignment, learner_id: str, source: str) -> None:
-        """Give the learner the assignment, idempotently. A learner deleted meanwhile is skipped."""
+        """Give the learner the assignment, idempotently. A learner deleted meanwhile, or no longer on the roster (a
+        leave racing the create), is skipped."""
         try:
+            if self._classes.member(assignment.class_id, learner_id) is None:
+                return
             record = self.repository.learner(assignment.assignment_id, learner_id)
             if record is not None and record.state == MaterializedState.ASSIGNED:
                 self._sync(assignment.assignment_id, record)  # a rejoin: back to the assignment's current values
@@ -263,9 +278,10 @@ class AssignmentService:
                 # did not exist yet. Read the assignment again, under its lock, and write what it says now.
                 self._sync(assignment.assignment_id, record)
             if self._events is not None:
-                self._events.emit(EventType.ASSIGNMENT_MATERIALIZED, assignment_id=assignment.assignment_id,
-                                  class_id=assignment.class_id, learner_id=learner_id, state=record.state.value,
-                                  source=record.source)
+                with learner_writes(learner_id):  # the event names the learner: refused once they are deleted
+                    self._events.emit(EventType.ASSIGNMENT_MATERIALIZED, assignment_id=assignment.assignment_id,
+                                      class_id=assignment.class_id, learner_id=learner_id, state=record.state.value,
+                                      source=record.source)
         except (LearnerDataGone, UnknownLearner):
             return
 
@@ -353,7 +369,9 @@ class AssignmentService:
 
     @staticmethod
     def _same(stored: ClassAssignment, new: ClassAssignment) -> bool:
-        keys = ("title", "description", "domain", "framework_id", "target_level", "due_at")
+        """The same assignment as far as a repeated create can tell: the same targets. Its title, description and
+        deadline may have been changed since (a retry of the original create then returns it as it is now)."""
+        keys = ("domain", "framework_id", "target_level")
         return all(getattr(stored, k) == getattr(new, k) for k in keys) and \
             [t.topic for t in stored.topics] == [t.topic for t in new.topics]
 
@@ -408,7 +426,7 @@ class AssignmentService:
             started = any(p.evidence_count > 0 or p.status in (ObjectiveStatus.IN_PROGRESS, ObjectiveStatus.MASTERED)
                           for p in plan.progress.objectives)
             rule_holds = plan.progress.goal_complete
-            if rule_holds and goal.status != GoalStatus.COMPLETED:  # not recorded yet: when it was reached (D11)
+            if rule_holds and goal.status == GoalStatus.ACTIVE:  # not recorded yet: when it was reached (D11)
                 completed_at = self._curriculum.completion_time(goal, as_of)
         topics = [t.model_copy(update={"mastered": sum(c in mastered for c in a.concept_ids)})
                   for t, a in zip(topics, assignment.topics)]
@@ -416,7 +434,7 @@ class AssignmentService:
             status = LearnerAssignmentStatus.COMPLETED
         elif goal.status == GoalStatus.CANCELLED or not assignment.is_active:
             status = LearnerAssignmentStatus.CANCELLED
-        elif rule_holds:
+        elif rule_holds and goal.status == GoalStatus.ACTIVE:  # a paused goal is not completed while paused
             status = LearnerAssignmentStatus.COMPLETED
         elif past_due:
             status = LearnerAssignmentStatus.OVERDUE

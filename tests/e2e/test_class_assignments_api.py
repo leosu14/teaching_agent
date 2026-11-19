@@ -141,9 +141,9 @@ def test_creating_again_is_idempotent_and_a_reused_key_is_a_conflict(world) -> N
         again = a.post(url, json=assignment_body(due, idempotency_key="k1"), headers=teacher(world.auth))
         assert (first.status_code, again.status_code) == (201, 200)
         assert first.json()["assignment_id"] == again.json()["assignment_id"]
-        other = a.post(url, json=assignment_body(due, idempotency_key="k1", title="Something else"),
+        other = a.post(url, json=assignment_body(due, idempotency_key="k1", topics=["subjunctive"]),
                        headers=teacher(world.auth))
-        assert other.status_code == 409, other.text
+        assert other.status_code == 409, other.text  # the same key for other targets
         # without a key, the same content is the same assignment (a double submit)
         x = a.post(url, json=assignment_body(due), headers=teacher(world.auth))
         y = a.post(url, json=assignment_body(due), headers=teacher(world.auth))
@@ -613,3 +613,96 @@ def test_assignment_events_carry_ids_and_counts_never_the_teachers_text(world) -
         text = e.model_dump_json()
         assert "preterite" not in text.lower() and "Secret" not in text and "Finished actions" not in text
     assert sum(e.type == "assignment.materialized" for e in events) == 2
+
+
+# --- review findings ------------------------------------------------------------------------------------------------
+
+
+def test_d9_a_goal_whose_assignment_was_cancelled_while_away_is_the_learners_after_rejoining(world) -> None:
+    with world.client() as a, world.client(B) as b:
+        aid = world.create(a, utcnow() + timedelta(days=7))["assignment_id"]
+        goal = world.assigned_goal(B, aid)
+        b.delete(f"/classes/{world.class_id}/learners/{B}")
+        a.post(f"/classes/{world.class_id}/assignments/{aid}/cancel", headers=teacher(world.auth))
+        assert world.join(B).status_code == 201
+        assert world.c.curriculum_service.goal(goal.goal_id).status.value == "ACTIVE"  # the cancel never reached it
+        # not locked: B may change or cancel it
+        assert b.patch(f"/goals/{goal.goal_id}", json={"title": "Mine"}).status_code == 200
+        assert b.patch(f"/goals/{goal.goal_id}", json={"status": "CANCELLED"}).status_code == 200
+        # while A's goal, which the cancellation finished, stays locked (D13)
+        mine = world.assigned_goal(LEARNER, aid)
+        assert a.patch(f"/goals/{mine.goal_id}", json={"status": "ACTIVE"}).status_code == 409
+
+
+def test_a_deletion_just_after_the_record_leaves_no_event_naming_the_learner(world) -> None:
+    from sqlalchemy import select
+
+    from app.storage.orm import EventRow
+
+    late = "deleted-late-joiner"
+    world.c.learner_service.upsert(late, LearnerProfileInput(display_name="Gone"))
+    with world.client() as a:
+        world.create(a, utcnow() + timedelta(days=7))
+    repo = world.c.assignments.repository
+    real = repo.record_learner
+
+    def then_deleted(record):
+        stored = real(record)
+        world.c.learner_deletion.delete(late)
+        return stored
+
+    repo.record_learner = then_deleted
+    try:
+        world.join(late)
+    finally:
+        repo.record_learner = real
+    assert not world.c.learner_deletion.repository.holds_data(late)
+    with world.c._sessions() as s:
+        assert not [e for e in s.scalars(select(EventRow)) if late in e.body]
+    assert repo.for_learner(late) == []
+
+
+def test_two_racing_cancels_and_retries_after_changes(world) -> None:
+    due = utcnow() + timedelta(days=7)
+    with world.client() as a:
+        aid = world.create(a, due)["assignment_id"]
+        url = f"/classes/{world.class_id}/assignments"
+        a.patch(f"{url}/{aid}", json={"title": "Renamed"}, headers=teacher(world.auth))
+        retry = a.post(url, json=assignment_body(due), headers=teacher(world.auth))  # the original create again
+        assert retry.status_code == 200 and retry.json()["assignment_id"] == aid
+        assert retry.json()["title"] == "Renamed"
+        a.post(f"{url}/{aid}/cancel", headers=teacher(world.auth))
+        a.post(f"{url}/{aid}/cancel", headers=teacher(world.auth))
+        assert sum(e.type == "assignment.cancelled" for e in world.env.events) == 1
+        # the same content after a cancel is a new assignment, and a repeat finds that one
+        again = a.post(url, json=assignment_body(due), headers=teacher(world.auth))
+        assert again.status_code == 201 and again.json()["assignment_id"] != aid
+        assert again.json()["status"] == "ACTIVE"
+        repeat = a.post(url, json=assignment_body(due), headers=teacher(world.auth))
+        assert repeat.status_code == 200 and repeat.json()["assignment_id"] == again.json()["assignment_id"]
+
+
+async def test_reopening_a_completed_own_goal_clears_its_completion_time(world) -> None:
+    c = world.c
+    with world.client() as a:
+        made = a.post(f"/learners/{LEARNER}/goals", json={"title": "Own", "domain": "spanish",
+                                                         "target_concepts": ["es.preterite"]}).json()
+        await master(world, made["goal_id"], utcnow())
+        await c.curriculum_service.tracked(LEARNER, as_of=utcnow() + timedelta(minutes=5))
+        assert c.curriculum_service.goal(made["goal_id"]).completed_at is not None
+        reopened = a.patch(f"/goals/{made['goal_id']}", json={"status": "ACTIVE"}).json()["goal"]
+        assert reopened["status"] == "ACTIVE" and reopened["completed_at"] is None
+
+
+def test_a_learners_own_key_never_takes_an_assigned_goals_id(world) -> None:
+    late = "pre-empting-learner"
+    world.c.learner_service.upsert(late, LearnerProfileInput(display_name="Early"))
+    with world.client() as a, world.client(late) as x:
+        aid = world.create(a, utcnow() + timedelta(days=7))["assignment_id"]
+        own = x.post(f"/learners/{late}/goals", json={"title": "Mine", "domain": "spanish",
+                                                       "target_concepts": ["es.preterite"], "idempotency_key": aid})
+        assert own.status_code == 201
+        assert world.join(late).status_code == 201
+        assigned = world.assigned_goal(late, aid)
+        assert assigned.goal_id != own.json()["goal_id"]
+        assert x.patch(f"/goals/{assigned.goal_id}", json={"title": "x"}).status_code == 409

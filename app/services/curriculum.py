@@ -192,7 +192,10 @@ class CurriculumService:
         def apply(current: LearningGoal) -> LearningGoal:
             if locked:  # the lock's status rules hold against the goal as stored now (D7, D13)
                 check_assigned_update(current, data)
-            return LearningGoal.model_validate(current.model_copy(update={**update, "updated_at": now}).model_dump())
+            changes = {**update, "updated_at": now}
+            if current.status == GoalStatus.COMPLETED and update.get("status", current.status) != GoalStatus.COMPLETED:
+                changes["completed_at"] = None  # reopened: a completion time belongs to a completed goal only
+            return LearningGoal.model_validate(current.model_copy(update=changes).model_dump())
 
         # One atomic update of the stored goal: a concurrent change (a teacher's new deadline, a refresh completing
         # it) is applied before or after this one, never overwritten by a stale copy.

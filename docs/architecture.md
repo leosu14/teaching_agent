@@ -1206,7 +1206,11 @@ on it unchanged (`app/schemas/assignment.py`, `app/services/assignments.py`).
   update. A learner cannot make a goal of their own look assigned (the metadata keys are dropped).
 - **Leaving (D9).** A learner who leaves (or is removed) keeps the goal, unlocked; the teacher's views list only the
   roster, and the teacher's later changes and cancellation no longer reach it. Joining again locks it again and
-  brings its title, description and deadline back to the assignment's (when it is still open).
+  brings its title, description and deadline back to the assignment's, while the assignment is open; an open goal of
+  an assignment cancelled while they were away stays theirs, unlocked.
+- **Repeating a create.** The same idempotency key (or, without one, the same content) with the same targets returns
+  the stored assignment as it is now, even after its title or deadline changed; the same key with other targets is
+  409. The same content after the assignment was cancelled is a new assignment.
 - **Status, derived when read (D4, D8).** Per learner: `CANCELLED`, `NOT_ASSIGNED`, `COMPLETED` (the goal is
   COMPLETED, or its mastery completion rule holds now), `OVERDUE` (not completed and *after* `due_at`: exactly at it
   is not), `IN_PROGRESS` (a curriculum with evidence or teaching on an objective), `NOT_STARTED`; plus `paused`, per
