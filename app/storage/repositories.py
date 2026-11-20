@@ -380,7 +380,10 @@ class SqlTaskRepository:
     def stranded(self, statuses: Iterable[TaskStatus], *, idle: timedelta, limit: int = 100) -> list[str]:
         """Tasks in one of `statuses` that nobody is executing and nothing will continue: their worker's lease ran
         out (it died or hung), or no lease is held and the task has not changed for `idle`, and they have no active
-        (queued or running) job. Oldest first. Both are judged in database time."""
+        (queued or running) job. Oldest first. Lease expiry is judged in database time; "not changed for `idle`"
+        compares the task's `updated_at` (stamped by its writer's clock) with database time minus `idle`, so a
+        writer whose clock runs behind can make an unleased task look idle early. That only queues a RECOVER job,
+        which claims the task's lease before it runs: never a second execution."""
         active_job = select(TaskJobRow.job_id).where(TaskJobRow.task_id == TaskRow.task_id,
                                                      TaskJobRow.status.in_(_ACTIVE)).exists()
         with self._sessions() as s:
@@ -799,16 +802,16 @@ class SqlTeachingRepository:
                          TeachingSessionRow.version == expected_version]
                 values: dict = {"version": session.version, "status": session.status.value,
                                 "body": session.model_dump_json()}
-                if turn_lease is not None:  # fenced: only while the lease is this one and unexpired; given back
-                    where += [TeachingSessionRow.turn_lease_token == turn_lease.token,
-                              TeachingSessionRow.turn_lease_expires_ms > _ms(self._time.now(s))]
+                if turn_lease is not None:  # fenced: only while the stored lease is still this one; given back
+                    # The token alone fences: every claim writes a new one, so an unchanged token means nobody took
+                    # over, even when the lease ran out meanwhile (the holder's turns are then still the only ones).
+                    where.append(TeachingSessionRow.turn_lease_token == turn_lease.token)
                     values.update(turn_lease_token=None, turn_lease_expires_ms=None)
                 updated = s.execute(update(TeachingSessionRow).where(*where).values(**values))
                 if updated.rowcount != 1:
                     if turn_lease is not None and s.scalar(select(TeachingSessionRow.version).where(
                             TeachingSessionRow.session_id == session.session_id)) == expected_version:
-                        raise TurnLeaseLost(f"session {session.session_id}: the teaching-turn lease expired or was "
-                                            "taken over")
+                        raise TurnLeaseLost(f"session {session.session_id}: the teaching-turn lease was taken over")
                     raise SessionConflict(f"session {session.session_id} changed concurrently "
                                           f"(expected version {expected_version})")
                 self._add(s, change)
@@ -822,6 +825,7 @@ class SqlTeachingRepository:
     def claim_turns(self, session_id: str, ttl: timedelta) -> TurnLease | None:
         token = new_id("turnlease")
         with self._sessions.begin() as s:
+            _guard(s)  # serialised with the learner's data deletion (its lock first), which refuses a live lease
             now = self._time.now(s)
             until = now + ttl
             done = s.execute(update(TeachingSessionRow).where(
@@ -833,6 +837,7 @@ class SqlTeachingRepository:
 
     def renew_turns(self, lease: TurnLease, ttl: timedelta) -> TurnLease | None:
         with self._sessions.begin() as s:
+            _guard(s)
             now = self._time.now(s)
             until = now + ttl
             done = s.execute(update(TeachingSessionRow).where(
@@ -1418,7 +1423,8 @@ class SqlTaskJobRepository:
                 row = self._row(job)
                 database_now = self._time.database_now(s)
                 if database_now is not None:  # its backoff runs on the database's clock, like the claims that wait for it
-                    row.available_at_ms = _ms(database_now + max(job.available_at - self._clock(), timedelta(0)))
+                    # (the delay the caller asked for, measured on the caller's own clock: both stamps are from it)
+                    row.available_at_ms = _ms(database_now + max(job.available_at - job.created_at, timedelta(0)))
                 s.add(row)
         except IntegrityError:  # a concurrent enqueue for the same task won
             existing = self.active_for_task(job.task_id)

@@ -192,26 +192,72 @@ async def test_a_holder_whose_lease_was_taken_over_stores_nothing(teaching_env, 
     assert teacher_turns(env, sid) == produced and len(produced) == len(set(produced))
 
 
-async def test_a_turn_write_under_an_expired_lease_is_refused_and_stores_nothing(teaching_env) -> None:
+async def test_a_turn_write_is_fenced_by_the_lease_token(teaching_env) -> None:
+    """The token fences the turns' write: a lease that ran out but that nobody took over still stores its holder's
+    turns (they are the only ones produced); once another request claimed it, the old holder's write is refused."""
     env = teaching_env
     sid, _ = await owing_a_reply(env)
     repo = env.service.repository
+
+    def change():
+        session = repo.get(sid)
+        work = session.model_copy(deep=True)
+        work.version += 1
+        return SessionChange(session=work), session.version
+
     lease = repo.claim_turns(sid, timedelta(milliseconds=50))
-    session = repo.get(sid)
+    while repo.turn_lease(sid) is not None:  # ran out, nobody claimed it since
+        await asyncio.sleep(0.01)
+    assert repo.renew_turns(lease, timedelta(seconds=60)) is None  # an expired lease is never renewed
+    work, version = change()
+    repo.apply(work, expected_version=version, turn_lease=lease)  # stored, and the lease given back
+    assert repo.get(sid).version == version + 1 and repo.turn_lease(sid) is None
+
+    stale = repo.claim_turns(sid, timedelta(milliseconds=50))
     while repo.turn_lease(sid) is not None:
         await asyncio.sleep(0.01)
-    work = session.model_copy(deep=True)
-    work.version += 1
+    newer = repo.claim_turns(sid, timedelta(seconds=60))  # taken over
+    assert newer is not None and newer.token != stale.token
+    work, version = change()
     with pytest.raises(TurnLeaseLost):
-        repo.apply(SessionChange(session=work), expected_version=session.version, turn_lease=lease)
-    assert repo.get(sid).version == session.version
-    assert repo.renew_turns(lease, timedelta(seconds=60)) is None  # an expired lease is never renewed
-    newer = repo.claim_turns(sid, timedelta(seconds=60))
-    assert newer is not None and newer.token != lease.token
-    repo.release_turns(lease)  # the stale holder's release leaves the new lease alone
+        repo.apply(work, expected_version=version, turn_lease=stale)
+    assert repo.get(sid).version == version  # nothing stored
+    repo.release_turns(stale)  # the stale holder's release leaves the new lease alone
     assert repo.turn_lease(sid) is not None
     repo.release_turns(newer)
     assert repo.turn_lease(sid) is None
+
+
+async def test_a_repeat_of_an_answered_input_never_waits_on_a_later_reply(teaching_env) -> None:
+    """Review finding 3 of PR #67: the reply of `c1` is stored; replaying `c1` while `c2`'s reply is produced returns
+    `c1`'s stored result at once, without waiting for the holder or calling the teacher."""
+    env = teaching_env
+    sid = (await start(env)).session_id
+    data = await answer(env, sid, "c1")
+    first = await env.service.submit(sid, data)
+    assert first.teacher_turns
+    gate = Gate(env)
+    later = asyncio.create_task(env.service.submit(sid, await answer(env, sid, "c2")))
+    await gate.entered.wait()
+    again = await asyncio.wait_for(env.service.submit(sid, data), timeout=0.5)
+    assert again.replayed and [t.turn_id for t in again.teacher_turns] == [t.turn_id for t in first.teacher_turns]
+    assert gate.calls == 1
+    gate.open()
+    await later
+
+
+async def test_a_turn_lease_is_not_claimed_for_a_deleted_learner(teaching_env) -> None:
+    """The claim is a write for the learner: refused once their data is deleted (it takes the deletion lock first on
+    PostgreSQL, see tests/postgres/test_multi_replica_postgres.py)."""
+    from app.schemas.lease import LearnerDataGone, learner_writes
+
+    env = teaching_env
+    sid, _ = await owing_a_reply(env)
+    session = env.service.repository.get(sid)
+    with learner_writes("someone-deleted", session.task_id):
+        with pytest.raises(LearnerDataGone):
+            env.service.repository.claim_turns(sid, timedelta(seconds=60))
+    assert env.service.repository.turn_lease(sid) is None
 
 
 def test_the_api_answers_409_with_retry_after_while_a_reply_is_produced(teaching_env) -> None:

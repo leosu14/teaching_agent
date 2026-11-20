@@ -809,9 +809,11 @@ it lives in `AgentContext`; its state is a serializable `SessionState` stored wi
   teaching-turn lease (`TeachingSessionService._drive`): a request claims it (a conditional `UPDATE` of the session
   row, judged in database time), re-reads the session (a holder before it stores its turns and gives the lease back in
   one statement, so turns already produced are seen and not produced again), renews it every third of `TURN_LEASE`
-  (60 s) while the teacher call runs, and stores the turns with the lease's token and expiry checked in the same
-  statement as the version check (`TurnLeaseLost` otherwise: a holder whose lease ran out and was taken over stores
-  nothing). So concurrent requests on any API process make one teacher call per owed turn. Decision A4: a repeat of
+  (60 s) while the teacher call runs, and stores the turns with the lease's token checked in the same statement as
+  the version check (`TurnLeaseLost` otherwise: a holder whose lease ran out and was claimed by another request
+  stores nothing; every claim writes a new token, so an unchanged token means nobody took over). A repeat of an input
+  whose reply is already stored returns it without waiting. The claim and the renew are writes for the learner:
+  they take the learner's deletion lock first, like every guarded write. So concurrent requests on any API process make one teacher call per owed turn. Decision A4: a repeat of
   the same input (the same `client_turn_id`, an idempotent start, a resume) waits up to `TURN_WAIT_SECONDS` (5 s),
   polling the stored session, for the holder's result, then gets `TeachingTurnBusy` (409, `Retry-After`); a
   different input while a reply is produced gets that 409 at once, before any grading call. A holder whose call

@@ -411,3 +411,51 @@ def test_migration_0005_up_and_down_on_postgresql(fresh_db) -> None:
     command.upgrade(alembic_config(fresh_db), "head")
     assert lease <= columns()
 
+
+
+# --- the teaching-turn lease and learner data deletion ---------------------------------------------------------------
+
+
+def test_a_turn_lease_claim_is_serialised_with_the_learners_data_deletion() -> None:
+    """Review finding 2 of PR #67: a claim made while the learner's deletion runs waits for it (the deletion lock,
+    taken first by both), then gets no lease; a live lease makes the deletion LearnerDataBusy."""
+    from sqlalchemy import delete
+
+    from app.schemas.lease import LearnerDataGone, learner_writes
+    from app.schemas.privacy import LearnerDataBusy
+    from app.storage.orm import TeachingSessionRow
+    from app.storage.repositories import SqlLearnerDataRepository, SqlTeachingRepository
+
+    sessions = create_db(URL)
+    try:
+        repo, data = SqlTeachingRepository(sessions), SqlLearnerDataRepository(sessions)
+        sid = resource("teaching", sessions)
+        learner = repo.get(sid).learner_id
+        with learner_writes(learner, profile=False):
+            lease = repo.claim_turns(sid, timedelta(seconds=60))
+        assert lease is not None
+        with pytest.raises(LearnerDataBusy):
+            data.erase(learner)
+        repo.release_turns(lease)
+
+        result: dict = {}
+        with sessions.begin() as s:  # the deletion's transaction, as `_erase` runs it
+            data._lock(s, learner)
+            data._refuse_busy(s, learner)
+
+            def claim() -> None:
+                with learner_writes(learner, profile=False):
+                    try:
+                        result["lease"] = repo.claim_turns(sid, timedelta(seconds=60))
+                    except LearnerDataGone:
+                        result["lease"] = None
+
+            claimer = threading.Thread(target=claim)
+            claimer.start()
+            claimer.join(timeout=1)
+            assert claimer.is_alive(), "a turn lease was claimed while the learner's deletion ran"
+            s.execute(delete(TeachingSessionRow).where(TeachingSessionRow.session_id == sid))
+        claimer.join(timeout=30)
+        assert not claimer.is_alive() and result["lease"] is None
+    finally:
+        dispose(sessions)

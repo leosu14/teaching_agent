@@ -308,8 +308,18 @@ class TeachingSessionService:
     async def _replay(self, record: TeachingRequestRecord, digest: str) -> AnswerResult:
         if record.request_hash != digest:
             raise SessionConflict(f"client_turn_id {record.client_turn_id} was already used for a different input")
-        session = await self._drive(await self._load(record.session_id))  # finish a reply a failure interrupted
+        session = await self._load(record.session_id)
+        if not self._replied(session.session_id, record.turn_ids[0]):
+            session = await self._drive(session)  # finish a reply a failure interrupted
         return self._result(session, record.turn_ids[0], replayed=True)
+
+    def _replied(self, session_id: str, learner_turn_id: str) -> bool:
+        """Whether this input's reply is stored (a reply's turns are stored together, in one change): a repeat of it
+        then never waits on a later input's reply being produced."""
+        turns = self._repo.turns(session_id)
+        learner = next((t for t in turns if t.turn_id == learner_turn_id), None)
+        return learner is not None and any(t.sequence > learner.sequence and t.speaker != Speaker.LEARNER
+                                           for t in turns)
 
     def _result(self, session: TeachingSession, learner_turn_id: str, *, replayed: bool) -> AnswerResult:
         turns = self._repo.turns(session.session_id)

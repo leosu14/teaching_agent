@@ -189,3 +189,40 @@ def test_an_earlier_create_all_database_is_adopted_with_lesson_approval(tmp_path
     with engine.connect() as conn:
         assert conn.execute(text("SELECT lesson_approval FROM classes WHERE class_id = 'cls_old'")).scalar() == 0
     engine.dispose()
+
+
+def _database_from_before_the_teaching_turn_lease(u: str) -> None:
+    """A database an earlier version made: teaching sessions without the 0005 lease columns."""
+    dispose(create_db(u))
+    engine = create_engine(u)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE teaching_sessions DROP COLUMN turn_lease_token"))
+        conn.execute(text("ALTER TABLE teaching_sessions DROP COLUMN turn_lease_expires_ms"))
+        conn.execute(text("INSERT INTO teaching_sessions (session_id, learner_id, lesson_id, status, version, body) "
+                          "VALUES ('sess_old', 'l1', 'les1', 'ACTIVE', 1, '{}')"))
+    engine.dispose()
+
+
+def test_create_mode_adds_the_teaching_turn_lease_to_an_earlier_database(tmp_path) -> None:
+    """Review finding 1 of PR #67: without the columns, every teaching-session query failed in `create` mode."""
+    from datetime import timedelta
+
+    from app.storage.repositories import SqlTeachingRepository
+
+    u = url(tmp_path)
+    _database_from_before_the_teaching_turn_lease(u)
+    sessions = create_db(u)
+    try:
+        repo = SqlTeachingRepository(sessions)
+        assert repo.turn_lease("sess_old") is None
+        assert repo.claim_turns("sess_old", timedelta(seconds=60)) is not None
+    finally:
+        dispose(sessions)
+
+
+def test_an_earlier_create_all_database_is_adopted_with_the_teaching_turn_lease(tmp_path) -> None:
+    u = url(tmp_path)
+    _database_from_before_the_teaching_turn_lease(u)
+    report = upgrade(u)
+    assert report.adopted and report.after == HEAD
+    assert diffs(u) == [] and revision(u) == HEAD

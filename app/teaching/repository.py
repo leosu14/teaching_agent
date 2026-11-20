@@ -102,8 +102,9 @@ class InMemoryTeachingRepository:
             current = self._sessions.get(sid)
             if current is None or current.version != expected_version:
                 raise SessionConflict(f"session {sid} changed concurrently (expected version {expected_version})")
-            if turn_lease is not None and not self._live(turn_lease):
-                raise TurnLeaseLost(f"session {sid}: the teaching-turn lease expired or was taken over")
+            held = self._leases.get(sid)
+            if turn_lease is not None and (held is None or held.token != turn_lease.token):
+                raise TurnLeaseLost(f"session {sid}: the teaching-turn lease was taken over")
             sequences = {t.sequence for t in self._turns.get(sid, [])}
             if any(t.sequence in sequences for t in change.turns):
                 raise SessionConflict(f"session {sid}: turn sequence already stored")

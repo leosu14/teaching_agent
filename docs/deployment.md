@@ -256,8 +256,9 @@ database's clock on PostgreSQL (`clock_timestamp()`, read in each decision's own
 - **Database unreachable during a renew.** A task worker's or job's heartbeat that cannot reach the database keeps
   trying on its next beat; if the lease runs out meanwhile, the next holder takes over after expiry and every later
   write of the old holder is refused (`LeaseLost`, nothing stored). A teaching-turn holder whose renew fails tries again
-  on its next beat; if its lease runs out and another request takes over, its turns are refused (`TurnLeaseLost`)
-  and the request answers 409 `TeachingTurnBusy`; otherwise its turns are stored as usual. A paid call made under a lease that
+  on its next beat; if its lease runs out and another request claims it, its turns are refused (`TurnLeaseLost`)
+  and the request answers 409 `TeachingTurnBusy`; if nobody claimed it meanwhile, its turns are stored as usual
+  (the turns' write is fenced by the lease token, which every claim replaces). A paid call made under a lease that
   was lost is still recorded in the spend ledger (settlement is never fenced).
 - **Database unreachable when a decision is made.** No lease is claimed, no fenced write is made and no reservation
   (so no paid call) is made without reading the database's clock: those requests fail as any request does when the

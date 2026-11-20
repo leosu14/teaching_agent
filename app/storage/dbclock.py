@@ -6,8 +6,10 @@ reservation could be abandoned before its call ended. Every such decision is the
 database's.
 
 - PostgreSQL: `clock_timestamp()`, read inside the same transaction as the conditional statement it guards (a claim,
-  a renew, a fenced write, an expiry sweep). `clock_timestamp()` rather than `now()`: `now()` is the transaction's
-  start, which a transaction that waited on a row lock would see as stale.
+  a renew, a fenced write, an expiry sweep), just before that statement. `clock_timestamp()` rather than `now()`,
+  which is the transaction's start. The reading is taken before the statement, so a statement that then waits on a
+  row lock compares with a reading that is slightly old: it can only accept a lease that expired while it waited and
+  that nobody claimed (a claim changes the fencing token, and the write is refused).
 - SQLite (one machine, one clock) and the in-memory stores of unit tests: the injected clock, so tests that move time
   by injecting a clock keep doing so.
 
