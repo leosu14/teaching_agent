@@ -151,6 +151,10 @@ class TeachingSessionRow(Base):
     status: Mapped[str] = mapped_column(String(32))
     version: Mapped[int] = mapped_column(Integer)
     body: Mapped[str] = mapped_column(Text)
+    # The teaching-turn lease (issue #66 PR 1): who produces the teacher turns the session owes, until when (database
+    # time, epoch ms). Single-flight: a concurrent request makes no teacher call while it is live.
+    turn_lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    turn_lease_expires_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class TeachingTurnRow(Base):

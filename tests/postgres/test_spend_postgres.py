@@ -24,6 +24,7 @@ from app.storage.repositories import SqlSpendRepository, SqlTaskRepository
 from tests.integration.test_spend_concurrency import EACH, WORKERS, _process, check, race
 from tests.unit.test_spend_daily_scope import race_across_midnight
 from tests.unit.test_spend_run_cap import race_total
+from tests.postgres.dbclock import PinnedDbClock, ShiftedDbClock
 
 URL = os.environ.get("TA_TEST_POSTGRES_URL")
 pytestmark = pytest.mark.skipif(not URL, reason="set TA_TEST_POSTGRES_URL to run the PostgreSQL spend tests")
@@ -93,8 +94,9 @@ def test_fence_idempotency_and_sweep_on_postgres(store) -> None:
     assert spend.settle(a, done, now=utcnow()).outcome == "applied"
     assert spend.settle(a, done, now=utcnow()).outcome == "duplicate"
 
-    later = utcnow() + timedelta(minutes=6)
-    newer = SqlTaskRepository(tasks._sessions, lambda: later).claim(task_id, "w2", timedelta(minutes=5))
+    later = utcnow() + timedelta(minutes=6)  # in database time: the lease is judged by the database's clock
+    newer = SqlTaskRepository(tasks._sessions, db_clock=ShiftedDbClock(timedelta(minutes=6))).claim(
+        task_id, "w2", timedelta(minutes=5))
     assert newer is not None
     with pytest.raises(LeaseLost):
         spend.reserve(_reservation(task_id, b, fence=lease), fence=lease, now=later)
@@ -102,7 +104,8 @@ def test_fence_idempotency_and_sweep_on_postgres(store) -> None:
     c = new_id("preq")
     spend.reserve(_reservation(task_id, c, ttl=1), fence=None, now=utcnow())
     later = utcnow() + timedelta(seconds=5)
-    while spend.expire_abandoned(later):  # a reused database may hold older expired entries: a sweep takes 100
+    sweeper = SqlSpendRepository(spend._sessions, db_clock=ShiftedDbClock(timedelta(seconds=5)))  # 5 s later
+    while sweeper.expire_abandoned(later):  # a reused database may hold older expired entries: a sweep takes 100
         pass
     [swept] = [e for e in spend.entries(task_id=task_id) if e.entry_id == c]
     assert swept.state == SpendState.UNKNOWN and swept.error_type == "Abandoned"
@@ -113,7 +116,7 @@ def test_fence_idempotency_and_sweep_on_postgres(store) -> None:
 def test_workers_crossing_midnight_never_exceed_either_days_cap_on_postgres() -> None:
     """F8 on PostgreSQL: each reservation resolves its learner day, so workers whose clocks straddle midnight UTC
     race for two day counters; each day admits exactly its cap, and every counter equals the sum of its entries."""
-    race_across_midnight(URL)
+    race_across_midnight(URL, pinned=PinnedDbClock)
 
 
 def test_workers_never_pass_the_run_wide_cap_on_postgres() -> None:

@@ -222,7 +222,7 @@ def test_the_sweeper_queues_no_recovery_for_a_learner_deleted_meanwhile(sessions
     else:
         reader = SqlTaskRepository(sessions, clock)
         service._tasks = type("Read", (), {"get": lambda self, task_id: (reader.get(task_id), erase())[0]})()
-    report = TaskSweeper(tasks, jobs, service, clock=clock).sweep()
+    report = TaskSweeper(tasks, jobs, service).sweep()
     assert report.recovered == []
     with sessions() as s:
         assert s.scalars(select(TaskJobRow)).all() == [] and s.get(TaskRow, "t-stranded") is None

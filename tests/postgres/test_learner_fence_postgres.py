@@ -37,6 +37,7 @@ from app.storage.repositories import (
     SqlTaskRepository,
 )
 from tests.integration.test_fenced_learner_writes import taken_over, writes
+from tests.postgres.dbclock import ShiftedDbClock
 
 URL = os.environ.get("TA_TEST_POSTGRES_URL")
 pytestmark = pytest.mark.skipif(not URL, reason="set TA_TEST_POSTGRES_URL to run the PostgreSQL learner fence tests")
@@ -44,12 +45,8 @@ THREADS = 8
 AHEAD = TASK_LEASE + timedelta(seconds=1)
 
 
-class Clock:
-    def __init__(self, offset: timedelta = timedelta(0)) -> None:
-        self.offset = offset
-
-    def __call__(self):
-        return utcnow() + self.offset
+class Clock(ShiftedDbClock):
+    """Database time, moved by `offset` (leases are judged by the database's clock on PostgreSQL)."""
 
 
 @pytest.fixture
@@ -106,7 +103,7 @@ def test_concurrent_changes_to_one_profile_are_all_kept(sessions) -> None:
 @pytest.mark.parametrize("name", ["profile", "evidence", "learning_event", "goal", "curriculum_record",
                                   "curriculum_progress"])
 def test_a_stale_lease_stores_no_learner_or_curriculum_write(sessions, name) -> None:
-    stale, current = taken_over(sessions)
+    stale, current = taken_over(sessions, Clock(AHEAD))
     write, stored = writes(sessions)[name]
     with fenced_writes(stale), pytest.raises(LeaseLost):
         write()
@@ -154,7 +151,7 @@ def test_no_stale_write_commits_once_the_task_is_taken_over(sessions) -> None:
     writer = threading.Thread(target=write, args=(0,))
     writer.start()
     assert started.wait(60)
-    assert SqlTaskRepository(sessions, Clock(AHEAD)).claim(task.task_id, "new", TASK_LEASE) is not None
+    assert SqlTaskRepository(sessions, db_clock=Clock(AHEAD)).claim(task.task_id, "new", TASK_LEASE) is not None
     taken.set()
     writer.join(timeout=120)
     results = [ok for _, ok in outcomes]
@@ -205,9 +202,9 @@ def test_concurrent_sweepers_queue_one_recovery_job_per_stranded_task(sessions) 
     lock = threading.Lock()
 
     def sweep(_: int) -> None:
-        jobs = SqlTaskJobRepository(sessions, clock)
+        jobs = SqlTaskJobRepository(sessions, db_clock=clock)
         service = TaskService(None, tasks, None, None, jobs=jobs)  # only its job queue is used by the sweeper
-        sweeper = TaskSweeper(SqlTaskRepository(sessions, clock), jobs, service, batch=100_000, clock=clock)
+        sweeper = TaskSweeper(SqlTaskRepository(sessions, db_clock=clock), jobs, service, batch=100_000)
         barrier.wait()
         report = sweeper.sweep()
         with lock:
@@ -219,8 +216,8 @@ def test_concurrent_sweepers_queue_one_recovery_job_per_stranded_task(sessions) 
         for task_id in ids:
             assert recovered.count(task_id) == 1
             assert [j.status.value for j in jobs.for_task(task_id)] == ["QUEUED"]
-        assert not set(ids) & set(SqlTaskRepository(sessions, clock).stranded(STRANDED,
-                                                                                idle_before=clock(), limit=100_000))
+        assert not set(ids) & set(SqlTaskRepository(sessions, db_clock=clock).stranded(
+            STRANDED, idle=timedelta(0), limit=100_000))
     finally:
         jobs = SqlTaskJobRepository(sessions)
         for task_id in set(recovered):  # leave nothing queued for later runs (and other runs' leftovers)

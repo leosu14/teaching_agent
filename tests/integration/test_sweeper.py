@@ -24,7 +24,7 @@ from tests.integration.test_task_worker import worker
 
 def sweeper(container, clock: Clock) -> TaskSweeper:
     return TaskSweeper(container.task_service._tasks, SqlTaskJobRepository(container._sessions, clock),
-                       container.task_service, clock=clock)
+                       container.task_service)
 
 
 async def parked(container, llm):

@@ -228,11 +228,13 @@ WORKERS = 6
 EACH = 6  # 36 attempts, half on each day: more than either day's cap
 
 
-def _race(url: str, learner: str, start: threading.Barrier, out: list) -> None:
+def _race(url: str, learner: str, start: threading.Barrier, out: list, pinned=None) -> None:
     """One worker with its own engine and account. Its clock alternates between 23:59:59.9 and 00:00:00.1, so every
-    worker crosses midnight back and forth while the others do too."""
+    worker crosses midnight back and forth while the others do too. On PostgreSQL the database's clock decides the
+    day, so `pinned` (a database-clock fake) is moved with it."""
     sessions = create_db(url)
-    store = SqlSpendRepository(sessions)
+    pin = pinned() if pinned is not None else None
+    store = SqlSpendRepository(sessions, db_clock=pin)
     times = [BEFORE + timedelta(seconds=29.9), BEFORE + timedelta(seconds=30.1)]
     clock = Clock()
     acct = task_account(store, caps(TaskBudget(max_llm_requests=PER_DAY)), task_id=new_id("task"),
@@ -243,6 +245,8 @@ def _race(url: str, learner: str, start: threading.Barrier, out: list) -> None:
     try:
         for i in range(EACH):
             clock.now = times[i % 2]
+            if pin is not None:
+                pin.at = clock.now
             try:
                 r = reserve(acct)
             except BudgetExceededError:
@@ -275,12 +279,12 @@ def check_days(url: str, learner: str, results: list[dict]) -> None:
         dispose(sessions)
 
 
-def race_across_midnight(url: str) -> None:
+def race_across_midnight(url: str, pinned=None) -> None:
     learner = new_id("learner")
     dispose(create_db(url))
     results: list[dict] = []
     start = threading.Barrier(WORKERS)
-    threads = [threading.Thread(target=_race, args=(url, learner, start, results)) for _ in range(WORKERS)]
+    threads = [threading.Thread(target=_race, args=(url, learner, start, results, pinned)) for _ in range(WORKERS)]
     for t in threads:
         t.start()
     for t in threads:

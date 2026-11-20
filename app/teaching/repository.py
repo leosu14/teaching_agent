@@ -8,8 +8,11 @@ and keyed by deterministic ids, so a repeated transition can never store a secon
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Protocol
 
+from app.schemas.common import new_id, utcnow
 from app.schemas.teaching import (
     InteractionEvidence,
     OutboxItem,
@@ -18,6 +21,8 @@ from app.schemas.teaching import (
     TeachingRequestRecord,
     TeachingSession,
     TeachingTurn,
+    TurnLease,
+    TurnLeaseLost,
 )
 
 
@@ -26,9 +31,30 @@ class TeachingRepository(Protocol):
         """Store a new session; False when the session id exists (nothing is stored)."""
         ...
 
-    def apply(self, change: SessionChange, expected_version: int, request: TeachingRequestRecord | None = None) -> None:
+    def apply(self, change: SessionChange, expected_version: int, request: TeachingRequestRecord | None = None, *,
+              turn_lease: TurnLease | None = None) -> None:
         """Store the change if the stored session is still at `expected_version`; SessionConflict otherwise (also
-        for a duplicate turn sequence or client_turn_id)."""
+        for a duplicate turn sequence or client_turn_id). With `turn_lease` (teacher turns), the same statement also
+        requires that lease to be the stored one and unexpired, and gives it back: TurnLeaseLost otherwise."""
+        ...
+
+    # The teaching-turn lease: single-flight production of the teacher turns a session owes. Expiry is the
+    # database's clock on PostgreSQL, read in each statement's own transaction; the injected clock elsewhere.
+
+    def claim_turns(self, session_id: str, ttl: timedelta) -> TurnLease | None:
+        """Take the lease when no unexpired one is held; None while another request's lease runs."""
+        ...
+
+    def renew_turns(self, lease: TurnLease, ttl: timedelta) -> TurnLease | None:
+        """Extend a lease that is still current and unexpired; None once it ran out or was taken over."""
+        ...
+
+    def release_turns(self, lease: TurnLease) -> None:
+        """Give the lease back (nothing when it was taken over)."""
+        ...
+
+    def turn_lease(self, session_id: str) -> datetime | None:
+        """When the session's live lease ends; None when nobody holds one."""
         ...
 
     def get(self, session_id: str) -> TeachingSession | None: ...
@@ -51,7 +77,9 @@ class TeachingRepository(Protocol):
 
 
 class InMemoryTeachingRepository:
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], datetime] = utcnow) -> None:
+        self._clock = clock
+        self._leases: dict[str, TurnLease] = {}
         self._lock = threading.Lock()
         self._sessions: dict[str, TeachingSession] = {}
         self._turns: dict[str, list[TeachingTurn]] = {}
@@ -67,12 +95,15 @@ class InMemoryTeachingRepository:
             self._store(change)
             return True
 
-    def apply(self, change: SessionChange, expected_version: int, request: TeachingRequestRecord | None = None) -> None:
+    def apply(self, change: SessionChange, expected_version: int, request: TeachingRequestRecord | None = None, *,
+              turn_lease: TurnLease | None = None) -> None:
         sid = change.session.session_id
         with self._lock:
             current = self._sessions.get(sid)
             if current is None or current.version != expected_version:
                 raise SessionConflict(f"session {sid} changed concurrently (expected version {expected_version})")
+            if turn_lease is not None and not self._live(turn_lease):
+                raise TurnLeaseLost(f"session {sid}: the teaching-turn lease expired or was taken over")
             sequences = {t.sequence for t in self._turns.get(sid, [])}
             if any(t.sequence in sequences for t in change.turns):
                 raise SessionConflict(f"session {sid}: turn sequence already stored")
@@ -82,6 +113,41 @@ class InMemoryTeachingRepository:
             self._store(change)
             if request is not None:
                 self._requests[(sid, request.client_turn_id)] = request
+            if turn_lease is not None:
+                del self._leases[sid]
+
+    def _live(self, lease: TurnLease) -> bool:
+        held = self._leases.get(lease.session_id)
+        return held is not None and held.token == lease.token and held.until > self._clock()
+
+    def claim_turns(self, session_id: str, ttl: timedelta) -> TurnLease | None:
+        with self._lock:
+            now = self._clock()
+            held = self._leases.get(session_id)
+            if held is not None and held.until > now:
+                return None
+            lease = TurnLease(session_id=session_id, token=new_id("turnlease"), until=now + ttl)
+            self._leases[session_id] = lease
+            return lease.model_copy()
+
+    def renew_turns(self, lease: TurnLease, ttl: timedelta) -> TurnLease | None:
+        with self._lock:
+            if not self._live(lease):
+                return None
+            renewed = lease.model_copy(update={"until": self._clock() + ttl})
+            self._leases[lease.session_id] = renewed
+            return renewed.model_copy()
+
+    def release_turns(self, lease: TurnLease) -> None:
+        with self._lock:
+            held = self._leases.get(lease.session_id)
+            if held is not None and held.token == lease.token:
+                del self._leases[lease.session_id]
+
+    def turn_lease(self, session_id: str) -> datetime | None:
+        with self._lock:
+            held = self._leases.get(session_id)
+            return held.until if held is not None and held.until > self._clock() else None
 
     def _store(self, change: SessionChange) -> None:
         sid = change.session.session_id

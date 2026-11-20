@@ -42,7 +42,7 @@ def diffs(u: str) -> list:
         engine.dispose()
 
 
-HEAD = "0004_class_assignments"  # the newest revision: class assignments (Important item 3)
+HEAD = "0005_teaching_turn_lease"  # the newest revision: the teaching-turn lease (issue #66 PR 1)
 
 
 def test_one_head_on_top_of_the_baseline() -> None:

@@ -15,6 +15,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.observability.spend import abandoned
+from app.storage.dbclock import DbClock
 
 from app.schemas.artifact import Artifact, ObjectMissing
 from app.schemas.assessment import (
@@ -75,6 +76,8 @@ from app.schemas.teaching import (
     TeachingRequestRecord,
     TeachingSession,
     TeachingTurn,
+    TurnLease,
+    TurnLeaseLost,
 )
 from app.storage.orm import (
     ObjectDeletionRow,
@@ -140,12 +143,13 @@ def _require_fence(s: Session, lease: Lease, now: datetime) -> None:
         raise LeaseLost(lease)
 
 
-def _fence_current(s: Session, clock: Clock) -> None:
+def _fence_current(s: Session, time: DbClock) -> None:
     """Inside a learner-memory or curriculum write's transaction: when the write is made under a task's execution
-    (`fenced_writes`), refuse it unless that lease is still current and unexpired (see `_require_fence`)."""
+    (`fenced_writes`), refuse it unless that lease is still current and unexpired in database time (see
+    `_require_fence`)."""
     lease = write_fence()
     if lease is not None:
-        _require_fence(s, lease, clock())
+        _require_fence(s, lease, time.now(s))
     _guard(s)
 
 
@@ -248,9 +252,11 @@ class SqlTaskRepository:
     and refused while any worker holds a live lease. Both raise the version, so neither silently overwrites the other.
     """
 
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def create(self, task: Task) -> bool:
         """Insert a new task; False (nothing written) when the id exists."""
@@ -270,7 +276,6 @@ class SqlTaskRepository:
         """Write the task's body and status and raise its version. `clear_control` names requests ("pause",
         "cancel") the holder has acted on. Raises LeaseLost (leased) or WriteConflict (unleased); nothing is written
         then."""
-        now = self._clock()
         body = task.model_copy(update={"version": task.version + 1})
         values: dict = {"status": task.status.value, "updated_at": task.updated_at, "body": body.model_dump_json(),
                         "version": TaskRow.version + 1}
@@ -278,6 +283,7 @@ class SqlTaskRepository:
             values[{"pause": "pause_requested", "cancel": "cancel_requested"}[name]] = False
         with self._sessions.begin() as s:
             _guard_lock(s)
+            now = self._time.now(s)
             if lease is not None:
                 if lease.resource_id != task.task_id:
                     raise ValueError("the lease is for another task")
@@ -317,10 +323,11 @@ class SqlTaskRepository:
 
     def claim(self, task_id: str, owner: str, ttl: timedelta) -> Lease | None:
         """Take the task's lease when nobody holds a live one, raising its fencing generation: every earlier holder
-        is stale from this commit on. None while another worker's lease runs."""
-        now = self._clock()
-        until = now + ttl
+        is stale from this commit on. None while another worker's lease runs. Expiry and the new lease's end are
+        database time."""
         with self._sessions.begin() as s:
+            now = self._time.now(s)
+            until = now + ttl
             done = s.execute(update(TaskRow).where(
                 TaskRow.task_id == task_id,
                 or_(TaskRow.lease_owner.is_(None), TaskRow.lease_expires_ms <= _ms(now)))
@@ -335,9 +342,9 @@ class SqlTaskRepository:
     def renew(self, lease: Lease, ttl: timedelta) -> Lease | None:
         """Extend a lease that is still current and unexpired; None when it was lost (an expired lease is never
         renewed: it must be claimed again, which makes its old holder stale)."""
-        now = self._clock()
-        until = now + ttl
         with self._sessions.begin() as s:
+            now = self._time.now(s)
+            until = now + ttl
             done = s.execute(update(TaskRow).where(
                 TaskRow.task_id == lease.resource_id, TaskRow.lease_fence == lease.fence,
                 TaskRow.lease_owner == lease.owner, TaskRow.lease_expires_ms > _ms(now))
@@ -357,7 +364,7 @@ class SqlTaskRepository:
         with self._sessions() as s:
             row = s.get(TaskRow, lease.resource_id)
             return (row is not None and row.lease_fence == lease.fence and row.lease_owner == lease.owner
-                    and row.lease_expires_ms is not None and row.lease_expires_ms > _ms(self._clock()))
+                    and row.lease_expires_ms is not None and row.lease_expires_ms > _ms(self._time.now(s)))
 
     def lease(self, task_id: str) -> Lease | None:
         """The live lease on the task, if any (diagnostics)."""
@@ -365,23 +372,23 @@ class SqlTaskRepository:
             row = s.get(TaskRow, task_id)
             if row is None:
                 raise NotFound(task_id)
-            if row.lease_owner is None or row.lease_expires_ms is None or row.lease_expires_ms <= _ms(self._clock()):
+            if row.lease_owner is None or row.lease_expires_ms is None or row.lease_expires_ms <= _ms(self._time.now(s)):
                 return None
-            until = datetime.fromtimestamp(row.lease_expires_ms / 1000, tz=self._clock().tzinfo)
+            until = datetime.fromtimestamp(row.lease_expires_ms / 1000, tz=timezone.utc)
             return Lease(resource_id=task_id, owner=row.lease_owner, fence=row.lease_fence, until=until)
 
-    def stranded(self, statuses: Iterable[TaskStatus], *, idle_before: datetime, limit: int = 100) -> list[str]:
+    def stranded(self, statuses: Iterable[TaskStatus], *, idle: timedelta, limit: int = 100) -> list[str]:
         """Tasks in one of `statuses` that nobody is executing and nothing will continue: their worker's lease ran
-        out (it died or hung), or no lease is held and the task has not changed since `idle_before`, and they have no
-        active (queued or running) job. Oldest first."""
-        now_ms = _ms(self._clock())
+        out (it died or hung), or no lease is held and the task has not changed for `idle`, and they have no active
+        (queued or running) job. Oldest first. Both are judged in database time."""
         active_job = select(TaskJobRow.job_id).where(TaskJobRow.task_id == TaskRow.task_id,
                                                      TaskJobRow.status.in_(_ACTIVE)).exists()
         with self._sessions() as s:
+            now = self._time.now(s)
             return list(s.scalars(select(TaskRow.task_id).where(
                 TaskRow.status.in_([st.value for st in statuses]),
-                or_(TaskRow.lease_expires_ms <= now_ms,
-                    and_(TaskRow.lease_owner.is_(None), TaskRow.updated_at <= idle_before)),
+                or_(TaskRow.lease_expires_ms <= _ms(now),
+                    and_(TaskRow.lease_owner.is_(None), TaskRow.updated_at <= now - idle)),
                 ~active_job).order_by(TaskRow.updated_at, TaskRow.task_id).limit(limit)))
 
     # --- pause and cancel requests from other callers -------------------------------------------------------------
@@ -417,9 +424,11 @@ class SqlTaskRepository:
 
 
 class SqlEventRepository:
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def append(self, event: Event, fence: Lease | None = None) -> None:
         """Store an event once. With `fence` (written by a task's worker) only while that worker's lease is current;
@@ -430,7 +439,7 @@ class SqlEventRepository:
         highest visible `seq`: the progress stream's cursor cannot pass a row that becomes visible later."""
         with self._sessions.begin() as s:
             if fence is not None:
-                _require_fence(s, fence, self._clock())
+                _require_fence(s, fence, self._time.now(s))
             _guard(s)
             _lock_event_order(s)
             if s.scalar(select(EventRow.seq).where(EventRow.event_id == event.event_id)) is not None:
@@ -469,9 +478,11 @@ class SqlEventRepository:
 
 
 class SqlArtifactRepository:
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def add(self, artifact: Artifact, fence: Lease | None = None,
             object_exists: Callable[[], bool] | None = None) -> None:
@@ -485,11 +496,11 @@ class SqlArtifactRepository:
         try:
             with self._sessions.begin() as s:
                 if fence is not None:
-                    _require_fence(s, fence, self._clock())
+                    _require_fence(s, fence, self._time.now(s))
                 _guard(s)
                 if CONTENT_ADDRESSED in artifact.uri:
                     _lock_object(s, artifact.uri)
-                    _hold(s, artifact.uri, artifact.task_id, self._clock())
+                    _hold(s, artifact.uri, artifact.task_id, self._time.now(s))
                     if object_exists is not None and not object_exists():
                         raise ObjectMissing(artifact.uri)
                 self._insert(s, artifact)
@@ -502,9 +513,9 @@ class SqlArtifactRepository:
         in its own transaction (fenced by the worker's lease, refused for a deleted learner like any write): from its
         commit on, the object is not deleted until the owner's own data is."""
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)  # the worker's lease (`fenced_writes`) and the learner (`learner_writes`)
+            _fence_current(s, self._time)  # the worker's lease (`fenced_writes`) and the learner (`learner_writes`)
             _lock_object(s, uri)
-            _hold(s, uri, owner_id, self._clock())
+            _hold(s, uri, owner_id, self._time.now(s))
 
     @staticmethod
     def _insert(s: Session, artifact: Artifact) -> None:
@@ -545,9 +556,11 @@ class SqlLearnerRepository:
     against the read it was made from (`ProfileConflict` instead of a lost update) and, under a task's execution,
     fenced by the task's lease."""
 
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def get(self, learner_id: str) -> LearnerProfile | None:
         with self._sessions() as s:
@@ -561,7 +574,7 @@ class SqlLearnerRepository:
     def save(self, profile: LearnerProfile) -> None:
         conflict = ProfileConflict(f"learner {profile.learner_id} changed since it was read")
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)
+            _fence_current(s, self._time)
             version = _versioned_save(s, LearnerRow, LearnerRow.learner_id, profile.learner_id, profile._row_version,
                                       {"updated_at": profile.updated_at, "body": profile.model_dump_json()}, conflict)
         profile._row_version = version
@@ -570,13 +583,15 @@ class SqlLearnerRepository:
 class SqlEvidenceRepository:
     """Append-only evidence store: rows are inserted, never updated."""
 
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def add(self, evidence: LearningEvidence) -> bool:
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)
+            _fence_current(s, self._time)
             row = s.scalars(select(LearningEvidenceRow).where(
                 LearningEvidenceRow.evidence_id == evidence.evidence_id)).first()
             if row is not None:
@@ -599,13 +614,15 @@ class SqlEvidenceRepository:
 
 
 class SqlLearningEventRepository:
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def add(self, event: LearningEvent) -> bool:
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)
+            _fence_current(s, self._time)
             if s.scalars(select(LearningEventRow.seq).where(LearningEventRow.event_id == event.event_id)).first():
                 return False
             s.add(LearningEventRow(event_id=event.event_id, learner_id=event.learner_id, type=event.type,
@@ -620,13 +637,15 @@ class SqlLearningEventRepository:
 
 
 class SqlGoalRepository:
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def save(self, goal: LearningGoal) -> None:
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)
+            _fence_current(s, self._time)
             s.merge(LearningGoalRow(goal_id=goal.goal_id, learner_id=goal.learner_id, domain=goal.domain,
                                     status=goal.status.value, body=goal.model_dump_json()))
 
@@ -646,7 +665,7 @@ class SqlGoalRepository:
         (a teacher's deadline, the learner's pause, a refresh completing it) apply one after the other, and neither
         overwrites the other with a stale copy. `change` returning None writes nothing."""
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)
+            _fence_current(s, self._time)
             return _update_goal(s, goal_id, change)
 
 
@@ -678,14 +697,16 @@ class SqlCurriculumRepository:
     version-checked against the read it was made from (`RecordConflict`); under a task's execution every write is
     fenced by the task's lease."""
 
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def save_record(self, record: CurriculumRecord) -> None:
         conflict = RecordConflict(f"curriculum {record.curriculum_id} changed since it was read")
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)
+            _fence_current(s, self._time)
             version = _versioned_save(s, CurriculumRow, CurriculumRow.curriculum_id, record.curriculum_id,
                                       record._row_version, {"learner_id": record.learner_id,
                                                             "goal_id": record.goal_id,
@@ -711,7 +732,7 @@ class SqlCurriculumRepository:
 
     def add_version(self, version: CurriculumVersion) -> bool:
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)
+            _fence_current(s, self._time)
             row = s.get(CurriculumVersionRow, version.version_id)
             if row is not None:
                 existing = CurriculumVersion.model_validate_json(row.body)
@@ -736,7 +757,7 @@ class SqlCurriculumRepository:
 
     def save_progress(self, progress: CurriculumProgress) -> None:
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)
+            _fence_current(s, self._time)
             s.merge(CurriculumProgressRow(curriculum_id=progress.curriculum_id, body=progress.model_dump_json()))
 
     def progress(self, curriculum_id: str) -> CurriculumProgress | None:
@@ -747,10 +768,14 @@ class SqlCurriculumRepository:
 
 class SqlTeachingRepository:
     """Teaching sessions, turns, interaction evidence, applied requests and the outbox. Every change is one
-    transaction, applied only against the session version it was computed from."""
+    transaction, applied only against the session version it was computed from. The teaching-turn lease lives on
+    the session row: its claim, renewal and the fenced write of the turns produced under it judge expiry by the
+    database's clock (PostgreSQL) in their own statement's transaction."""
 
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
+        self._time = db_clock or DbClock(clock)
 
     def create(self, change: SessionChange) -> bool:
         try:
@@ -764,17 +789,26 @@ class SqlTeachingRepository:
             return False
         return True
 
-    def apply(self, change: SessionChange, expected_version: int, request: TeachingRequestRecord | None = None) -> None:
+    def apply(self, change: SessionChange, expected_version: int, request: TeachingRequestRecord | None = None, *,
+              turn_lease: TurnLease | None = None) -> None:
         session = change.session
         try:
             with self._sessions.begin() as s:
                 _guard(s)
-                updated = s.execute(
-                    update(TeachingSessionRow)
-                    .where(TeachingSessionRow.session_id == session.session_id,
-                           TeachingSessionRow.version == expected_version)
-                    .values(version=session.version, status=session.status.value, body=session.model_dump_json()))
+                where = [TeachingSessionRow.session_id == session.session_id,
+                         TeachingSessionRow.version == expected_version]
+                values: dict = {"version": session.version, "status": session.status.value,
+                                "body": session.model_dump_json()}
+                if turn_lease is not None:  # fenced: only while the lease is this one and unexpired; given back
+                    where += [TeachingSessionRow.turn_lease_token == turn_lease.token,
+                              TeachingSessionRow.turn_lease_expires_ms > _ms(self._time.now(s))]
+                    values.update(turn_lease_token=None, turn_lease_expires_ms=None)
+                updated = s.execute(update(TeachingSessionRow).where(*where).values(**values))
                 if updated.rowcount != 1:
+                    if turn_lease is not None and s.scalar(select(TeachingSessionRow.version).where(
+                            TeachingSessionRow.session_id == session.session_id)) == expected_version:
+                        raise TurnLeaseLost(f"session {session.session_id}: the teaching-turn lease expired or was "
+                                            "taken over")
                     raise SessionConflict(f"session {session.session_id} changed concurrently "
                                           f"(expected version {expected_version})")
                 self._add(s, change)
@@ -784,6 +818,41 @@ class SqlTeachingRepository:
                 s.flush()
         except IntegrityError as exc:
             raise SessionConflict(f"session {session.session_id}: the turn or request was already stored") from exc
+
+    def claim_turns(self, session_id: str, ttl: timedelta) -> TurnLease | None:
+        token = new_id("turnlease")
+        with self._sessions.begin() as s:
+            now = self._time.now(s)
+            until = now + ttl
+            done = s.execute(update(TeachingSessionRow).where(
+                TeachingSessionRow.session_id == session_id,
+                or_(TeachingSessionRow.turn_lease_token.is_(None),
+                    TeachingSessionRow.turn_lease_expires_ms <= _ms(now)))
+                .values(turn_lease_token=token, turn_lease_expires_ms=_ms(until)))
+        return TurnLease(session_id=session_id, token=token, until=until) if done.rowcount == 1 else None
+
+    def renew_turns(self, lease: TurnLease, ttl: timedelta) -> TurnLease | None:
+        with self._sessions.begin() as s:
+            now = self._time.now(s)
+            until = now + ttl
+            done = s.execute(update(TeachingSessionRow).where(
+                TeachingSessionRow.session_id == lease.session_id, TeachingSessionRow.turn_lease_token == lease.token,
+                TeachingSessionRow.turn_lease_expires_ms > _ms(now)).values(turn_lease_expires_ms=_ms(until)))
+        return lease.model_copy(update={"until": until}) if done.rowcount == 1 else None
+
+    def release_turns(self, lease: TurnLease) -> None:
+        with self._sessions.begin() as s:
+            s.execute(update(TeachingSessionRow).where(
+                TeachingSessionRow.session_id == lease.session_id, TeachingSessionRow.turn_lease_token == lease.token)
+                .values(turn_lease_token=None, turn_lease_expires_ms=None))
+
+    def turn_lease(self, session_id: str) -> datetime | None:
+        with self._sessions() as s:
+            row = s.get(TeachingSessionRow, session_id)
+            if row is None or row.turn_lease_token is None or row.turn_lease_expires_ms is None \
+                    or row.turn_lease_expires_ms <= _ms(self._time.now(s)):
+                return None
+            return datetime.fromtimestamp(row.turn_lease_expires_ms / 1000, tz=timezone.utc)
 
     @staticmethod
     def _session_row(session: TeachingSession) -> TeachingSessionRow:
@@ -849,9 +918,11 @@ class SqlAssessmentRepository:
 
     ATTEMPT_RETRIES = 5  # a concurrent attempt took the same attempt number: take the next one
 
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def _save(self, row_type, key: str, value, **columns) -> bool:
         digest = value.content_hash()
@@ -902,7 +973,7 @@ class SqlAssessmentRepository:
             try:
                 with self._sessions.begin() as s:
                     if fence is not None:
-                        _require_fence(s, fence, self._clock())
+                        _require_fence(s, fence, self._time.now(s))
                     _guard(s)
                     if s.get(AssessmentAttemptRow, attempt.attempt_id) is not None:
                         raise AttemptExists(attempt.attempt_id)
@@ -956,7 +1027,7 @@ class SqlAssessmentRepository:
                  fence: Lease | None = None) -> AssessmentAttempt:
         with self._sessions.begin() as s:
             if fence is not None:
-                _require_fence(s, fence, self._clock())
+                _require_fence(s, fence, self._time.now(s))
             _guard(s)
             row = s.get(AssessmentAttemptRow, attempt_id)
             if row is None:
@@ -977,8 +1048,14 @@ class SqlLearningCycleRepository:
     """Learning cycles, the one-active-cycle-per-learner slot and received responses. Every change is one transaction,
     applied only against the cycle version it was computed from."""
 
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
+        self._time = db_clock or DbClock(clock)
+
+    def database_now(self) -> datetime | None:
+        """The database's clock (PostgreSQL), which judges every drive lease; None elsewhere (the service's clock)."""
+        return self._time.read(self._sessions)
 
     def create(self, cycle: LearningCycle) -> bool:
         try:
@@ -1000,23 +1077,28 @@ class SqlLearningCycleRepository:
         return True
 
     def apply(self, cycle: LearningCycle, expected_version: int, request: CycleRequestRecord | None = None, *,
-              lease_token: str | None = None, at: datetime | None = None) -> None:
+              lease_token: str | None = None, at: datetime | None = None, claim: bool = False) -> None:
         """Write the change if the stored cycle is still `expected_version`. With `lease_token` (a driver's write) the
-        same statement also requires that lease to be the stored one and unexpired at `at`: CycleLeaseLost otherwise,
-        so a driver whose lease ran out or was taken over commits nothing."""
-        where = [LearningCycleRow.cycle_id == cycle.cycle_id, LearningCycleRow.version == expected_version]
-        if lease_token is not None:
-            where += [LearningCycleRow.lease_token == lease_token,
-                      LearningCycleRow.lease_expires_ms > _ms(at or utcnow())]
+        same statement also requires that lease to be the stored one and unexpired: CycleLeaseLost otherwise, so a
+        driver whose lease ran out or was taken over commits nothing. With `claim` (a new drive lease) it requires
+        that no unexpired lease is stored. Expiry is judged by the database's clock in this transaction on
+        PostgreSQL, else at `at`."""
         try:
             with self._sessions.begin() as s:
                 _guard(s)
+                now_ms = _ms(self._time.database_now(s) or at or self._time.now(s))
+                where = [LearningCycleRow.cycle_id == cycle.cycle_id, LearningCycleRow.version == expected_version]
+                if lease_token is not None:
+                    where += [LearningCycleRow.lease_token == lease_token, LearningCycleRow.lease_expires_ms > now_ms]
+                if claim:
+                    where.append(or_(LearningCycleRow.lease_token.is_(None),
+                                     LearningCycleRow.lease_expires_ms <= now_ms))
                 updated = s.execute(
                     update(LearningCycleRow).where(*where)
                     .values(version=cycle.version, status=cycle.status.value, body=cycle.model_dump_json(),
                             **_cycle_lease_columns(cycle)))
                 if updated.rowcount != 1:
-                    if lease_token is not None and s.scalar(select(LearningCycleRow.version).where(
+                    if (lease_token is not None or claim) and s.scalar(select(LearningCycleRow.version).where(
                             LearningCycleRow.cycle_id == cycle.cycle_id)) == expected_version:
                         raise CycleLeaseLost(f"cycle {cycle.cycle_id}: the drive lease expired or was taken over")
                     raise CycleConflict(f"cycle {cycle.cycle_id} changed concurrently "
@@ -1107,21 +1189,28 @@ class SqlSpendRepository:
 
     Every transaction starts with a write (SQLite: no read-to-write lock upgrade). PostgreSQL deadlocks and
     serialization failures, and SQLite's "database is locked", are retried a bounded number of times.
+
+    Time: on PostgreSQL the fence check, the abandoned-reservation cutoff and the stale-lease diagnostic read the
+    database's clock in their own transaction, and `database_now` gives callers the same clock for a reservation's day
+    scopes and expiry. A process clock that runs ahead can then neither abandon a live reservation early nor charge a
+    reservation to tomorrow. Elsewhere (SQLite) the caller's `now` decides, as before.
     """
 
     TRIES = 3
 
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def reserve(self, reservation: SpendReservation, *, fence: Lease | None, now: datetime) -> None:
         r = reservation
         for attempt in range(1, self.TRIES + 1):
             try:
                 with self._sessions.begin() as s:
-                    if fence is not None:
-                        _require_fence(s, fence, now)  # a worker that lost its task lease cannot start a paid call
+                    if fence is not None:  # a worker that lost its task lease cannot start a paid call
+                        _require_fence(s, fence, self._time.database_now(s) or now)
                     for c in sorted(r.charges, key=lambda c: (c.scope_key, c.metric)):
                         _ensure_counter(s, c.scope_key, c.metric, now)
                         where = [SpendCounterRow.scope_key == c.scope_key, SpendCounterRow.metric == c.metric]
@@ -1197,17 +1286,25 @@ class SqlSpendRepository:
                                     reserved=SpendCounterRow.reserved + d_reserved,
                                     settled=SpendCounterRow.settled + d_settled, updated_at=now))
                     return SettleResult(outcome="applied", totals=self._totals(s, keys),
-                                        stale_lease=self._stale(s, row, now))
+                                        stale_lease=self._stale(s, row, self._time.database_now(s) or now))
             except DBAPIError as exc:
                 if attempt < self.TRIES and _retryable(exc):
                     continue
                 raise
         raise AssertionError("unreachable")
 
+    def database_now(self) -> datetime | None:
+        """The database's clock (PostgreSQL), else None (the caller's clock decides)."""
+        return self._time.read(self._sessions)
+
     def expire_abandoned(self, now: datetime) -> list[str]:
+        """On PostgreSQL the cutoff is the database's clock, read in the sweep's own transaction (`now` only stamps
+        the settlements): a sweeper whose process clock runs ahead never abandons a reservation whose call may still
+        be running."""
         with self._sessions() as s:
+            cutoff = self._time.database_now(s) or now
             rows = s.scalars(select(SpendEntryRow).where(
-                SpendEntryRow.state == SpendState.RESERVED.value, SpendEntryRow.reserved_until_ms < _ms(now))
+                SpendEntryRow.state == SpendState.RESERVED.value, SpendEntryRow.reserved_until_ms < _ms(cutoff))
                 .order_by(SpendEntryRow.reserved_until_ms).limit(100)).all()
             entries = [self._entry(r) for r in rows]
         swept = []
@@ -1304,9 +1401,11 @@ class SqlTaskJobRepository:
 
     CANDIDATES = 8
 
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def enqueue(self, job: TaskJob) -> tuple[TaskJob, bool]:
         """Insert `job` unless its task already has an active job. Returns (the task's active job, inserted)."""
@@ -1316,7 +1415,11 @@ class SqlTaskJobRepository:
         try:
             with self._sessions.begin() as s:
                 _guard(s)
-                s.add(self._row(job))
+                row = self._row(job)
+                database_now = self._time.database_now(s)
+                if database_now is not None:  # its backoff runs on the database's clock, like the claims that wait for it
+                    row.available_at_ms = _ms(database_now + max(job.available_at - self._clock(), timedelta(0)))
+                s.add(row)
         except IntegrityError:  # a concurrent enqueue for the same task won
             existing = self.active_for_task(job.task_id)
             if existing is None:  # it already finished: this one is not a duplicate any more
@@ -1364,12 +1467,12 @@ class SqlTaskJobRepository:
             (TaskJobRow.status == JobStatus.QUEUED.value) & (TaskJobRow.available_at_ms <= now_ms),
             self._abandoned(now_ms) & (TaskJobRow.attempts < TaskJobRow.max_attempts))
 
-    def fail_exhausted(self, now: datetime | None = None) -> int:
-        """FAIL every job whose worker died (its lease ran out) on its last allowed attempt: a job that kills its
-        worker each time is not claimed forever. One conditional UPDATE, so a racing claim cannot also take it.
-        Returns how many jobs it failed."""
-        now = now or self._clock()
+    def fail_exhausted(self) -> int:
+        """FAIL every job whose worker died (its lease ran out, in database time) on its last allowed attempt: a job
+        that kills its worker each time is not claimed forever. One conditional UPDATE, so a racing claim cannot also
+        take it. Returns how many jobs it failed."""
         with self._sessions.begin() as s:
+            now = self._time.now(s)
             done = s.execute(update(TaskJobRow).where(
                 self._abandoned(_ms(now)), TaskJobRow.attempts >= TaskJobRow.max_attempts).values(
                 status=JobStatus.FAILED.value, lease_owner=None, lease_expires_ms=None,
@@ -1380,16 +1483,17 @@ class SqlTaskJobRepository:
     def claim(self, owner: str, ttl: timedelta) -> TaskJob | None:
         """Claim the oldest available job: a QUEUED one whose backoff has passed, or a RUNNING one whose worker's
         lease ran out (that worker died or hung; the claim counts as a new attempt). A RUNNING job whose worker died
-        on its last allowed attempt is FAILED instead (`fail_exhausted`). None when there is none."""
-        now = self._clock()
-        now_ms = _ms(now)
-        self.fail_exhausted(now)
+        on its last allowed attempt is FAILED instead (`fail_exhausted`). None when there is none. Backoff, expiry
+        and the new lease's end are database time, read in each claim's own transaction."""
+        self.fail_exhausted()
         with self._sessions() as s:
-            candidates = list(s.scalars(select(TaskJobRow.job_id).where(self._claimable(now_ms))
+            candidates = list(s.scalars(select(TaskJobRow.job_id).where(self._claimable(_ms(self._time.now(s))))
                                         .order_by(TaskJobRow.available_at_ms, TaskJobRow.created_at)
                                         .limit(self.CANDIDATES)))
         for job_id in candidates:
             with self._sessions.begin() as s:
+                now = self._time.now(s)
+                now_ms = _ms(now)
                 done = s.execute(update(TaskJobRow).where(TaskJobRow.job_id == job_id, self._claimable(now_ms))
                                  .values(status=JobStatus.RUNNING.value, lease_owner=owner,
                                          lease_expires_ms=_ms(now + ttl), attempts=TaskJobRow.attempts + 1,
@@ -1404,8 +1508,8 @@ class SqlTaskJobRepository:
 
     def renew(self, job_id: str, owner: str, ttl: timedelta) -> bool:
         """Extend the worker's claim; False once the job was reclaimed by another worker (or finished)."""
-        now = self._clock()
         with self._sessions.begin() as s:
+            now = self._time.now(s)
             done = s.execute(update(TaskJobRow).where(self._owned(job_id, owner), TaskJobRow.lease_expires_ms > _ms(now))
                              .values(lease_expires_ms=_ms(now + ttl), updated_at=now))
         return done.rowcount == 1
@@ -1413,8 +1517,8 @@ class SqlTaskJobRepository:
     def finish(self, job_id: str, owner: str, status: JobStatus, *, task_status: TaskStatus | None = None,
                error: str | None = None, error_category: JobErrorCategory | None = None) -> bool:
         """Record the job's outcome (DONE, FAILED or CANCELLED); False when the job is no longer this worker's."""
-        now = self._clock()
         with self._sessions.begin() as s:
+            now = self._time.now(s)
             done = s.execute(update(TaskJobRow).where(self._owned(job_id, owner)).values(
                 status=status.value, lease_owner=None, lease_expires_ms=None,
                 task_status=task_status.value if task_status is not None else None, error=error,
@@ -1425,15 +1529,16 @@ class SqlTaskJobRepository:
     def retry(self, job_id: str, owner: str, *, delay: timedelta, error: str | None = None,
               count_attempt: bool = True) -> bool:
         """Put the job back in the queue, not claimable for `delay`. `count_attempt=False` gives the attempt back
-        (the task was busy: nothing ran). False when the job is no longer this worker's."""
-        now = self._clock()
-        values: dict = {"status": JobStatus.QUEUED.value, "lease_owner": None, "lease_expires_ms": None,
-                        "available_at_ms": _ms(now + delay), "updated_at": now}
-        if error is not None:
-            values["error"] = error
-        if not count_attempt:
-            values["attempts"] = TaskJobRow.attempts - 1
+        (the task was busy: nothing ran). False when the job is no longer this worker's. The backoff ends at database
+        time plus `delay`."""
         with self._sessions.begin() as s:
+            now = self._time.now(s)
+            values: dict = {"status": JobStatus.QUEUED.value, "lease_owner": None, "lease_expires_ms": None,
+                            "available_at_ms": _ms(now + delay), "updated_at": now}
+            if error is not None:
+                values["error"] = error
+            if not count_attempt:
+                values["attempts"] = TaskJobRow.attempts - 1
             done = s.execute(update(TaskJobRow).where(self._owned(job_id, owner)).values(**values))
         return done.rowcount == 1
 
@@ -1708,9 +1813,11 @@ class SqlAssignmentRepository:
     as every other guarded write: the learner's deletion lock (shared) and learner row (`_guard`), then the assignment
     row, then the goal row."""
 
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     # --- assignments (teacher data) ------------------------------------------------------------------------------
 
@@ -1812,7 +1919,7 @@ class SqlAssignmentRepository:
         update the goal with `apply(assignment, goal)` (None writes nothing). Returns the goal as stored afterwards;
         None when the assignment or the goal is gone."""
         with self._sessions.begin() as s:
-            _fence_current(s, self._clock)
+            _fence_current(s, self._time)
             row = self._lock(s, assignment_id)
             if row is None:
                 return None
@@ -1933,9 +2040,11 @@ class SqlLearnerDataRepository:
 
     TRIES = 3
 
-    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow) -> None:
+    def __init__(self, sessions: sessionmaker[Session], clock: Clock = utcnow, *,
+                 db_clock: DbClock | None = None) -> None:
         self._sessions = sessions
         self._clock = clock
+        self._time = db_clock or DbClock(clock)  # lease, fence and expiry decisions (database time on PostgreSQL)
 
     def objects(self, learner_id: str) -> LearnerObjects:
         """The objects a deletion would delete now (LearnerDataBusy while work is in progress)."""
@@ -2107,7 +2216,7 @@ class SqlLearnerDataRepository:
                   .order_by(LearningCycleRow.cycle_id).with_for_update())
 
     def _refuse_busy(self, s: Session, learner_id: str) -> None:
-        now = _ms(self._clock())
+        now = _ms(self._time.now(s))
         leased_task = s.scalar(select(func.count()).select_from(TaskRow).where(
             TaskRow.learner_id == learner_id, TaskRow.lease_owner.is_not(None), TaskRow.lease_expires_ms > now))
         active_job = s.scalar(select(func.count()).select_from(TaskJobRow).join(
@@ -2116,7 +2225,10 @@ class SqlLearnerDataRepository:
         driven_cycle = s.scalar(select(func.count()).select_from(LearningCycleRow).where(
             LearningCycleRow.learner_id == learner_id, LearningCycleRow.lease_token.is_not(None),
             LearningCycleRow.lease_expires_ms > now))
-        if leased_task or active_job or driven_cycle:
+        teaching_turn = s.scalar(select(func.count()).select_from(TeachingSessionRow).where(
+            TeachingSessionRow.learner_id == learner_id, TeachingSessionRow.turn_lease_token.is_not(None),
+            TeachingSessionRow.turn_lease_expires_ms > now))
+        if leased_task or active_job or driven_cycle or teaching_turn:
             raise LearnerDataBusy()
 
     @staticmethod

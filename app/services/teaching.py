@@ -17,9 +17,12 @@ crash left unpublished, once.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
+import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.artifacts.service import ArtifactService
 from app.learner.memory import LearnerMemoryService
@@ -68,6 +71,8 @@ from app.schemas.teaching import (
     TeachingTurn,
     TeachingTurnInput,
     TurnBrief,
+    TurnLease,
+    TurnLeaseLost,
 )
 from app.schemas.usage import BudgetDefaults
 from app.services.assessment import AssessmentService
@@ -82,15 +87,25 @@ from app.teaching.errors import (
     InvalidTeachingRequest,
     TeacherUnavailable,
     TeachingSessionNotFound,
+    TeachingTurnBusy,
 )
 from app.teaching.repository import TeachingRepository
 
 __all__ = ["InvalidSessionTransition", "InvalidTeachingRequest", "SessionConflict", "TeacherUnavailable",
-           "TeachingSessionNotFound", "TeachingSessionService"]
+           "TeachingSessionNotFound", "TeachingSessionService", "TeachingTurnBusy"]
+
+logger = logging.getLogger(__name__)
 
 Status = TeachingSessionStatus
 GOAL_KEY, CURRICULUM_KEY = "goal_id", "curriculum_id"
 CONTROL_ATTEMPTS = 3  # pause / resume / cancel re-read the session after a concurrent change
+# The teaching-turn lease (issue #66 PR 1). Its holder renews it every third of its length while the teacher call
+# runs, so a live holder keeps it however long the call takes, and a killed one's lease runs out after TURN_LEASE.
+TURN_LEASE = timedelta(seconds=60)
+# Decision A4: a repeat of the same input while another request produces the reply waits this long for its result,
+# polling the stored session, then gets TeachingTurnBusy (409, Retry-After).
+TURN_WAIT_SECONDS = 5.0
+TURN_POLL_SECONDS = 0.05
 
 
 class TeachingSessionService:
@@ -98,8 +113,13 @@ class TeachingSessionService:
                  memory: LearnerMemoryService, knowledge: KnowledgeBase, curriculum: CurriculumService,
                  tasks: TaskService, events: EventBus, assessment: AssessmentService,
                  config: TeachingConfig | None = None, clock: Callable[[], datetime] = utcnow,
-                 spend: SpendStore | None = None, budgets: BudgetDefaults | None = None) -> None:
+                 spend: SpendStore | None = None, budgets: BudgetDefaults | None = None,
+                 turn_lease: timedelta = TURN_LEASE, turn_wait_seconds: float = TURN_WAIT_SECONDS,
+                 turn_poll_seconds: float = TURN_POLL_SECONDS) -> None:
         self._repo = repository
+        self._turn_lease = turn_lease
+        self._turn_wait = turn_wait_seconds
+        self._turn_poll = turn_poll_seconds
         self._spend = spend
         self._budgets = budgets or BudgetDefaults()
         self._runtime = runtime
@@ -220,6 +240,7 @@ class TeachingSessionService:
             record = self._repo.request(session_id, data.client_turn_id)
             if record is not None:
                 return await self._replay(record, digest)
+        self._refuse_while_replying(session)
         if data.kind == "answer":
             engine.require_answerable(session)
             graded = await self._assess(session, data.answer)
@@ -243,6 +264,13 @@ class TeachingSessionService:
         await self._publish(change.session)
         driven = await self._drive(change.session)
         return self._result(driven, learner_turn.turn_id, replayed=False)
+
+    def _refuse_while_replying(self, session: TeachingSession) -> None:
+        """A4: a new input while another request produces the reply owed is refused at once (TeachingTurnBusy),
+        before any grading call and without waiting: the reply it would wait for answers another input. Whether the
+        lease is live is the repository's decision, in database time."""
+        if session.status == Status.ACTIVE and self._repo.turn_lease(session.session_id) is not None:
+            raise TeachingTurnBusy(self._retry_after())
 
     async def _assess(self, session: TeachingSession, answer: str) -> AnswerAssessment:
         """Grade the answer to the open question through the AssessmentService. The attempt id is derived from the
@@ -437,9 +465,69 @@ class TeachingSessionService:
 
     async def _drive(self, session: TeachingSession) -> TeachingSession:
         """Produce every teacher turn the policy owes (status ACTIVE) and store them in one change. A failure stores
-        nothing: the session stays ACTIVE with the learner's input recorded, and the next call tries again."""
-        if session.status != Status.ACTIVE:
-            return session
+        nothing: the session stays ACTIVE with the learner's input recorded, and the next call tries again.
+
+        Single-flight across processes (issue #66 PR 1): the turns are produced only under the session's
+        teaching-turn lease, so concurrent requests (the same answer twice, a replay, a resume, on any API process)
+        make one teacher call per owed turn. A request that finds the lease held waits up to `turn_wait_seconds`
+        for the holder's stored result (decision A4), then raises TeachingTurnBusy; when the holder gave the lease
+        back without producing the turns (its call failed), or its lease ran out (it was killed), this request
+        claims the lease and produces them."""
+        deadline = time.monotonic() + self._turn_wait
+        while session.status == Status.ACTIVE:
+            lease = self._repo.claim_turns(session.session_id, self._turn_lease)
+            if lease is not None:
+                try:
+                    # What a holder before us stored is visible now (it stores its turns and gives the lease back in
+                    # one statement): the turns may no longer be owed.
+                    current = await self._load(session.session_id)
+                    if current.status != Status.ACTIVE:
+                        return current
+                    return await self._produce(current, lease)
+                finally:
+                    self._repo.release_turns(lease)  # nothing if `_produce` stored the turns (it gave it back)
+            if time.monotonic() >= deadline:
+                raise TeachingTurnBusy(self._retry_after())
+            await asyncio.sleep(self._turn_poll)
+            # A plain read: the holder publishes what it stored (publishing it here too would race it).
+            found = self._repo.get(session.session_id)
+            if found is None:
+                raise TeachingSessionNotFound(f"teaching session {session.session_id} not found")
+            session = found
+        return session
+
+    def _retry_after(self) -> int:
+        """The Retry-After of TeachingTurnBusy: a hint, about one wait (no lease time is compared to any clock here)."""
+        return max(1, round(self._turn_wait))
+
+    async def _produce(self, session: TeachingSession, lease: TurnLease) -> TeachingSession:
+        heartbeat = asyncio.create_task(self._renew_turns(lease))
+        try:
+            return await self._turns(session, lease)
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - a failed renew only ends the heartbeat
+                pass
+
+    async def _renew_turns(self, lease: TurnLease) -> None:
+        """Keep the lease while the teacher call runs; stops once it is lost (the turns' write is then refused). A
+        renew that cannot reach the database is tried again on the next beat."""
+        while True:
+            await asyncio.sleep(self._turn_lease.total_seconds() / 3)
+            try:
+                renewed = self._repo.renew_turns(lease, self._turn_lease)
+            except Exception:  # noqa: BLE001 - the database may be back on the next beat, before the lease ends
+                logger.warning("teaching session %s: renewing the teaching-turn lease failed; trying again",
+                               lease.session_id, exc_info=True)
+                continue
+            if renewed is None:
+                logger.warning("teaching session %s: the teaching-turn lease was lost during the teacher call",
+                               lease.session_id)
+                return
+
+    async def _turns(self, session: TeachingSession, lease: TurnLease) -> TeachingSession:
         m = self._lesson(session.lesson_id)
         now = self._clock()
         work = session.model_copy(deep=True)
@@ -468,11 +556,13 @@ class TeachingSessionService:
         change.outbox += engine.settle(work, now, narrative)
         change.session = work
         try:
-            self._repo.apply(change, expected_version=session.version)
-        except SessionConflict:
+            self._repo.apply(change, expected_version=session.version, turn_lease=lease)
+        except SessionConflict as exc:
             current = await self._load(session.session_id)
             if current.status != Status.ACTIVE:
                 return current  # another request produced these turns (or paused / cancelled the session) first
+            if isinstance(exc, TurnLeaseLost):  # this request's lease ran out and another request took over
+                raise TeachingTurnBusy(self._retry_after()) from None
             raise
         await self._publish(work)
         return self._repo.get(session.session_id) or work

@@ -461,7 +461,9 @@ def build_container(
     video_normalizer: VideoNormalizer | None = None,
     clock: Callable[[], datetime] = utcnow,
 ) -> Container:
-    """`clock` judges lease expiry (task leases and the learning cycle's drive lease); tests move it."""
+    """`clock` is the process clock. On SQLite it also judges lease, fence and spend-reservation expiry, and the daily
+    budget day (tests move it); on PostgreSQL the database's clock judges those for every process
+    (`app/storage/dbclock.py`), so process clocks that drift apart cannot let two processes hold one lease."""
     settings = settings or Settings()
     settings.validate_runtime()
     if settings.deployment == "production" and (problems := settings.deployment_problems()):
@@ -631,7 +633,7 @@ def build_container(
                              retry_backoff_seconds=settings.job_retry_backoff_seconds,
                              retry_max_backoff_seconds=settings.job_retry_max_backoff_seconds,
                              busy_retry_seconds=settings.job_busy_retry_seconds, clock=clock,
-                             sweeper=TaskSweeper(task_repo, jobs, task_service, clock=clock,
+                             sweeper=TaskSweeper(task_repo, jobs, task_service,
                                                  purge_objects=learner_deletion.purge_due),
                              sweep_seconds=settings.worker_sweep_seconds)
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
@@ -643,12 +645,12 @@ def build_container(
         overrides=grade_overrides)
     assessment_port.bind(assessment_service)
     teaching_service = TeachingSessionService(
-        SqlTeachingRepository(sessions), TeachingRuntime(agents, tools, router, events), artifacts=artifacts,
+        SqlTeachingRepository(sessions, clock), TeachingRuntime(agents, tools, router, events), artifacts=artifacts,
         memory=memory, knowledge=RetrieverKnowledgeBase(retriever), curriculum=curriculum_service,
         tasks=task_service, events=events, assessment=assessment_service, config=settings.teaching_config(),
         spend=spend, budgets=budgets)
     learning_cycle_service = LearningCycleService(
-        SqlLearningCycleRepository(sessions), curriculum=curriculum_service, tasks=task_service,
+        SqlLearningCycleRepository(sessions, clock), curriculum=curriculum_service, tasks=task_service,
         teaching=teaching_service, memory=memory, artifacts=artifacts, events=events, event_log=event_repo,
         clock=clock)
     artifact_content = ArtifactContentService(artifacts)

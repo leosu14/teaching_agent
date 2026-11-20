@@ -5,7 +5,7 @@ from __future__ import annotations
 from app.schemas.teaching import SessionConflict
 
 __all__ = ["InvalidSessionTransition", "InvalidTeachingRequest", "SessionConflict", "TeacherUnavailable",
-           "TeachingSessionNotFound"]
+           "TeachingSessionNotFound", "TeachingTurnBusy"]
 
 
 class TeachingSessionNotFound(KeyError):
@@ -31,6 +31,23 @@ class TeacherUnavailable(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(self.MESSAGE)
+
+    def __str__(self) -> str:
+        return self.MESSAGE
+
+
+class TeachingTurnBusy(RuntimeError):
+    """Another request is producing this session's teacher turns (it holds the teaching-turn lease). Nothing of this
+    request was stored and no teacher call was made for it (409, with `Retry-After`): a repeat of the same input waited
+    a few seconds for that request's result first; a different input is refused at once (decision A4, issue #66).
+
+    Fixed text: it says nothing about the other request."""
+
+    MESSAGE = "The teacher is still replying to this session. Retry shortly."
+
+    def __init__(self, retry_after: int = 1) -> None:
+        super().__init__(self.MESSAGE)
+        self.retry_after = max(1, int(retry_after))
 
     def __str__(self) -> str:
         return self.MESSAGE

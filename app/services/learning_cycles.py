@@ -73,6 +73,7 @@ from app.services.teaching import (
     InvalidTeachingRequest,
     TeacherUnavailable,
     TeachingSessionService,
+    TeachingTurnBusy,
 )
 from app.storage.repositories import SqlEventRepository
 
@@ -228,6 +229,8 @@ class LearningCycleService:
                                                                     client_turn_id=turn_id))
                 except TeacherUnavailable:
                     pass  # the answer is stored; the cycle sees the session owe a reply and blocks (provider)
+                except TeachingTurnBusy:
+                    pass  # stored, and another request is producing its reply: the cycle observes it running
                 except BudgetExhausted as exc:
                     if self._teaching.repository.request(child, turn_id) is None:  # refused at grading: not stored
                         await self._refused_by_budget(cycle.cycle_id, record, step, exc, token)
@@ -298,7 +301,8 @@ class LearningCycleService:
                 task = self._tasks.get(step.child_id)
                 if task.status in (TaskStatus.FAILED, TaskStatus.PAUSED):
                     await self._tasks.resume(step.child_id)
-        except (TeacherUnavailable, BudgetExhausted, InvalidTransition, InvalidSessionTransition, LeaseLost):
+        except (TeacherUnavailable, BudgetExhausted, InvalidTransition, InvalidSessionTransition, LeaseLost,
+                TeachingTurnBusy):
             pass  # still failing, or another worker runs it (TaskBusy): the next observation says which
 
     async def cancel(self, cycle_id: str) -> LearningCycleView:
@@ -348,8 +352,15 @@ class LearningCycleService:
         return cycle, await self._view(cycle)
 
     def lease_live(self, cycle: LearningCycle) -> bool:
-        """A drive lease that has not run out, whatever the cycle's status."""
-        return cycle.lease is not None and cycle.lease.until > self._clock()
+        """A drive lease that has not run out (in database time), whatever the cycle's status."""
+        return cycle.lease is not None and cycle.lease.until > self._lease_now()
+
+    def _lease_now(self) -> datetime:
+        """The time drive leases are judged by: the database's clock where the repository has one (PostgreSQL: the
+        same instant for every process, whatever their own clocks say), else the service's clock. Every lease write
+        re-checks expiry against the same clock in its own transaction."""
+        found = self._repo.database_now()
+        return found if found is not None else self._clock()
 
     def cycle(self, cycle_id: str) -> LearningCycle:
         found = self._repo.get(cycle_id)
@@ -400,12 +411,12 @@ class LearningCycleService:
             cycle = await self._load(cycle_id)
             if cycle.status not in ACTIVE_CYCLE_STATUSES:
                 return cycle, None
-            now = self._clock()
+            now = self._lease_now()
             change = engine.claim(cycle, now, now + self._lease)
             if change is None:
                 return cycle, None
             try:
-                self._repo.apply(change, expected_version=cycle.version)
+                self._repo.apply(change, expected_version=cycle.version, at=now, claim=True)
             except CycleConflict:
                 continue
             assert change.lease is not None
@@ -433,13 +444,13 @@ class LearningCycleService:
         cycle = await self._load(cycle_id)
         drive = token is not None
         for _ in range(MAX_TRANSITIONS):
-            now = self._clock()
+            now = self._lease_now() if drive else None
             if drive and (cycle.lease is None or cycle.lease.token != token or cycle.lease.until <= now):
                 drive = False  # the lease expired or was taken over: stop driving (expiry alone is enough)
             if cycle.status not in (CycleStatus.RUNNING, CycleStatus.WAITING):
                 break
             try:
-                if drive and cycle.lease is not None and cycle.lease.until - now < self._lease / 2:
+                if drive and now is not None and cycle.lease is not None and cycle.lease.until - now < self._lease / 2:
                     cycle = await self._commit(cycle, engine.renew(cycle, token, now, now + self._lease), token)
                 cycle, more = await self._step(cycle, token=token if drive else None)
             except CycleConflict:  # a newer version (reload and recompute), or the lease was lost (stop driving)
@@ -541,7 +552,8 @@ class LearningCycleService:
             started = await self._teaching.start(lesson, StartTeachingSession(idempotency_key=step.child_key,
                                                                                action=step.session_action))
             return started.session_id, False
-        except (TeacherUnavailable, BudgetExhausted):  # created, its opening failed: found by key, then observed
+        except (TeacherUnavailable, BudgetExhausted, TeachingTurnBusy):  # created, its opening failed or is being
+            # produced by another request: found by key, then observed
             found = self._find_child(cycle, step)
             if found is None:
                 raise
@@ -569,6 +581,8 @@ class LearningCycleService:
                     return self._failed(FailureKind.PROVIDER, True, TEACHER_FAILURE_MESSAGE, step)
                 except BudgetExhausted as exc:
                     return self._budget_failed(exc, step)
+                except TeachingTurnBusy:  # another request is producing the reply: observed as running, never twice
+                    pass
                 session = await self._teaching.get(step.child_id)
             return self._session_observation(session, step)
         task = self._tasks.get(step.child_id)
@@ -738,7 +752,8 @@ class LearningCycleService:
         the cycle. A driver's write (`token`) is also fenced: CycleLeaseLost once its lease expired or was taken."""
         if change is None:
             return cycle
-        self._repo.apply(change, expected_version=cycle.version, lease_token=token, at=self._clock())
+        self._repo.apply(change, expected_version=cycle.version, lease_token=token,
+                         at=self._lease_now() if token is not None else None)
         return await self._publish(change)
 
     async def _publish(self, cycle: LearningCycle) -> LearningCycle:
@@ -763,8 +778,7 @@ class LearningCycleService:
             prompt=await self._prompt(cycle) if with_prompt else None, failure=cycle.failure, outcome=cycle.outcome,
             artifact_ids=cycle.artifact_ids, created=created, replayed=replayed, created_at=cycle.created_at,
             updated_at=cycle.updated_at, completed_at=cycle.completed_at, version=cycle.version,
-            busy_until=cycle.lease.until if cycle.lease is not None and cycle.lease.until > self._clock()
-            and cycle.status in ACTIVE_CYCLE_STATUSES else None)
+            busy_until=cycle.lease.until if cycle.status in ACTIVE_CYCLE_STATUSES and self.lease_live(cycle) else None)
 
     async def _prompt(self, cycle: LearningCycle) -> LearnerPrompt | None:
         """The learner's view of the waiting point: never an answer key."""
