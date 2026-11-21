@@ -21,25 +21,22 @@ import pytest
 from app.config.settings import Settings
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.mock_responders import default_responders
-from app.schemas.common import new_id, utcnow
+from app.schemas.common import new_id
 from app.schemas.job import JobKind, JobStatus, TaskJob
 from app.schemas.task import Task, TaskStatus
 from app.services.container import build_container
 from app.storage.db import create_db, dispose
 from app.storage.repositories import SqlTaskJobRepository, SqlTaskRepository
 from tests.conftest import LEARNER, add_demo_learner, answers_for
+from tests.postgres.dbclock import ShiftedDbClock
 
 URL = os.environ.get("TA_TEST_POSTGRES_URL")
 pytestmark = pytest.mark.skipif(not URL, reason="set TA_TEST_POSTGRES_URL to run the PostgreSQL job queue tests")
 THREADS = 8
 
 
-class Clock:
-    def __init__(self) -> None:
-        self.offset = timedelta(0)
-
-    def __call__(self):
-        return utcnow() + self.offset
+class Clock(ShiftedDbClock):
+    """Database time, moved by `offset` (leases are judged by the database's clock on PostgreSQL)."""
 
 
 @pytest.fixture
@@ -142,7 +139,7 @@ def test_concurrent_claims_across_processes(repos) -> None:
 def test_an_expired_claim_is_reclaimed_and_the_old_worker_is_fenced_out(repos) -> None:
     _, tasks, sessions = repos
     clock = Clock()
-    jobs = SqlTaskJobRepository(sessions, clock)
+    jobs = SqlTaskJobRepository(sessions, db_clock=clock)
     task_id = _task(tasks)
     job, _ = jobs.enqueue(_job(task_id))
     while (first := jobs.claim("dead", timedelta(minutes=5))) is not None and first.job_id != job.job_id:
@@ -208,7 +205,7 @@ def test_a_job_whose_last_worker_died_is_failed_not_reclaimed_under_racing_claim
     """Its worker died on the job's last allowed attempt: racing claims all skip it and it ends FAILED, once."""
     _, tasks, sessions = repos
     clock = Clock()
-    jobs = SqlTaskJobRepository(sessions, clock)
+    jobs = SqlTaskJobRepository(sessions, db_clock=clock)
     job = _job(_task(tasks)).model_copy(update={"max_attempts": 1})
     jobs.enqueue(job)
     claimed = jobs.claim(new_id("dying"), timedelta(minutes=5))

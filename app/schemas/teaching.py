@@ -352,6 +352,21 @@ class SessionConflict(Exception):
     request (409). Nothing of this request was stored: it can be sent again."""
 
 
+class TurnLeaseLost(SessionConflict):
+    """The teacher turns were produced under a teaching-turn lease that expired or was taken over before they were
+    stored: nothing was stored (the holder that took over stores its own)."""
+
+
+class TurnLease(Schema):
+    """The right to produce the teacher turns a session owes (single-flight across processes), until `until`
+    (database time). Held by the request that claimed it under a random `token`; it is renewed across the teacher
+    call, and a killed holder's lease simply runs out."""
+
+    session_id: str
+    token: str
+    until: datetime
+
+
 class SessionChange(Schema):
     """Everything one transition stores, atomically: the new session (its version incremented), new turns, new
     evidence and the outbox items to publish once it is stored."""

@@ -27,6 +27,8 @@ ADDED_COLUMNS = {
     # Important item 2; revision 0003_teacher_review adds it on a migrated database. Listed here too so that a database
     # an earlier version made (`create` mode, or one `migrate` adopts) gets it like the columns above.
     "classes": {"lesson_approval": "BOOLEAN NOT NULL DEFAULT false"},
+    # Issue #66 PR 1; revision 0005_teaching_turn_lease adds them on a migrated database (same reason as above).
+    "teaching_sessions": {"turn_lease_token": "VARCHAR(64)", "turn_lease_expires_ms": "BIGINT"},
 }
 
 

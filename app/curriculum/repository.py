@@ -100,10 +100,16 @@ class LearningCycleRepository(Protocol):
         ...
 
     def apply(self, cycle: LearningCycle, expected_version: int, request: CycleRequestRecord | None = None, *,
-              lease_token: str | None = None, at: datetime | None = None) -> None:
+              lease_token: str | None = None, at: datetime | None = None, claim: bool = False) -> None:
         """Write the changed cycle (releasing the slot when it ends); CycleConflict on a stale version. With
-        `lease_token` (a driver's write), CycleLeaseLost unless the stored cycle's lease is that one and unexpired at
-        `at`, checked in the same transaction."""
+        `lease_token` (a driver's write), CycleLeaseLost unless the stored cycle's lease is that one and unexpired;
+        with `claim` (a new drive lease), CycleLeaseLost while an unexpired lease is stored. Checked in the same
+        transaction, by the database's clock where there is one (`database_now`), else at `at`."""
+        ...
+
+    def database_now(self) -> datetime | None:
+        """The shared database's clock (PostgreSQL), which judges every drive lease; None for a store without one
+        (in memory, SQLite): the service's clock judges then."""
         ...
 
     def get(self, cycle_id: str) -> LearningCycle | None: ...
@@ -139,14 +145,19 @@ class InMemoryLearningCycleRepository:
         self._slots[cycle.learner_id] = cycle.cycle_id
         return True
 
+    def database_now(self) -> datetime | None:
+        return None
+
     def apply(self, cycle: LearningCycle, expected_version: int, request: CycleRequestRecord | None = None, *,
-              lease_token: str | None = None, at: datetime | None = None) -> None:
+              lease_token: str | None = None, at: datetime | None = None, claim: bool = False) -> None:
         stored = self._cycles.get(cycle.cycle_id)
         if stored is None or stored.version != expected_version:
             raise CycleConflict(f"cycle {cycle.cycle_id} changed concurrently (expected version {expected_version})")
         if lease_token is not None and (stored.lease is None or stored.lease.token != lease_token
                                         or (at is not None and stored.lease.until <= at)):
             raise CycleLeaseLost(f"cycle {cycle.cycle_id}: the drive lease expired or was taken over")
+        if claim and stored.lease is not None and at is not None and stored.lease.until > at:
+            raise CycleLeaseLost(f"cycle {cycle.cycle_id}: another request holds the drive lease")
         if request is not None:
             key = (request.cycle_id, request.client_response_id)
             if key in self._requests:

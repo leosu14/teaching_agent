@@ -51,13 +51,16 @@ def evidence(learner_id: str, ref: str, concept: str = "c1") -> LearningEvidence
                             correctness="correct", score=1.0, difficulty=0.5, timestamp=utcnow())
 
 
-def taken_over(sessions):
-    """A task whose first worker's lease was taken over by a second: (stale lease, current lease)."""
+def taken_over(sessions, ahead=None):
+    """A task whose first worker's lease was taken over by a second: (stale lease, current lease). `ahead`: the
+    second worker's database-clock fake on PostgreSQL, where the database's clock judges expiry (else its process
+    clock runs ahead)."""
     tasks = SqlTaskRepository(sessions)
     task = Task(task_id=new_id("task"), user_id="u", learner_id="l1", request="r")
     tasks.create(task)
     stale = tasks.claim(task.task_id, "worker-a", TASK_LEASE)
-    current = SqlTaskRepository(sessions, Clock(AHEAD)).claim(task.task_id, "worker-b", TASK_LEASE)
+    later = SqlTaskRepository(sessions, Clock(AHEAD)) if ahead is None else SqlTaskRepository(sessions, db_clock=ahead)
+    current = later.claim(task.task_id, "worker-b", TASK_LEASE)
     assert stale is not None and current is not None and current.fence == stale.fence + 1
     return stale, current
 

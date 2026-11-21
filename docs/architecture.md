@@ -120,8 +120,24 @@ artifacts, results, grades, learner memory or curricula (`app/schemas/lease.py`,
   (`learning_cycle`, `learning_cycle_outcome`) are stored before and outside that commit, with no fence: a driver
   that lost its lease can leave an unreferenced artifact row (its content is deterministic, so the next driver
   reuses it by content hash).
-- **Time.** Expiry is judged by the process clock of whoever checks (`build_container(clock=...)`); with one
-  database and roughly synchronised clocks that is enough. Database time is a PR20 (multi-machine) concern.
+- **Teaching sessions** keep a teaching-turn lease on the session row (`turn_lease_token`, `turn_lease_expires_ms`,
+  migration `0005`): producing the teacher turns a session owes is single-flight (below, Interactive teaching
+  sessions).
+- **Time** (issue #66 PR 1). Every lease and fence decision is made against one clock, `DbClock`
+  (`app/storage/dbclock.py`): on PostgreSQL the database's `clock_timestamp()`, read inside the transaction of the
+  conditional statement it guards (a claim, a renew, a fenced write, the sweeper's and the learner deletion's
+  "is anything still leased" queries, a job's claim and backoff); on SQLite (one machine) and in the in-memory stores
+  of unit tests, the injected clock (`build_container(clock=...)`), which tests move. That covers the task lease, the
+  task-job lease, the learning cycle's drive lease (the service judges it by `database_now()` and the cycle write
+  re-checks it in its own statement), artifact holds, the sweeper, the teaching-turn lease, and in the spend ledger
+  the abandoned-reservation cutoff and the daily-cap day (below, Cost and observability). New leases end at database
+  time plus their TTL. The fencing token (`lease_fence`, the cycle's and the session's lease token) stays the safety
+  mechanism: a protected write checks the token and expiry in the same statement as before, so a reading taken a
+  moment before a statement that then waited on a row lock can only accept a lease that expired while it waited and
+  that nobody had claimed (a claim changes the token, and the write is refused). Several machines whose clocks drift
+  therefore agree on when a lease ended, and one whose clock runs ahead cannot take over early. What stays on process
+  clocks: monotonic timers that decide *when* to renew, and timestamps that are only recorded. A static test
+  (`tests/unit/test_database_time.py`) refuses a process-clock read in a lease, fence or expiry decision.
 
 ## Background worker
 
@@ -173,8 +189,9 @@ fencing and checkpoints above still apply unchanged.
   `TASK_LEASE`): telling a dead worker from a slow one sooner needs worker liveness, a later item.
 - **Scope.** This is the pilot setup: one API replica and one worker. Learner-memory and curriculum writes are fenced
   and versioned (above), so the worker and the API can write the same learner safely, and more worker processes on
-  one database are correct; learning cycles still run their child tasks inline in the request, and clocks and rate
-  limits are per process (the multi-replica items).
+  one database are correct, with leases judged by the database's clock (above, "Time"); learning cycles still run
+  their child tasks inline in the request, and rate limits, the research cache and the stream caps are per process
+  (the remaining multi-replica items, issue #66 PRs 2 and 3).
 
 ## Workflow engine
 
@@ -788,6 +805,21 @@ it lives in `AgentContext`; its state is a serializable `SessionState` stored wi
   stored result, with a different answer is a 409. Starting a session is idempotent per `idempotency_key`. Every
   write is an optimistic-locking update (`version`); a concurrent answer gets a 409 conflict and is never silently
   dropped or applied twice.
+- **Teaching-turn lease** (issue #66 PR 1). The teacher turns a session owes are produced only under its
+  teaching-turn lease (`TeachingSessionService._drive`): a request claims it (a conditional `UPDATE` of the session
+  row, judged in database time), re-reads the session (a holder before it stores its turns and gives the lease back in
+  one statement, so turns already produced are seen and not produced again), renews it every third of `TURN_LEASE`
+  (60 s) while the teacher call runs, and stores the turns with the lease's token checked in the same statement as
+  the version check (`TurnLeaseLost` otherwise: a holder whose lease ran out and was claimed by another request
+  stores nothing; every claim writes a new token, so an unchanged token means nobody took over). A repeat of an input
+  whose reply is already stored returns it without waiting. The claim and the renew are writes for the learner:
+  they take the learner's deletion lock first, like every guarded write. So concurrent requests on any API process make one teacher call per owed turn. Decision A4: a repeat of
+  the same input (the same `client_turn_id`, an idempotent start, a resume) waits up to `TURN_WAIT_SECONDS` (5 s),
+  polling the stored session, for the holder's result, then gets `TeachingTurnBusy` (409, `Retry-After`); a
+  different input while a reply is produced gets that 409 at once, before any grading call. A holder whose call
+  failed gives the lease back, and a waiting request then produces the reply; a killed holder's lease runs out after
+  `TURN_LEASE` and the next request produces it. A live teaching-turn lease makes a learner data deletion
+  `LearnerDataBusy`, like a task lease or a cycle's drive lease.
 - **Completion.** The summary (`TeachingSessionSummary`) is stored, then, once: each graded answer becomes
   `LearningEvidence` (`source_type: interaction`) recorded through `LearnerMemoryService.record_evidence` (practice
   sessions record none), the curriculum's objective progress is read back and `CurriculumService.next_action` selects
@@ -950,6 +982,13 @@ persisted and logged as JSON, so a task can be reconstructed from its event log.
 A failed task records a failure category (`ConfigurationError`, `BudgetExceededError`, `ProviderError`, or the stage:
 `ResearchError`, `VisualError`, `AudioError`, ...) classified from the typed errors in its cause chain
 (`app/runtime/failures.py`).
+
+Spend-ledger time (issue #66 PR 1): a reservation's UTC day (the learner and global daily caps) and its expiry
+(`reserved_until`) come from one reading of the database's clock (`SpendStore.database_now()`, PostgreSQL), and the
+abandoned-reservation sweep and the reservation's fence check read the database's clock in their own transactions. So
+every process charges the same UTC day whatever its own clock says, and a sweeper whose clock runs ahead never
+abandons a reservation whose call may still be running. On SQLite and in the in-memory store the account's clock
+decides, as before.
 
 ## Production runs
 

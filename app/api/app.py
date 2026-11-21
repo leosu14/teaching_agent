@@ -60,6 +60,7 @@ from app.services.teaching import (
     SessionConflict,
     TeacherUnavailable,
     TeachingSessionNotFound,
+    TeachingTurnBusy,
 )
 from app.storage.repositories import NotFound
 
@@ -102,6 +103,7 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
                              (LearnerDataBusy, 409), (InvalidCursor, 400), (TooManyStreams, 429),
                              (AssignmentConflict, 409), (InvalidAssignment, 422), (GoalLocked, 409)):
         app.add_exception_handler(exc_type, _handler(status))
+    app.add_exception_handler(TeachingTurnBusy, _turn_busy)
     app.add_exception_handler(AuthenticationFailed, _unauthenticated)
     app.add_exception_handler(Forbidden, _handler(403))
     app.add_exception_handler(ResourceNotFound, _handler(404, error="NotFound"))
@@ -125,6 +127,13 @@ def _handler(status: int, *, error: str | None = None):
         detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
         return JSONResponse(status_code=status, content={"error": error or type(exc).__name__, "detail": str(detail)})
     return handle
+
+
+async def _turn_busy(_request: Request, exc: Exception) -> JSONResponse:
+    """409 with Retry-After: another request is producing this session's teacher reply (decision A4, issue #66)."""
+    assert isinstance(exc, TeachingTurnBusy)
+    return JSONResponse(status_code=409, content={"error": "TeachingTurnBusy", "detail": str(exc)},
+                        headers={"Retry-After": str(exc.retry_after)})
 
 
 async def _unauthenticated(_request: Request, _exc: Exception) -> JSONResponse:

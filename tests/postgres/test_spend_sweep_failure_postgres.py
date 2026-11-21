@@ -23,6 +23,7 @@ from app.schemas.usage import BudgetDefaults
 from app.storage import repositories
 from app.storage.db import create_db, dispose
 from app.storage.repositories import SqlSpendRepository
+from tests.postgres.dbclock import ShiftedDbClock
 
 URL = os.environ.get("TA_TEST_POSTGRES_URL")
 pytestmark = pytest.mark.skipif(not URL, reason="set TA_TEST_POSTGRES_URL to run the PostgreSQL spend tests")
@@ -31,7 +32,9 @@ pytestmark = pytest.mark.skipif(not URL, reason="set TA_TEST_POSTGRES_URL to run
 @pytest.fixture
 def spend():
     sessions = create_db(URL)
-    yield SqlSpendRepository(sessions)
+    # Abandonment is judged by the database's clock on PostgreSQL: the store sees it 5 s ahead, so the 1 s
+    # reservations below have run out (the tests sweep "5 s later", as they once did with an injected clock).
+    yield SqlSpendRepository(sessions, db_clock=ShiftedDbClock(timedelta(seconds=5)))
     dispose(sessions)
 
 

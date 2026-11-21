@@ -29,10 +29,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from app.runtime.orchestrator.orchestrator import TASK_LEASE
-from app.schemas.common import utcnow
 from app.schemas.job import JobStatus
 from app.schemas.task import TaskStatus
 from app.services.tasks import TaskService
@@ -56,23 +55,23 @@ class SweepReport:
 
 class TaskSweeper:
     def __init__(self, tasks: SqlTaskRepository, jobs: SqlTaskJobRepository, service: TaskService, *,
-                 idle: timedelta = TASK_LEASE, batch: int = 100, clock: Callable[[], datetime] = utcnow,
+                 idle: timedelta = TASK_LEASE, batch: int = 100,
                  purge_objects: Callable[[], ObjectPurge] | None = None) -> None:
         self._tasks = tasks
         self._jobs = jobs
         self._service = service
         self._idle = idle
         self._batch = batch
-        self._clock = clock
         self._purge_objects = purge_objects
 
     def sweep(self) -> SweepReport:
-        """One pass. Safe to run from several processes at once: each task gets at most one active job."""
-        now = self._clock()
-        report = SweepReport(failed_jobs=self._jobs.fail_exhausted(now))
+        """One pass. Safe to run from several processes at once: each task gets at most one active job. Which leases
+        ran out, and how long a task has been idle, is judged by the repositories' clock: the database's on
+        PostgreSQL, so sweepers on machines whose clocks drift agree with every worker on when a lease ended."""
+        report = SweepReport(failed_jobs=self._jobs.fail_exhausted())
         if report.failed_jobs:
             logger.warning("sweeper: failed %d job(s) whose worker died on the last attempt", report.failed_jobs)
-        for task_id in self._tasks.stranded(STRANDED, idle_before=now - self._idle, limit=self._batch):
+        for task_id in self._tasks.stranded(STRANDED, idle=self._idle, limit=self._batch):
             latest = self._jobs.latest_for_task(task_id)
             if latest is not None and latest.status == JobStatus.FAILED:
                 report.left_failed.append(task_id)

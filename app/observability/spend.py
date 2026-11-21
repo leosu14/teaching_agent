@@ -10,9 +10,11 @@ Scopes (`kind:id`): `task:{task_id}`, `session:{session_id}` (an interactive tea
 (daily caps, UTC, only when configured), `total:all` (the run-wide cap, TA_BUDGET_TOTAL_MAX_COST_USD: every paid
 attempt of every account, never reset; only when configured), `local:{id}` (an in-memory ledger).
 
-A daily scope is resolved for each reservation, from the same clock reading that stamps the entry: an attempt
-reserved at 23:59:59 UTC belongs to that day, one reserved a second later to the next, whatever the age of the
-account (a task worker or a teaching session can outlive midnight). The entry keeps the scope keys it was reserved
+A daily scope is resolved for each reservation, from the same clock reading that stamps the entry and sets its
+expiry. That reading is the database's clock when the store has one (`SpendStore.database_now`, PostgreSQL), else
+the account's clock: every process charges the same UTC day, whatever its own clock says, and a reservation is
+abandoned only by database time. An attempt reserved at 23:59:59 UTC belongs to that day, one reserved a second later
+to the next, whatever the age of the account (a task worker or a teaching session can outlive midnight). The entry keeps the scope keys it was reserved
 under, and its settlement, a late real result and the abandoned-reservation sweep all adjust those same counters, so
 an attempt that crosses midnight is charged once, entirely to the day it was reserved on.
 
@@ -86,6 +88,10 @@ class SpendStore(Protocol):
 
     def seed(self, scope_key: str, settled: dict[str, int], *, now: datetime) -> bool:
         """Create a scope's counters with spend recorded before the ledger existed, unless it already has any."""
+
+    def database_now(self) -> datetime | None:
+        """The shared database's clock (PostgreSQL), which decides a reservation's UTC day and its expiry for every
+        process; None for a store without one (the in-memory store, SQLite: the account's clock decides)."""
 
 
 def task_scope(task_id: str) -> str:
@@ -198,7 +204,12 @@ class SpendAccount:
     @property
     def scope_keys(self) -> list[str]:
         """The scope keys a reservation made now would charge."""
-        return [s.key for s in self.scopes_at(self.clock())]
+        return [s.key for s in self.scopes_at(self.now())]
+
+    def now(self) -> datetime:
+        """The time of a reservation: the store's database clock when it has one, else the account's clock."""
+        found = self.store.database_now()
+        return found if found is not None else self.clock()
 
     def reserve(self, *, entry_id: str, operation_id: str, attempt: int, capability: Capability, operation: str,
                 provider: str, model: str | None, estimate: Estimate, timeout_seconds: float,
@@ -209,7 +220,7 @@ class SpendAccount:
         amounts = reservation_amounts(capability, operation, estimate)
         if not amounts:
             return None
-        now = self.clock()  # one reading: the entry's day scopes, its creation time and its expiry all come from it
+        now = self.now()  # one reading: the entry's day scopes, its creation time and its expiry all come from it
         scopes = self.scopes_at(now)
         charges = [Charge(scope_key=s.key, metric=m, amount=a, check=check_amount(m, a), limit=limit_for(s.budget, m))
                    for s in scopes for m, a in amounts.items()]
@@ -397,6 +408,9 @@ class InMemorySpendStore:
             if key in keys:
                 out.setdefault(key, {})[metric] = t.model_copy()
         return out
+
+    def database_now(self) -> datetime | None:
+        return None  # no database: the account's clock decides
 
     def seed(self, scope_key: str, settled: dict[str, int], *, now: datetime) -> bool:
         with self._lock:

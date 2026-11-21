@@ -58,7 +58,8 @@ The schema is versioned with Alembic (`app/storage/migrations/`). Revision `0001
 item 9); `0003_teacher_review` adds `classes.lesson_approval` (off) and the `lesson_releases` and `grade_overrides`
 tables of teacher review (Important item 2); `0004_class_assignments` adds the `class_assignments` and
 `assignment_learners` tables of class assignments (Important item 3; nothing to backfill: existing goals are not
-assigned). `python -m app.storage.migrate`:
+assigned); `0005_teaching_turn_lease` adds the two nullable teaching-turn lease columns to `teaching_sessions`
+(issue #66 PR 1; nothing to backfill: no session holds a lease). `python -m app.storage.migrate`:
 
 - `upgrade`: an empty database gets the whole schema; a database at an older revision is upgraded; a database that
   an earlier version made with `create_all` (no `alembic_version` table) is adopted: the tables and the columns of
@@ -240,9 +241,34 @@ or `WEB_CONCURRENCY`) or several API replicas would multiply both limits by the 
 than one API process until the caps are counted in a shared store; that belongs with the multi-replica readiness work
 below.
 
+## Time and leases
+
+Lease expiry, fencing, the sweeper, spend-reservation expiry and the daily budget's UTC day are judged by the
+database's clock on PostgreSQL (`clock_timestamp()`, read in each decision's own transaction; docs/architecture.md,
+"Time"), not by the clocks of the API and worker machines. Requirements and failure behaviour:
+
+- **Clocks.** Keep every host NTP-synchronised anyway (log timestamps, `created_at`), but a drifting API or worker
+  clock no longer lets two processes hold one lease, abandons a live reservation, or charges a call to the wrong day.
+  The database host's clock is the one that counts: it must be NTP-synchronised and must not jump backwards (a managed
+  PostgreSQL is). A backwards jump of the database clock lengthens every live lease by that amount; a forward jump
+  ends leases early, which the fencing token makes safe (a stale holder's writes are refused) at the cost of the
+  repeated work.
+- **Database unreachable during a renew.** A task worker's or job's heartbeat that cannot reach the database keeps
+  trying on its next beat; if the lease runs out meanwhile, the next holder takes over after expiry and every later
+  write of the old holder is refused (`LeaseLost`, nothing stored). A teaching-turn holder whose renew fails tries again
+  on its next beat; if its lease runs out and another request claims it, its turns are refused (`TurnLeaseLost`)
+  and the request answers 409 `TeachingTurnBusy`; if nobody claimed it meanwhile, its turns are stored as usual
+  (the turns' write is fenced by the lease token, which every claim replaces). A paid call made under a lease that
+  was lost is still recorded in the spend ledger (settlement is never fenced).
+- **Database unreachable when a decision is made.** No lease is claimed, no fenced write is made and no reservation
+  (so no paid call) is made without reading the database's clock: those requests fail as any request does when the
+  database is down.
+- **SQLite** (development, one machine) keeps the process clock.
+
 ## Known limits
 
-- One API replica (one Uvicorn process) and one worker: the multi-replica items (database-time leases, a shared rate
-  limiter, shared progress-stream caps) come after the MVP.
+- One API replica (one Uvicorn process) and one worker: the remaining multi-replica items (a shared rate limiter,
+  shared research cache, shared progress-stream caps, GET routes that do not write; issue #66 PRs 2 and 3) come next.
+  Database-time leases and the teaching-turn lease are in place (PR 1).
 - No metrics or alerting yet; `/health` and `check` are the readiness signals.
 - The login proxy is the deployment's choice and is not part of the image.
