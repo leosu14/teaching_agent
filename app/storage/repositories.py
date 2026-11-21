@@ -104,6 +104,7 @@ from app.storage.orm import (
     LearningCycleRow,
     LearningCycleSlotRow,
     LearningGoalRow,
+    ResearchCacheRow,
     SpendCounterRow,
     SpendEntryRow,
     TaskJobRow,
@@ -1962,13 +1963,16 @@ ERASED_TABLES = (
     "curriculum_progress", "tasks", "task_jobs", "events", "artifacts", "teaching_sessions", "teaching_turns",
     "interaction_evidence", "teaching_requests", "teaching_outbox", "assessment_items", "assessment_attempts",
     "assessment_grades", "learning_cycles", "learning_cycle_slots", "learning_cycle_requests", "class_members",
-    "object_holds", "lesson_releases", "grade_overrides", "assignment_learners",
+    "object_holds", "lesson_releases", "grade_overrides", "assignment_learners", "research_cache",
 )
 # Not learner data, or kept on purpose: classes, their assignments (which name no learner) and rubrics belong to
 # teachers and authors; the spend ledger holds ids
 # and amounts only and is what the budgets and daily caps count, so a deletion must not reset them. The object
 # deletion queue holds the references of objects still to delete, each removed as soon as its object is.
-KEPT_TABLES = ("classes", "class_assignments", "assessment_rubrics", "object_deletions") + RETAINED_RECORDS
+# The shared state's bookkeeping (issue #66 PR 2) holds no learner data: a provider's rate-limit window and slots, and
+# the open stream slots (a hash of the principal and an expiry, gone when the stream closes or the slot expires).
+KEPT_TABLES = ("classes", "class_assignments", "assessment_rubrics", "object_deletions", "rate_limit_starts",
+               "rate_limit_slots", "stream_slots") + RETAINED_RECORDS
 CONTENT_ADDRESSED = "objects/sha256/"  # app/artifacts/service.py: media stored once and shared by identical bytes
 _CHUNK = 500  # ids per IN list
 OBJECT_RETRY = timedelta(seconds=30)  # the first wait before an object deletion that failed is tried again
@@ -2120,7 +2124,7 @@ class SqlLearnerDataRepository:
             for row_type, table in ((LearningEvidenceRow, "learning_evidence"), (LearningEventRow, "learning_events"),
                                     (ClassMemberRow, "class_members"), (LessonReleaseRow, "lesson_releases"),
                                     (GradeOverrideRow, "grade_overrides"), (AssignmentLearnerRow, "assignment_learners"),
-                                    (LearnerRow, "learners")):
+                                    (ResearchCacheRow, "research_cache"), (LearnerRow, "learners")):
                 run(table, delete(row_type).where(row_type.learner_id == learner_id))
             now = self._clock()
             queued = []
@@ -2193,7 +2197,7 @@ class SqlLearnerDataRepository:
             if any((ids.tasks, ids.cycles, ids.sessions, ids.curricula, ids.goals, ids.items, ids.attempts)):
                 return True
             direct = (LearnerRow, LearningEvidenceRow, LearningEventRow, ClassMemberRow, LearningCycleSlotRow,
-                      AssignmentLearnerRow)
+                      AssignmentLearnerRow, ResearchCacheRow)
             if any(s.scalar(select(func.count()).select_from(r).where(r.learner_id == learner_id)) for r in direct):
                 return True
             return any(s.scalar(select(func.count()).select_from(EventRow)

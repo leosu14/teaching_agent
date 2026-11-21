@@ -43,9 +43,12 @@ Everything below is keyed by the learner id the gateway asserts (`X-Auth-Learner
 | Class assignments given to the learner: which assignment, their goal for it, when and how they got it (their goal itself is with the goals) | `assignment_learners` | |
 | Events outside a task that name the learner (goal created or changed, an assignment given to them) | `events` | |
 | Spend ledger: ids and amounts of paid provider calls | `spend_entries`, `spend_counters` | |
+| Research cache: web search results found for the learner's lessons, kept 7 days (the key is a hash of the query) | `research_cache` | |
 
 Not learner data: `classes` and `class_assignments` (a teacher's: an assignment names no learner),
-`assessment_rubrics` (an author's). Every table is in one of two lists in
+`assessment_rubrics` (an author's), and the shared state's bookkeeping: `rate_limit_starts` and `rate_limit_slots`
+(a provider's request counts), `stream_slots` (an open stream's slot: a SHA-256 of the principal and an expiry,
+deleted when the stream closes or the slot expires). Every table is in one of two lists in
 `app/storage/repositories.py`, `ERASED_TABLES` and `KEPT_TABLES`, and `tests/unit/test_learner_deletion.py` fails
 when a table is in neither, so a new table cannot hold learner data without deciding how it is deleted.
 

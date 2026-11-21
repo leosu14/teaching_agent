@@ -342,7 +342,8 @@ class Orchestrator:
             if not self._tasks.holds(lease):
                 raise LeaseLost(lease)
 
-        return ExecutionScope(events=self._events, usage=ledger, task_id=task.task_id, fence=lease, fence_check=check)
+        return ExecutionScope(events=self._events, usage=ledger, task_id=task.task_id, learner_id=task.learner_id,
+                              fence=lease, fence_check=check)
 
     def _claim(self, task_id: str) -> Lease:
         lease = self._tasks.claim(task_id, new_id("worker"), self._lease_ttl)

@@ -28,7 +28,15 @@ in it is sent. When the rule fails, or anything in the poll raises, the stream s
 even `end`. The data read in that poll is discarded.
 
 The loop is a coroutine: it sleeps on the event loop between polls and does each poll's reads in a worker thread,
-so an idle stream holds no thread. Open streams are capped per principal and per process (`TooManyStreams`)."""
+so an idle stream holds no thread.
+
+Caps. Open streams are capped per principal and in total (`TooManyStreams`, 429). With several API processes on one
+PostgreSQL database the caps are counted across all of them (`SharedStreamSlots`, issue #66 PR 2): each open stream
+holds a slot row (app/storage/shared_state.py, `stream_slots`, the only table a stream writes: decision A3), renewed
+every third of its TTL while the stream is open and deleted when it closes, ends, reconnects or is disconnected. A
+slot whose process died frees itself at its expiry. When the slot store cannot decide as a stream opens, the stream
+is refused (`StreamSlotsUnavailable`, 503); when a renew fails or finds the slot gone, the stream stops the way it
+does on access loss. In one process (development, SQLite) `StreamSlots` counts in memory."""
 
 from __future__ import annotations
 
@@ -41,9 +49,11 @@ import re
 import threading
 import time
 from collections import deque
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from app.schemas.events import LearnerEvent
 from app.schemas.job import ACTIVE_JOB_STATUSES, TaskJob
@@ -81,7 +91,11 @@ class InvalidCursor(ValueError):
 
 
 class TooManyStreams(Exception):
-    """The principal, or this process, has as many open streams as allowed (429)."""
+    """The principal, or the deployment, has as many open streams as allowed (429)."""
+
+
+class StreamSlotsUnavailable(Exception):
+    """The shared stream-slot store could not decide whether a stream may open (503): it is refused."""
 
 
 # --- the cursor ----------------------------------------------------------------------------------------------------
@@ -170,10 +184,13 @@ class StreamLimits:
     heartbeat_seconds: float = 15.0
     max_per_principal: int = 4
     max_streams: int = 200
+    slot_ttl_seconds: float = 60.0  # a shared slot's lease, renewed every third of it while the stream is open
 
 
 class StreamSlots:
-    """Counts open streams per principal and in total (this process)."""
+    """Counts open streams per principal and in total, in this process's memory (one process only)."""
+
+    renew_seconds: float | None = None  # nothing to renew
 
     def __init__(self, *, per_principal: int, total: int) -> None:
         self._per_principal = per_principal
@@ -214,6 +231,74 @@ class StreamSlot:
                 return
             self._held = False
         self._slots._release(self._principal)
+
+    def renew(self) -> bool:
+        return True
+
+
+class StreamSlotStore(Protocol):
+    """What the shared slots need of their store (app/storage/shared_state.py, `SqlStreamSlots`)."""
+
+    def acquire(self, principal: str, *, per_principal: int, total: int, ttl: timedelta) -> str | None: ...
+
+    def renew(self, slot_id: str, ttl: timedelta) -> bool: ...
+
+    def release(self, slot_id: str) -> None: ...
+
+    def open_count(self, principal: str | None = None) -> int: ...
+
+
+class SharedStreamSlots:
+    """The caps counted across every API process on the database (issue #66 PR 2)."""
+
+    def __init__(self, store: StreamSlotStore, *, per_principal: int, total: int, ttl: timedelta) -> None:
+        self._store = store
+        self._per_principal = per_principal
+        self._total = total
+        self.ttl = ttl
+        self.renew_seconds = ttl.total_seconds() / 3
+
+    def acquire(self, principal: str) -> SharedStreamSlot:
+        try:
+            slot_id = self._store.acquire(principal, per_principal=self._per_principal, total=self._total,
+                                          ttl=self.ttl)
+        except Exception as exc:  # noqa: BLE001 - no decision: refused (503), never opened without a slot
+            logger.warning("progress stream refused: the stream-slot store is unavailable (%s)", type(exc).__name__)
+            raise StreamSlotsUnavailable("progress streams are unavailable: retry later") from None
+        if slot_id is None:
+            raise TooManyStreams("too many open progress streams: close one or retry later")
+        return SharedStreamSlot(self._store, slot_id, self.ttl)
+
+    def open_count(self, principal: str | None = None) -> int:
+        return self._store.open_count(principal)
+
+
+class SharedStreamSlot:
+    def __init__(self, store: StreamSlotStore, slot_id: str, ttl: timedelta) -> None:
+        self._store = store
+        self.slot_id = slot_id
+        self._ttl = ttl
+        self._held = True
+        self._lock = threading.Lock()
+
+    def release(self) -> None:
+        with self._lock:
+            if not self._held:
+                return
+            self._held = False
+        try:
+            self._store.release(self.slot_id)
+        except Exception as exc:  # noqa: BLE001 - the slot frees itself at its expiry
+            logger.warning("progress stream: its slot could not be released; it frees itself at its expiry (%s)",
+                           type(exc).__name__)
+
+    def renew(self) -> bool:
+        """Whether the slot is still held after the renew (False: the stream must stop)."""
+        try:
+            return self._store.renew(self.slot_id, self._ttl)
+        except Exception as exc:  # noqa: BLE001 - the stream stops; its slot frees itself at its expiry
+            logger.warning("progress stream: its slot could not be renewed (%s)", type(exc).__name__)
+            return False
 
 
 # --- frames ----------------------------------------------------------------------------------------------------------
@@ -266,7 +351,7 @@ AccessCheck = Callable[[], object]  # raises when the caller may no longer read 
 class ProgressStream:
     """One open stream: iterate its frames; `aclose()` (always called by the API's response) frees its slot."""
 
-    def __init__(self, frames: AsyncIterator[str], slot: StreamSlot) -> None:
+    def __init__(self, frames: AsyncIterator[str], slot: StreamSlot | SharedStreamSlot) -> None:
         self._frames = frames
         self._slot = slot
 
@@ -283,14 +368,15 @@ class ProgressStream:
 class ProgressStreamService:
     def __init__(self, *, tasks: TaskService, cycles: LearningCycleService, events: SqlEventRepository,
                  limits: StreamLimits = StreamLimits(), clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], Awaitable[object]] = asyncio.sleep) -> None:
+                 sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+                 slots: StreamSlots | SharedStreamSlots | None = None) -> None:
         self._tasks = tasks
         self._cycles = cycles
         self._events = events
         self.limits = limits
         self._clock = clock
         self._sleep = sleep
-        self.slots = StreamSlots(per_principal=limits.max_per_principal, total=limits.max_streams)
+        self.slots = slots or StreamSlots(per_principal=limits.max_per_principal, total=limits.max_streams)
         self._pool = ThreadPoolExecutor(max_workers=STREAM_THREADS, thread_name_prefix="progress-stream")
 
     def close(self) -> None:
@@ -337,15 +423,23 @@ class ProgressStreamService:
         return snap
 
     async def _run(self, reader: _Reader, start: dict[str, int], check_access: AccessCheck,
-                   slot: StreamSlot) -> AsyncIterator[str]:
+                   slot: StreamSlot | SharedStreamSlot) -> AsyncIterator[str]:
         limits = self.limits
         settle = _Settle(limits.settle_seconds)
         positions = dict(start)  # filtered to the owned sources at every poll: a foreign source is never read
-        opened = last_write = self._clock()
+        opened = last_write = last_renew = self._clock()
+        renew_every = self.slots.renew_seconds
+        pause = limits.poll_seconds if renew_every is None else min(limits.poll_seconds, renew_every)
         last_status: str | None = None
         ending_at: int | None = None  # the table's top when the stop state was first seen: delivered before `end`
         try:
             while True:
+                if renew_every is not None and self._clock() - last_renew >= renew_every:
+                    held = await asyncio.get_running_loop().run_in_executor(self._pool, slot.renew)
+                    if not held:  # as on access loss: stop at once, no further frame
+                        logger.info("progress stream closed: its slot was lost")
+                        return
+                    last_renew = self._clock()
                 try:
                     snap = await asyncio.get_running_loop().run_in_executor(
                         self._pool, self._poll, reader, positions, settle, check_access)
@@ -383,7 +477,7 @@ class ProgressStreamService:
                     last_write = now
                 if done:
                     return
-                await self._sleep(0 if snap.truncated else limits.poll_seconds)
+                await self._sleep(0 if snap.truncated else pause)
         finally:
             slot.release()
 

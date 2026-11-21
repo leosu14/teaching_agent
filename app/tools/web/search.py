@@ -11,7 +11,7 @@ from app.providers.search.base import ProviderSearchRequest, SearchHit, SearchPr
 from app.schemas.common import RetryPolicy, Schema, utcnow
 from app.schemas.research import SearchQuery, SearchResult, Source
 from app.tools.base import Tool, ToolError, ToolTransientError
-from app.tools.research.cache import ResearchCache
+from app.tools.research.cache import ResearchCache, research_cache_key
 from app.utils.urls import canonical_url, host_matches, source_id_for
 
 
@@ -47,10 +47,18 @@ class SearchTool(Tool[SearchQuery, SearchResponse]):
             return False
         return not any(host_matches(url, d) for d in self._exclude)
 
+    def _cache_key(self, data: SearchQuery) -> str:
+        chain = getattr(self._provider, "providers", None) or [self._provider]
+        return research_cache_key(data, providers=[p.name for p in chain], include_domains=self._include,
+                                  exclude_domains=self._exclude)
+
     async def run(self, data: SearchQuery, scope: ExecutionScope) -> SearchResponse:
         service = f"search:{self._provider.name}"
-        if self._cache is not None:
-            cached = self._cache.get(data)
+        # Per learner (decision A2): a search made for no learner's lesson task is never cached, nor served from it.
+        cache = self._cache if scope.learner_id is not None and scope.task_id is not None else None
+        key = self._cache_key(data) if cache is not None else ""
+        if cache is not None:
+            cached = cache.get(scope.learner_id, key)
             if cached is not None:
                 scope.usage.record_service(service=service, results=len(cached), cache_hit=True)
                 return SearchResponse(query=data, results=cached, provider=self._provider.name, cached=True)
@@ -70,8 +78,8 @@ class SearchTool(Tool[SearchQuery, SearchResponse]):
         hits = [hit for hit in page.hits if self._allowed(hit.url)]
         results = [self._result(hit, rank, retrieved_at, provider) for rank, hit in enumerate(hits, start=1)]
         scope.usage.record_service(service=f"search:{provider}", results=len(results), cost_usd=page.usage.cost_usd)
-        if self._cache is not None:
-            self._cache.set(data, results)
+        if cache is not None:
+            cache.set(scope.learner_id, key, results, task_id=scope.task_id)
         return SearchResponse(query=data, results=results, provider=provider)
 
     def _result(self, hit: SearchHit, rank: int, retrieved_at: datetime, provider: str) -> SearchResult:

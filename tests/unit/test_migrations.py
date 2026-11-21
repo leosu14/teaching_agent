@@ -42,7 +42,7 @@ def diffs(u: str) -> list:
         engine.dispose()
 
 
-HEAD = "0005_teaching_turn_lease"  # the newest revision: the teaching-turn lease (issue #66 PR 1)
+HEAD = "0006_shared_state"  # the newest revision: shared rate limiter, stream slots and research cache (issue #66 PR 2)
 
 
 def test_one_head_on_top_of_the_baseline() -> None:

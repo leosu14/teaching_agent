@@ -17,6 +17,8 @@ What a killed worker leaves behind, and who recovers it:
 - A task whose latest job FAILED is left alone: it already failed on every attempt, and is resumed only on request.
 - A stored object a learner's data deletion queued but the store refused to delete (MVP item 9) is tried again
   (`purge_objects`), until it is deleted, or found shared and kept.
+- Expired shared-state rows (issue #66 PR 2): rate-limit starts and slots, stream slots and research-cache entries
+  past their expiry in database time, of keys no admission has counted since (`shared_state`).
 - A stranded task whose learner's data is deleted meanwhile gets no job: the recovery is a write for the learner, and
   is refused like any other once their rows are gone.
 
@@ -51,18 +53,21 @@ class SweepReport:
     left_failed: list[str] = field(default_factory=list)  # stranded tasks whose latest job FAILED: left alone
     objects_deleted: int = 0  # queued object deletions done on this pass
     objects_pending: int = 0  # queued object deletions the store refused again
+    shared_state: object = None  # what the shared-state step deleted (app/storage/shared_state.py, SharedStateSweep)
 
 
 class TaskSweeper:
     def __init__(self, tasks: SqlTaskRepository, jobs: SqlTaskJobRepository, service: TaskService, *,
                  idle: timedelta = TASK_LEASE, batch: int = 100,
-                 purge_objects: Callable[[], ObjectPurge] | None = None) -> None:
+                 purge_objects: Callable[[], ObjectPurge] | None = None,
+                 shared_state: Callable[[], object] | None = None) -> None:
         self._tasks = tasks
         self._jobs = jobs
         self._service = service
         self._idle = idle
         self._batch = batch
         self._purge_objects = purge_objects
+        self._shared_state = shared_state
 
     def sweep(self) -> SweepReport:
         """One pass. Safe to run from several processes at once: each task gets at most one active job. Which leases
@@ -87,4 +92,6 @@ class TaskSweeper:
         if self._purge_objects is not None:
             purged = self._purge_objects()
             report.objects_deleted, report.objects_pending = purged.deleted, purged.pending
+        if self._shared_state is not None:
+            report.shared_state = self._shared_state()
         return report

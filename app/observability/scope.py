@@ -73,6 +73,8 @@ class ExecutionScope:
     events: EventBus
     usage: UsageLedger
     task_id: str | None = None
+    # The learner the work is for (a lesson task's), when there is one: what learner-scoped caches key by.
+    learner_id: str | None = None
     node_id: str | None = None
     agent_id: str | None = None
     fence: Lease | None = None  # the task worker's lease: its events and artifacts are stored only while it holds

@@ -316,6 +316,11 @@ and `tests/e2e/test_learner_deletion_api.py` checks each case leaves the learner
   goals or curricula, in their JSON with LIKE wildcards escaped, so a learner id with `_` or `%` never takes another
   learner's events with it (tested on SQLite and PostgreSQL).
 - **Spending caps hold.** The spend ledger is kept, so deleting a learner does not reset their daily cap.
+- **The research cache is per learner** (issue #66, decision A2). Search queries can come from a learner's own
+  lesson request, so an entry is stored and found under that learner only, never served to another learner; a search
+  made for no learner's lesson task is not cached. Its rows are erased with the learner (a write for a lesson task
+  that is gone is refused inside its transaction, as every learner write is), and expire after 7 days anyway
+  (`tests/unit/test_shared_state.py`, `tests/postgres/test_shared_state_postgres.py`).
 
 ## Learner-facing responses
 

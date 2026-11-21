@@ -132,21 +132,22 @@ async def test_cancellation_after_sending_is_unknown_and_before_sending_is_relea
     [sent] = entries(ledger)
     assert (sent.state, sent.error_type, sent.charged["llm_tokens"]) == (SpendState.UNKNOWN, "CancelledError", 500)
 
-    # Cancelled while waiting for a concurrency slot: nothing reached the provider.
+    # Cancelled while waiting for a concurrency slot: nothing reached the provider, and nothing was reserved for it
+    # (issue #66 PR 2: an attempt is admitted by the rate limiter before anything is reserved).
     inv2, scope2, ledger2, _ = setup()
     inv2._policies = {c: ProviderPolicy(max_attempts=1, max_concurrency=1) for c in Capability}
+    started.clear()
     first = asyncio.create_task(call(inv2, scope2, hangs))
-    await asyncio.sleep(0)
-    while len(entries(ledger2)) < 1:
-        await asyncio.sleep(0)
+    await started.wait()
     second = asyncio.create_task(call(inv2, scope2, hangs))
-    while len(entries(ledger2)) < 2:
+    for _ in range(20):
         await asyncio.sleep(0)
+    assert len(entries(ledger2)) == 1  # the second waits for the slot without a reservation
     second.cancel()
     first.cancel()
     await asyncio.gather(first, second, return_exceptions=True)
-    states = {e.state for e in entries(ledger2)}
-    assert states == {SpendState.UNKNOWN, SpendState.RELEASED}
+    states = [e.state for e in entries(ledger2)]
+    assert states == [SpendState.UNKNOWN]
     assert counters(ledger2) == (0, 500)
 
 

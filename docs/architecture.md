@@ -190,8 +190,9 @@ fencing and checkpoints above still apply unchanged.
 - **Scope.** This is the pilot setup: one API replica and one worker. Learner-memory and curriculum writes are fenced
   and versioned (above), so the worker and the API can write the same learner safely, and more worker processes on
   one database are correct, with leases judged by the database's clock (above, "Time"); learning cycles still run
-  their child tasks inline in the request, and rate limits, the research cache and the stream caps are per process
-  (the remaining multi-replica items, issue #66 PRs 2 and 3).
+  their child tasks inline in the request. Rate limits, the research cache and the stream caps are shared by every
+  process on PostgreSQL (issue #66 PR 2; "Shared state" in docs/deployment.md); GET routes that still write are the
+  remaining multi-replica item (PR 3).
 
 ## Workflow engine
 
@@ -255,8 +256,13 @@ through the ToolManager:
   and a `Source` carrying only what the provider supplied (publisher, author, date, language, type) plus the
   retrieval time. `SearchProvider` is the adapter interface (Tavily, Serper, Bing, Google, ... later);
   `MockSearchProvider` is deterministic over `fixtures/demo/web_corpus.json`. An optional `ResearchCache`
-  (`get` / `set` / `invalidate`; `InMemoryResearchCache` now) stores complete results, so a cache hit keeps
-  the original sources and retrieval times.
+  (`get` / `set` / `invalidate`) stores complete results, so a cache hit keeps the original sources and retrieval
+  times. It is per learner (decision A2 of issue #66: an entry is found only under the learner whose lesson task
+  searched; a search for no learner is not cached), entries live 7 days, and the key is a SHA-256 of the normalised
+  query (NFKC, case and whitespace folded; language, subject, domain, result count) and of the configuration that
+  shapes the results (the search providers in order, the include and exclude domain lists, a format version).
+  `SharedResearchCache` keeps it in the database every process shares (`research_cache`, erased with the learner);
+  `InMemoryResearchCache` in one process (SQLite, development).
 - `rag.retrieve`: knowledge-base passages as the same `SearchResult` shape.
 - `research.rank`: deduplicates (same source id or canonical URL, identical content, same title and
   publisher; the queries that found a source are merged) and ranks with a pluggable `Ranker`.
@@ -570,7 +576,9 @@ Agents ──► Tools / ModelRouter ──► provider interfaces (*.base) ─�
   no agent names a vendor.
 - **Invoker.** Every call runs through `ProviderInvoker`: a per-attempt timeout, retries only for timeouts, 429,
   5xx and connection failures (typed errors; never auth or invalid requests), bounded exponential backoff that
-  honours `Retry-After` up to a cap, a local requests-per-minute and concurrency limit, a unique `preq_` request
+  honours `Retry-After` up to a cap, a requests-per-minute and concurrency limit per capability and provider
+  (admitted before anything is reserved or sent; shared by every process on PostgreSQL, `SharedRateLimiter`, and
+  failing closed when it cannot decide: docs/deployment.md, "Shared state"), a unique `preq_` request
   id (sent as a header where the vendor accepts one, and recorded with the vendor's own request id), a
   `ProviderUsage` record and the events `provider.request_started`, `provider.request_completed`,
   `provider.request_failed`, `provider.rate_limited` and `provider.fallback`. Events go to the task that made the
@@ -1085,9 +1093,13 @@ orders event rows by `seq`; the version orders cycle states. Neither is encoded 
 
 **Limits.** The loop is a coroutine: it sleeps on the event loop (`TA_STREAM_POLL_SECONDS`, 1 s) and runs each
 poll's reads in a worker thread, so an idle stream holds no thread. Open streams are capped per principal
-(`TA_STREAM_MAX_PER_PRINCIPAL`, 4) and per API process (`TA_STREAM_MAX_STREAMS`, 200); above either the open is a
-429. A client that goes away is noticed by the response's disconnect watch, and its slot is freed. The caps are per
-process: with several API replicas each counts its own. DB load per open stream and poll is a handful of small
+(`TA_STREAM_MAX_PER_PRINCIPAL`, 4) and in total (`TA_STREAM_MAX_STREAMS`, 200); above either the open is a 429. A
+client that goes away is noticed by the response's disconnect watch, and its slot is freed. On PostgreSQL the caps
+are counted across every API process (`SharedStreamSlots`): a slot is a row of `stream_slots`, a lease renewed every
+third of `TA_STREAM_SLOT_TTL_SECONDS` and deleted when the stream closes, so a dead process's slots free themselves
+at their expiry; a slot store that cannot decide refuses the stream (503), and a lost slot stops it as access loss
+does. That row is the only write a stream makes (decision A3 of issue #66: bookkeeping tables only, never domain
+tables or events). DB load per open stream and poll is a handful of small
 queries (about 5 for a task: the task, its job, the table's top `seq`, the events, the access rule; about 9 for a
 cycle, whose read is `GET /learning-cycles/{id}`'s, view included). The polls' reads run on their own pool of 8
 threads, not the event loop's default pool, so many open streams queue there instead of starving other work. The
