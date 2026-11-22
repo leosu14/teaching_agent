@@ -27,8 +27,8 @@ They are validated when the container is built; errors say what to fix.
 | `TA_STREAM_MAX_PER_PRINCIPAL` | `4` | Progress streams: open streams per principal, across every API process on PostgreSQL (429 above) |
 | `TA_STREAM_MAX_STREAMS` | `200` | Progress streams: open streams in total, across every API process on PostgreSQL (429 above) |
 | `TA_STREAM_SLOT_TTL_SECONDS` | `60` | A shared stream slot's lease: a dead API process's slots are reusable after it |
-| `TA_SHARED_STATE` | `database` on PostgreSQL, `memory` on SQLite | Where the rate limiter, stream caps and research cache are counted (docs/deployment.md, "Shared state"); `memory` on PostgreSQL is refused unless `TA_SINGLE_PROCESS=true` |
-| `TA_SINGLE_PROCESS` | `false` | Declares that this process is the only one using the database (allows `TA_SHARED_STATE=memory` on PostgreSQL; refused with `WEB_CONCURRENCY` above 1) |
+| `TA_SHARED_STATE` | `database` on PostgreSQL, `memory` on SQLite | Where the rate limiter and stream caps are counted (the research cache is always in the database) (docs/deployment.md, "Shared state"); `memory` on PostgreSQL is refused unless `TA_SINGLE_PROCESS=true` |
+| `TA_SINGLE_PROCESS` | `false` | Declares that this process is the only one using the database (allows `TA_SHARED_STATE=memory` on PostgreSQL with `TA_WORKER_EMBEDDED=true`; refused with `WEB_CONCURRENCY` above 1) |
 | `TA_RATE_LIMIT_SLOT_TTL_SECONDS` | `30` | A shared concurrency slot's lease: a dead process's slots free themselves after it |
 | `TA_RETRIEVAL_PROVIDER` | `local` | Knowledge-base retrieval |
 | `TA_VIDEO_COMPOSER` | `ffmpeg` | `ffmpeg` composes a real MP4 (needs `ffmpeg` and `ffprobe`); `mock` writes a manifest-only file for tests |

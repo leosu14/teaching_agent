@@ -279,10 +279,13 @@ A process that dies keeps its rate-limit slots and stream slots only until their
 expired rows before it counts, and the sweeper (`python -m app.services.worker --sweep`, and every
 `TA_WORKER_SWEEP_SECONDS` in the worker) deletes the rest, with expired cache entries.
 
-`TA_SHARED_STATE` chooses: `database` (the default on PostgreSQL) or `memory` (the default on SQLite: each process
-counts its own). Every process refuses to start with `memory` on PostgreSQL unless `TA_SINGLE_PROCESS=true` declares
-that it is the only process using the database (and `WEB_CONCURRENCY` is not above 1); a production deployment
-(`TA_DEPLOYMENT=production`, an API and a worker) refuses `memory` always.
+`TA_SHARED_STATE` chooses where the rate limiter and the stream caps are counted: `database` (the default on
+PostgreSQL) or `memory` (the default on SQLite: each process counts its own). The research cache is always in the
+database. Every process refuses to start with `memory` on PostgreSQL unless `TA_SINGLE_PROCESS=true` declares that it
+is the only process using the database, with the worker embedded (`TA_WORKER_EMBEDDED=true`) and `WEB_CONCURRENCY` not
+above 1; a production deployment (`TA_DEPLOYMENT=production`, an API and a worker) refuses `memory` always. The check
+cannot see `uvicorn --workers` or a second process started by hand with the same declaration: do not declare
+`TA_SINGLE_PROCESS` for those.
 
 ## Known limits
 

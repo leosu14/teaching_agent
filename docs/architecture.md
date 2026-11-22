@@ -260,9 +260,10 @@ through the ToolManager:
   times. It is per learner (decision A2 of issue #66: an entry is found only under the learner whose lesson task
   searched; a search for no learner is not cached), entries live 7 days, and the key is a SHA-256 of the normalised
   query (NFKC, case and whitespace folded; language, subject, domain, result count) and of the configuration that
-  shapes the results (the search providers in order, the include and exclude domain lists, a format version).
-  `SharedResearchCache` keeps it in the database every process shares (`research_cache`, erased with the learner);
-  `InMemoryResearchCache` in one process (SQLite, development).
+  shapes the results (the search providers in order with each one's non-secret settings from `configuration()`, the
+  include and exclude domain lists, a format version). `SharedResearchCache` keeps it in the database
+  (`research_cache`, erased with the learner), on SQLite too, where the API and the worker are separate processes as
+  well; `InMemoryResearchCache` is for unit tests.
 - `rag.retrieve`: knowledge-base passages as the same `SearchResult` shape.
 - `research.rank`: deduplicates (same source id or canonical URL, identical content, same title and
   publisher; the queries that found a source are merged) and ranks with a pluggable `Ranker`.

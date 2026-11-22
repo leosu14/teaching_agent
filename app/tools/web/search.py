@@ -50,7 +50,8 @@ class SearchTool(Tool[SearchQuery, SearchResponse]):
     def _cache_key(self, data: SearchQuery) -> str:
         chain = getattr(self._provider, "providers", None) or [self._provider]
         return research_cache_key(data, providers=[p.name for p in chain], include_domains=self._include,
-                                  exclude_domains=self._exclude)
+                                  exclude_domains=self._exclude,
+                                  provider_settings=[p.configuration() for p in chain])
 
     async def run(self, data: SearchQuery, scope: ExecutionScope) -> SearchResponse:
         service = f"search:{self._provider.name}"

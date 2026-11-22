@@ -281,13 +281,15 @@ class SharedStateSweep:
 
 
 class SharedStateSweeper:
-    def __init__(self, rate_limits: SqlRateLimits, stream_slots: SqlStreamSlots,
+    def __init__(self, rate_limits: SqlRateLimits | None, stream_slots: SqlStreamSlots | None,
                  research_cache: SqlResearchCacheStore) -> None:
         self._rate_limits = rate_limits
         self._stream_slots = stream_slots
         self._research_cache = research_cache
 
     def sweep(self) -> SharedStateSweep:
-        return SharedStateSweep(rate_limit_rows=self._rate_limits.purge_expired(),
-                                stream_slots=self._stream_slots.purge_expired(),
-                                research_cache_entries=self._research_cache.purge_expired())
+        """The limiter and stream slots are None when they are counted in memory (TA_SHARED_STATE=memory)."""
+        return SharedStateSweep(
+            rate_limit_rows=self._rate_limits.purge_expired() if self._rate_limits is not None else 0,
+            stream_slots=self._stream_slots.purge_expired() if self._stream_slots is not None else 0,
+            research_cache_entries=self._research_cache.purge_expired())

@@ -242,7 +242,8 @@ def learner_scope(learner_id: str = "learner-1", task_id: str = "t1"):
 
 
 def key(query: SearchQuery, **config) -> str:
-    return research_cache_key(query, providers=config.pop("providers", ["fake"]), **config)
+    providers = config.pop("providers", ["fake"])
+    return research_cache_key(query, providers=providers, provider_settings=[{} for _ in providers], **config)
 
 
 async def test_cache_serves_identical_traceable_results_and_can_be_invalidated() -> None:

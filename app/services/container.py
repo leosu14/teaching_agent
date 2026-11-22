@@ -175,7 +175,7 @@ from app.tools.video.generation import GeneratedVideoService, generation_tools
 from app.tools.video.service import VideoService
 from app.tools.video.tools import VideoArtifactTool, VideoComposeTool, VideoValidateTool
 from app.tools.video.validation import VideoPlanValidationTool
-from app.tools.research.cache import InMemoryResearchCache, SharedResearchCache
+from app.tools.research.cache import SharedResearchCache
 from app.tools.research.rank import RankSourcesTool
 from app.tools.assessment.tools import AssessmentGradeTool
 from app.tools.teaching.grounding import TeachingGroundingTool
@@ -505,10 +505,10 @@ def build_container(
     shared = settings.resolved_shared_state == "database"
     rate_limits = SqlRateLimits(sessions, clock) if shared else None
     stream_store = SqlStreamSlots(sessions, clock) if shared else None
-    cache_store = SqlResearchCacheStore(sessions, clock) if shared else None
-    research_cache = None
-    if settings.research_cache:
-        research_cache = SharedResearchCache(cache_store) if shared else InMemoryResearchCache(clock=clock)
+    # The research cache is always in the database, SQLite included: the worker (which searches) and the API (which
+    # deletes a learner's data) are separate processes there too.
+    cache_store = SqlResearchCacheStore(sessions, clock)
+    research_cache = SharedResearchCache(cache_store) if settings.research_cache else None
     task_repo = SqlTaskRepository(sessions, clock)
     spend = SqlSpendRepository(sessions, clock)  # the durable spend ledger and budget counters
     budgets = settings.budget_defaults()
@@ -659,9 +659,7 @@ def build_container(
                                job_max_attempts=settings.job_max_attempts,
                                has_profile=lambda learner_id: learner_repo.get(learner_id) is not None,
                                releases=lesson_releases)
-    learner_deletion = LearnerDeletionService(
-        SqlLearnerDataRepository(sessions, clock), artifacts, clock,
-        forget=[research_cache.forget] if isinstance(research_cache, InMemoryResearchCache) else [])
+    learner_deletion = LearnerDeletionService(SqlLearnerDataRepository(sessions, clock), artifacts, clock)
     task_worker = TaskWorker(jobs, task_service, poll_seconds=settings.worker_poll_seconds,
                              retry_backoff_seconds=settings.job_retry_backoff_seconds,
                              retry_max_backoff_seconds=settings.job_retry_max_backoff_seconds,
@@ -669,8 +667,7 @@ def build_container(
                              sweeper=TaskSweeper(task_repo, jobs, task_service,
                                                  purge_objects=learner_deletion.purge_due,
                                                  shared_state=SharedStateSweeper(rate_limits, stream_store,
-                                                                                 cache_store).sweep
-                                                 if shared else None),
+                                                                                 cache_store).sweep),
                              sweep_seconds=settings.worker_sweep_seconds)
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
     curriculum_service = CurriculumService(memory, RetrieverKnowledgeBase(retriever), curriculum, task_service, events)

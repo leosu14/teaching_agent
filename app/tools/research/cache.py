@@ -7,12 +7,14 @@ learner's query, which can come from their own lesson request, is never served t
 
 The key (`research_cache_key`) is a SHA-256 of everything that shapes the results: the normalised query (text folded
 to NFKC, case and whitespace; language, subject, domain, the number of results) and the configuration (the search
-providers in order, the operator's include and exclude domain lists), with `CACHE_FORMAT`, raised whenever the stored
+providers in order with each one's non-secret settings, e.g. a search depth or whether page text is included; the
+operator's include and exclude domain lists), with `CACHE_FORMAT`, raised whenever the stored
 results' shape or the key's own rules change, so an entry written under another configuration or version is never
 read.
 
-Two implementations: `InMemoryResearchCache` (one process: development, SQLite, tests) and `SharedResearchCache`, on
-the database every process shares (app/storage/shared_state.py, `SqlResearchCacheStore`)."""
+The application uses `SharedResearchCache`, on the database (app/storage/shared_state.py, `SqlResearchCacheStore`),
+on SQLite too: the API and the worker are separate processes there as well, and a learner's deletion must reach the
+entries the worker's searches wrote. `InMemoryResearchCache` is for unit tests."""
 
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import logging
 import re
 import unicodedata
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Protocol
 
@@ -34,7 +36,8 @@ from app.schemas.research import SearchQuery, SearchResult
 logger = logging.getLogger(__name__)
 
 CACHE_TTL = timedelta(days=7)
-CACHE_FORMAT = 2  # 1: the process-local cache keyed by SearchQuery.cache_key(); 2: per learner, with configuration
+# 1: the process-local cache keyed by SearchQuery.cache_key(); 3: per learner, with the providers' settings
+CACHE_FORMAT = 3
 _RESULTS = TypeAdapter(list[SearchResult])
 
 
@@ -46,7 +49,7 @@ def _fold(value: str | None) -> str | None:
 
 
 def research_cache_key(query: SearchQuery, *, providers: Sequence[str], include_domains: Sequence[str] = (),
-                       exclude_domains: Sequence[str] = ()) -> str:
+                       exclude_domains: Sequence[str] = (), provider_settings: Sequence[Mapping] = ()) -> str:
     """Equal for searches that would return the same results under the same configuration, whatever the query's id
     or purpose; different when any input or setting that shapes the results differs."""
     payload = {
@@ -54,10 +57,11 @@ def research_cache_key(query: SearchQuery, *, providers: Sequence[str], include_
         "text": _fold(query.text), "language": _fold(query.language), "subject": _fold(query.subject),
         "domain": _fold(query.domain), "max_results": query.max_results,
         "providers": list(providers),
+        "provider_settings": [dict(settings) for settings in provider_settings],
         "include_domains": sorted({d.strip().lower() for d in include_domains}),
         "exclude_domains": sorted({d.strip().lower() for d in exclude_domains}),
     }
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

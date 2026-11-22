@@ -469,8 +469,11 @@ PG = "postgresql+psycopg://ta@db:5432/ta"
     ({}, False),  # SQLite: one process, memory
     ({"database_url": PG}, False),  # PostgreSQL: shared by default
     ({"database_url": PG, "shared_state": "memory"}, True),
-    ({"database_url": PG, "shared_state": "memory", "single_process": True}, False),
-    ({"database_url": PG, "shared_state": "memory", "single_process": True, "web_concurrency": 2}, True),
+    ({"database_url": PG, "shared_state": "memory", "single_process": True, "worker_embedded": True}, False),
+    # The worker as its own process (the default) is a second process on the database (review finding F5).
+    ({"database_url": PG, "shared_state": "memory", "single_process": True}, True),
+    ({"database_url": PG, "shared_state": "memory", "single_process": True, "worker_embedded": True,
+      "web_concurrency": 2}, True),
     ({"shared_state": "database"}, False),
 ])
 def test_process_local_state_is_refused_where_several_processes_share_postgresql(values, refused) -> None:
@@ -482,7 +485,8 @@ def test_process_local_state_is_refused_where_several_processes_share_postgresql
 
 def test_web_concurrency_is_read_from_the_environment(monkeypatch) -> None:
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
-    settings = Settings(_env_file=None, database_url=PG, shared_state="memory", single_process=True)
+    settings = Settings(_env_file=None, database_url=PG, shared_state="memory", single_process=True,
+                        worker_embedded=True)
     assert settings.web_concurrency == 4 and "WEB_CONCURRENCY=4" in settings.shared_state_problems()[0]
 
 
@@ -496,3 +500,30 @@ def test_the_container_refuses_to_start_with_process_local_state_on_postgresql()
 def test_a_production_deployment_refuses_memory_state() -> None:
     settings = Settings(_env_file=None, database_url=PG, shared_state="memory", single_process=True)
     assert any("TA_SHARED_STATE must be 'database'" in p for p in settings.deployment_problems())
+
+
+def test_the_application_keeps_the_research_cache_in_the_database_on_sqlite_too(tmp_path) -> None:
+    """Review finding F2: on SQLite the API and the worker are separate processes too, so the worker's cached searches
+    must be where the API's deletion of the learner reaches them: the database, never a process's memory."""
+    from app.services.container import build_container
+
+    settings = Settings(_env_file=None, data_dir=tmp_path)
+    assert settings.resolved_shared_state == "memory"
+    container = build_container(settings)
+    try:
+        assert isinstance(container.tools.registry.get("search.web")._cache, SharedResearchCache)
+    finally:
+        container.close()
+
+
+def test_the_key_distinguishes_the_search_providers_own_settings() -> None:
+    """Review finding F1: a provider's non-secret settings (e.g. Tavily's search depth, raw page content) shape the
+    results, so they are part of the key."""
+    q = SearchQuery(text="Football")
+    base = research_cache_key(q, providers=["tavily"],
+                              provider_settings=[{"search_depth": "basic", "include_raw_content": False}])
+    raw = research_cache_key(q, providers=["tavily"],
+                             provider_settings=[{"search_depth": "basic", "include_raw_content": True}])
+    deep = research_cache_key(q, providers=["tavily"],
+                              provider_settings=[{"search_depth": "advanced", "include_raw_content": False}])
+    assert len({base, raw, deep}) == 3

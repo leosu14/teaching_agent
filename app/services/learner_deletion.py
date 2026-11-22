@@ -19,7 +19,7 @@ spent (app/schemas/privacy.py)."""
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from datetime import datetime
 
 from app.artifacts.service import ArtifactService
@@ -32,12 +32,8 @@ logger = logging.getLogger(__name__)
 
 class LearnerDeletionService:
     def __init__(self, repository: SqlLearnerDataRepository, artifacts: ArtifactService,
-                 clock: Callable[[], datetime] = utcnow,
-                 forget: Sequence[Callable[[str], None]] = ()) -> None:
+                 clock: Callable[[], datetime] = utcnow) -> None:
         self.repository = repository
-        # Process-local stores that hold learner data outside the database (the in-memory research cache of a
-        # single-process deployment), told after the erase commits. The shared ones are erased by the transaction.
-        self._forget = tuple(forget)
         self._artifacts = artifacts
         self._clock = clock
 
@@ -45,8 +41,6 @@ class LearnerDeletionService:
         """Delete the learner's data; LearnerDataBusy (nothing deleted) while they have work in progress. Deleting a
         learner with no data succeeds with nothing to report, so a retry after a lost response is safe."""
         records, queued = self.repository.erase(learner_id)
-        for forget in self._forget:
-            forget(learner_id)
         objects = self.repository.purge(self._artifacts.delete_object, queued)
         # The learner id is not logged: the log line records that a deletion happened, not whose data it was.
         logger.info("learner data deleted: %d records, %d objects, %d shared objects kept, %d objects pending",
