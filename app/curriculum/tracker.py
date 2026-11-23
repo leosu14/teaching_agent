@@ -25,6 +25,7 @@ from app.schemas.curriculum import (
     NextLearningAction,
     ProgressUpdate,
     curriculum_id_for,
+    curriculum_status_for,
 )
 from app.schemas.events import EventType
 from app.schemas.learner import GoalStatus, LearningEvidence, LearningGoal
@@ -172,6 +173,12 @@ class CurriculumTracker:
                 # Completed, or paused or cancelled meanwhile: the curriculum follows the goal as stored now, never
                 # `goal` (a copy that a cancel committed after can make stale, #65).
                 self.follow_goal(goal.goal_id)
+            else:
+                record = self.engine.record(curriculum_id_for(goal.goal_id))
+                if record is not None and record.status != curriculum_status_for(goal.status):
+                    # A follow that never ran (its writer crashed or lost its lease after the goal's change
+                    # committed, or a first plan committed after a cancel): repaired here, from the stored goal.
+                    self.follow_goal(goal.goal_id)
             current = self.engine.current(curriculum_id_for(goal.goal_id))
             if current is None:  # as above
                 raise LearnerDataGone()

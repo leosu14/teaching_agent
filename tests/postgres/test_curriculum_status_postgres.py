@@ -175,3 +175,72 @@ def test_an_assignment_cancel_racing_the_learner_and_a_refresh_archives_the_curr
         # Which status the goal ends in depends on the commit order (and on the D13 lock, which is not #65's);
         # the curriculum follows it whichever it is.
         consistent(replicas[1], goal_id)
+
+
+def test_an_assignment_cancel_racing_the_learners_deletion_does_not_deadlock(replicas) -> None:  # noqa: F811
+    """The cancel's follow locks the goal row, then the curriculum row; a deletion deletes curricula, then goals. The
+    follow runs under the learner's shared deletion lock (`learner_writes`), so the two take turns. Forced: the follow
+    holds the goal lock and waits until the deletion has reached the curricula (or is blocked before it)."""
+    import inspect
+
+    from sqlalchemy import event
+
+    import app.storage.repositories as repositories
+
+    c0, c1 = replicas
+    classroom, [lid], _ = a_class(c0, learners=1)
+    aid = assign(c0, classroom)
+    goal_id = goal_of(c0, aid, lid).goal_id
+    assert asyncio.run(c0.curriculum_service.build_curriculum(goal_id, user_id="test")).status.value == "COMPLETED"
+    locked, curricula_deleted = threading.Event(), threading.Event()
+    lock_goal = repositories._lock_goal
+
+    def held(s, gid):
+        row = lock_goal(s, gid)
+        if inspect.stack()[1].function == "follow_goal" and threading.current_thread().name == "cancel":
+            locked.set()
+            curricula_deleted.wait(2)  # the deletion reaches the curricula only if it is not kept out
+            time.sleep(0.05)
+        return row
+
+    bind = c1.learner_deletion.repository._sessions.kw["bind"]
+
+    def before(conn, cursor, statement, *args):
+        if threading.current_thread().name == "delete" and statement.startswith("DELETE FROM learning_goals"):
+            time.sleep(0.4)  # the follow is waiting on the curriculum row by now
+
+    def after(conn, cursor, statement, *args):
+        if threading.current_thread().name == "delete" and statement.startswith("DELETE FROM curricula"):
+            curricula_deleted.set()
+
+    outcome = {}
+
+    def cancel() -> None:
+        try:
+            asyncio.run(c0.assignments.cancel(classroom, aid))
+            outcome["cancel"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - asserted on
+            outcome["cancel"] = repr(exc)[:300]
+
+    def delete() -> None:
+        assert locked.wait(10)
+        try:
+            c1.learner_deletion.delete(lid)
+            outcome["delete"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - asserted on
+            outcome["delete"] = repr(exc)[:300]
+
+    repositories._lock_goal = held
+    event.listen(bind, "before_cursor_execute", before)
+    event.listen(bind, "after_cursor_execute", after)
+    try:
+        threads = [threading.Thread(target=cancel, name="cancel"), threading.Thread(target=delete, name="delete")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        repositories._lock_goal = lock_goal
+        event.remove(bind, "before_cursor_execute", before)
+        event.remove(bind, "after_cursor_execute", after)
+    assert outcome == {"cancel": "ok", "delete": "ok"}, outcome

@@ -116,6 +116,10 @@ class CurriculumEngine:
         except RecordConflict as exc:
             raise CurriculumConflict(f"curriculum {plan.curriculum_id} moved on while the plan was being made "
                                      f"on version {plan.base_version}; rebuild it") from exc
+        if record is None:
+            # A new record says ACTIVE; a goal cancelled while its first plan was made must not be left so (#65). Its
+            # cancel's follow found no record yet: this follow reads the goal under its lock, after the insert.
+            self.follow_goal(plan.curriculum_id, plan.goal_id, lambda: None)
         if created and scope is not None:
             event = EventType.CURRICULUM_CREATED if plan.base_version is None else EventType.CURRICULUM_REPLANNED
             scope.emit(event, goal_id=plan.goal_id, curriculum_id=plan.curriculum_id, version=stored.version,
@@ -148,7 +152,7 @@ class CurriculumEngine:
             except RecordConflict:
                 if attempt == STATUS_ATTEMPTS:
                     raise
-        return None  # unreachable
+        return None
 
     def refresh(self, goal: LearningGoal, model: LearnerModel, as_of: datetime, *,
                 review_counts: Mapping[str, int] | None = None, graph: ConceptGraph | None = None,

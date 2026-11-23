@@ -321,12 +321,12 @@ class AssignmentService:
             return
         now = self._clock()
         try:
-            with learner_writes(record.learner_id):
+            with learner_writes(record.learner_id):  # the follow too: it locks the goal row, then the curriculum's
                 goal = self.repository.sync_goal(assignment_id, record.goal_id, lambda a, g: synced(a, g, now))
+                if goal is not None and goal.status == GoalStatus.CANCELLED:  # from the goal as stored now (#65)
+                    self._curriculum.follow_goal(goal.goal_id)
         except LearnerDataGone:
             return
-        if goal is not None and goal.status == GoalStatus.CANCELLED:  # from the goal as stored now (#65)
-            self._curriculum.follow_goal(goal.goal_id)
 
     # --- targets ----------------------------------------------------------------------------------------------------
 

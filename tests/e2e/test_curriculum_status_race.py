@@ -11,6 +11,8 @@ import asyncio
 import threading
 from datetime import timedelta
 
+import pytest
+
 from app.schemas.common import utcnow
 from app.schemas.curriculum import CurriculumStatus, GoalInput, GoalUpdate, curriculum_id_for
 from app.schemas.learner import GoalStatus
@@ -152,5 +154,54 @@ async def test_an_assignment_cancel_racing_a_resume_leaves_the_curriculum_archiv
     finally:
         memory.update_goal = update_goal
     assert resumed.status == GoalStatus.ACTIVE and raced
+    assert c.curriculum_service.goal(goal.goal_id).status == GoalStatus.CANCELLED
+    assert status_of(c, goal.goal_id) == CurriculumStatus.ARCHIVED
+
+
+async def test_a_follow_lost_after_the_completion_committed_is_repaired_by_the_next_refresh(world) -> None:  # noqa: F811
+    """The refresh's worker dies (or loses its lease) after `complete()` committed the goal and before the curriculum
+    followed it: the retried refresh no longer sees a completion (the goal is not active), and still repairs it."""
+    c = world.c
+    goal = await own_mastered_goal(world)
+    tracker = c.curriculum_service._tracker
+    complete = tracker.complete
+
+    def dies(g, version, as_of):
+        complete(g, version, as_of)
+        raise RuntimeError("the worker died here")
+
+    tracker.complete = dies
+    try:
+        with pytest.raises(RuntimeError):
+            await c.curriculum_service.tracked(LEARNER, as_of=utcnow() + timedelta(minutes=5))
+    finally:
+        tracker.complete = complete
+    assert c.curriculum_service.goal(goal.goal_id).status == GoalStatus.COMPLETED
+    assert status_of(c, goal.goal_id) == CurriculumStatus.ACTIVE  # the follow never ran
+    await c.curriculum_service.tracked(LEARNER, as_of=utcnow() + timedelta(minutes=10))
+    assert status_of(c, goal.goal_id) == CurriculumStatus.COMPLETED
+
+
+async def test_a_cancel_before_the_first_plan_commits_leaves_the_new_curriculum_archived(world) -> None:  # noqa: F811
+    """The goal is cancelled while its first plan is being made: the cancel's follow finds no curriculum yet, then the
+    commit inserts the record. The commit follows the stored goal after the insert."""
+    c = world.c
+    goal, _ = await c.curriculum_service.create_goal(LEARNER, GoalInput(
+        title="Race", description="Issue #65", domain="spanish", target_concepts=["es.preterite"], priority=2))
+    engine = c.curriculum_service.engine
+    commit = engine.commit
+
+    def cancelled_first(plan, **kw):
+        if plan.goal_id == goal.goal_id and plan.base_version is None:
+            run_now(lambda: c.curriculum_service.update_goal(goal.goal_id, GoalUpdate(status=GoalStatus.CANCELLED),
+                                                             user_id="test"))
+            assert engine.record(curriculum_id_for(goal.goal_id)) is None
+        return commit(plan, **kw)
+
+    engine.commit = cancelled_first
+    try:
+        await c.curriculum_service.build_curriculum(goal.goal_id, user_id="test")
+    finally:
+        engine.commit = commit
     assert c.curriculum_service.goal(goal.goal_id).status == GoalStatus.CANCELLED
     assert status_of(c, goal.goal_id) == CurriculumStatus.ARCHIVED

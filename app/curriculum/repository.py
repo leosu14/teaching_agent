@@ -42,7 +42,8 @@ class CurriculumRepository(Protocol):
         """Set the curriculum's status from its goal's status as stored now (`curriculum_status_for`) and return it;
         None when the curriculum or the goal is gone (nothing written). A store that holds the goals reads the
         goal's status itself, under the goal's write lock, in the transaction that writes the record (#65);
-        `stored_status` reads it for a store that does not. `RecordConflict` when the record moved meanwhile."""
+        `stored_status` reads it for a store that does not (returning None there writes nothing). `RecordConflict`
+        when the record moved meanwhile."""
         ...
 
     def add_version(self, version: CurriculumVersion) -> bool:
