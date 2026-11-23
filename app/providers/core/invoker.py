@@ -2,7 +2,10 @@
 
 - refuses network providers in offline mode,
 - assigns a unique request id (in the usage record, the events and, through the adapters, the vendor request),
-- applies the capability's local rate limit and per-attempt timeout,
+- admits the attempt under the capability's rate limit (in this process, or shared by every process on the database:
+  app/providers/core/ratelimit.py) before anything is reserved or sent; a shared limiter that cannot decide fails
+  closed (`RateLimiterUnavailable`: nothing reserved, nothing sent, retried like any transient unavailability),
+- applies the capability's per-attempt timeout,
 - retries timeouts, rate limits and transient unavailability with bounded exponential backoff, nothing else,
 - emits provider.request_started / request_completed / request_failed / rate_limited events, redacted,
 - records a ProviderUsage per successful call,
@@ -24,6 +27,7 @@ import asyncio
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from typing import TypeVar
 
 from app.observability.budget import BudgetExceededError
@@ -40,9 +44,10 @@ from app.providers.core.errors import (
     ProviderResponseError,
     ProviderTimeout,
     ProviderUnavailable,
+    RateLimiterUnavailable,
     is_retryable,
 )
-from app.providers.core.ratelimit import RateLimiter
+from app.providers.core.ratelimit import RateLimiter, SharedRateLimiter
 from app.schemas.common import ProviderRequestRecord, new_id
 from app.schemas.events import EventType
 from app.schemas.providers import Capability, ProviderPolicy, ProviderUsage
@@ -50,6 +55,8 @@ from app.schemas.spend import Estimate, SpendState
 
 T = TypeVar("T")
 UsageOf = Callable[[T, str], ProviderUsage]  # (result, request id) -> usage
+# Builds the limiter of a (capability, provider) key from its policy: the shared one on a multi-process deployment.
+LimiterFactory = Callable[[Capability, str, ProviderPolicy], "RateLimiter | SharedRateLimiter"]
 USAGE_LOG_SIZE = 1000
 
 
@@ -57,7 +64,8 @@ class ProviderInvoker:
     def __init__(self, *, policies: dict[Capability, ProviderPolicy] | None = None, events: EventBus | None = None,
                  offline: bool = False, clock: Callable[[], float] = time.perf_counter,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-                 required_scope: str | None = None, required_limit: float = 0.0) -> None:
+                 required_scope: str | None = None, required_limit: float = 0.0,
+                 limiter_factory: LimiterFactory | None = None) -> None:
         self._policies = dict(policies or {})
         self._events = events
         self.offline = offline
@@ -66,18 +74,22 @@ class ProviderInvoker:
         self._required_limit = required_limit
         self._clock = clock
         self._sleep = sleep
-        self._limiters: dict[tuple[Capability, str], RateLimiter] = {}
+        self._limiter_factory = limiter_factory
+        self._limiters: dict[tuple[Capability, str], RateLimiter | SharedRateLimiter] = {}
         self.usage_log: deque[ProviderUsage] = deque(maxlen=USAGE_LOG_SIZE)
 
     def policy(self, capability: Capability) -> ProviderPolicy:
         return self._policies.get(capability) or ProviderPolicy()
 
-    def limiter(self, capability: Capability, provider: str) -> RateLimiter:
+    def limiter(self, capability: Capability, provider: str) -> RateLimiter | SharedRateLimiter:
         key = (capability, provider)
         if key not in self._limiters:
             policy = self.policy(capability)
-            self._limiters[key] = RateLimiter(requests_per_minute=policy.requests_per_minute,
-                                              max_concurrency=policy.max_concurrency, sleep=self._sleep)
+            if self._limiter_factory is not None:
+                self._limiters[key] = self._limiter_factory(capability, provider, policy)
+            else:
+                self._limiters[key] = RateLimiter(requests_per_minute=policy.requests_per_minute,
+                                                  max_concurrency=policy.max_concurrency, sleep=self._sleep)
         return self._limiters[key]
 
     def emit(self, type: str, **data: object) -> None:
@@ -130,108 +142,139 @@ class ProviderInvoker:
         while True:
             attempt += 1
             request_id = new_request_id()
-            reservation = None
-            if ledger is not None:
-                try:  # BudgetExceededError, LeaseLost, SpendInFlight: nothing is sent
-                    reservation = ledger.reserve(
-                        entry_id=request_id, operation_id=operation_id, attempt=attempt, capability=capability,
-                        operation=operation, provider=provider.name, model=model, estimate=estimate or Estimate(),
-                        timeout_seconds=policy.timeout_seconds, node_id=scope.node_id, agent_id=scope.agent_id,
-                        idempotency_key=idempotency_key)
-                except BudgetExceededError as exc:
-                    self._spend_event(scope, EventType.BUDGET_EXHAUSTED, budget=exc.scope, limit=exc.limit,
-                                      used=exc.used, maximum=exc.maximum, **base)
-                    raise
-                for entry_id in ledger.account.swept:
-                    self._spend_event(scope, EventType.SPEND_ABANDONED, entry_id=entry_id)
 
             def on_wait(reason: str, seconds: float | None) -> None:
                 self.emit(EventType.PROVIDER_RATE_LIMITED, **base, request_id=request_id, source="local",
                           reason=reason, wait_seconds=seconds)
 
-            self.emit(EventType.PROVIDER_REQUEST_STARTED, **base, request_id=request_id, attempt=attempt)
-            token = bind_request_id(request_id)
-            started = self._clock()
-            sent = False
+            # Admission first (issue #66 D3): an attempt the rate limiter cannot admit reserves nothing and sends
+            # nothing. The slot is held until the attempt's outcome is known, and given back before any retry wait.
+            permit = AsyncExitStack()
             try:
-                async with limiter.slot(on_wait):
-                    started = self._clock()
-                    sent = True
-                    result = await asyncio.wait_for(fn(), policy.timeout_seconds)
-            except asyncio.CancelledError:
-                # Cancelled from outside (an agent, router or node timeout; a caller that went away). Once the request
-                # was sent the provider may bill it: recorded as unknown, its estimate charged. Never swallowed.
-                if ledger is not None:
-                    record = None
-                    if sent:
-                        record = ProviderRequestRecord(
-                            request_id=request_id, provider=provider.name, capability=capability.value,
-                            operation=operation, model=model, attempt=attempt, status="failed",
-                            error_type="CancelledError", latency_ms=round((self._clock() - started) * 1000, 3),
-                            node_id=scope.node_id, agent_id=scope.agent_id)
-                    self._settle(ledger, scope, reservation, record,
-                                 SpendState.UNKNOWN if sent else SpendState.RELEASED, "cancelled", base)
-                raise
-            except Exception as raw:  # noqa: BLE001 - every failure is recorded, then re-raised typed
-                exc = self._typed(raw, provider.name, policy)
-                exc_request_id = getattr(exc, "request_id", None) or request_id
-                if isinstance(exc, ProviderError):
-                    exc.request_id = exc_request_id
-                    exc.provider = exc.provider or provider.name
-                retry = is_retryable(exc) and attempt < policy.max_attempts
-                latency = round((self._clock() - started) * 1000, 3)
-                if ledger is not None:
-                    state = failure_state(exc) if sent else SpendState.RELEASED
-                    self._settle(ledger, scope, reservation, ProviderRequestRecord(
-                        request_id=request_id, provider=provider.name, capability=capability.value,
-                        operation=operation, model=model, attempt=attempt, status="failed",
-                        error_type=type(exc).__name__, latency_ms=latency, node_id=scope.node_id,
-                        agent_id=scope.agent_id), state, _unknown_reason(exc), base)
+                await permit.enter_async_context(limiter.slot(on_wait))
+            except RateLimiterUnavailable as exc:
+                exc.request_id = request_id
+                retry = attempt < policy.max_attempts
                 self.emit(EventType.PROVIDER_REQUEST_FAILED, **base, request_id=request_id, attempt=attempt,
-                          error_type=type(exc).__name__, error=redact_text(str(exc))[:500],
-                          status=getattr(exc, "status", None), will_retry=retry, latency_ms=latency)
-                if isinstance(exc, ProviderRateLimit):
-                    self.emit(EventType.PROVIDER_RATE_LIMITED, **base, request_id=request_id, source="provider",
-                              reason="http_429", wait_seconds=exc.retry_after)
+                          error_type=type(exc).__name__, error=str(exc), status=None, will_retry=retry,
+                          latency_ms=0.0, reason="rate_limiter_unavailable")
                 if not retry:
-                    if exc is raw:
-                        raise
-                    raise exc from raw
-                await self._sleep(policy.delay_before(attempt + 1, getattr(exc, "retry_after", None)))
+                    raise
+                await self._sleep(policy.delay_before(attempt + 1, None))
+                continue
+            try:
+                return await self._attempt(provider, capability, operation, fn, usage=usage, model=model,
+                                           estimate=estimate, idempotency_key=idempotency_key, policy=policy,
+                                           base=base, scope=scope, ledger=ledger, operation_id=operation_id,
+                                           attempt=attempt, request_id=request_id)
+            except _Retry as again:
+                await permit.aclose()
+                await self._sleep(again.delay)
                 continue
             finally:
-                release_request_id(token)
-            latency = round((self._clock() - started) * 1000, 3)
-            try:
-                record = usage(result, request_id).model_copy(update={"attempt": attempt, "latency_ms": latency})
-            except Exception as exc:  # noqa: BLE001 - e.g. a vendor changed its usage payload
-                # The provider did (and billed) the work, but what it used cannot be read. The attempt is settled at
-                # once as unknown with its estimate charged, instead of staying reserved until the sweep, and is
-                # not retried (a retry would pay again). The original error is re-raised.
-                if ledger is not None:
-                    self._settle(ledger, scope, reservation, ProviderRequestRecord(
+                await permit.aclose()
+
+    async def _attempt(self, provider: Provider, capability: Capability, operation: str,
+                       fn: Callable[[], Awaitable[T]], *, usage: UsageOf, model: str | None,
+                       estimate: Estimate | None, idempotency_key: str | None, policy: ProviderPolicy, base: dict,
+                       scope, ledger: UsageLedger | None, operation_id: str, attempt: int, request_id: str) -> T:
+        """One admitted attempt: reserve, send, settle. Raises `_Retry` when the attempt failed and may be retried."""
+        reservation = None
+        if ledger is not None:
+            try:  # BudgetExceededError, LeaseLost, SpendInFlight: nothing is sent
+                reservation = ledger.reserve(
+                    entry_id=request_id, operation_id=operation_id, attempt=attempt, capability=capability,
+                    operation=operation, provider=provider.name, model=model, estimate=estimate or Estimate(),
+                    timeout_seconds=policy.timeout_seconds, node_id=scope.node_id, agent_id=scope.agent_id,
+                    idempotency_key=idempotency_key)
+            except BudgetExceededError as exc:
+                self._spend_event(scope, EventType.BUDGET_EXHAUSTED, budget=exc.scope, limit=exc.limit,
+                                  used=exc.used, maximum=exc.maximum, **base)
+                raise
+            for entry_id in ledger.account.swept:
+                self._spend_event(scope, EventType.SPEND_ABANDONED, entry_id=entry_id)
+
+        self.emit(EventType.PROVIDER_REQUEST_STARTED, **base, request_id=request_id, attempt=attempt)
+        token = bind_request_id(request_id)
+        started = self._clock()
+        sent = False
+        try:
+            started = self._clock()
+            sent = True
+            result = await asyncio.wait_for(fn(), policy.timeout_seconds)
+        except asyncio.CancelledError:
+            # Cancelled from outside (an agent, router or node timeout; a caller that went away). Once the request
+            # was sent the provider may bill it: recorded as unknown, its estimate charged. Never swallowed.
+            if ledger is not None:
+                record = None
+                if sent:
+                    record = ProviderRequestRecord(
                         request_id=request_id, provider=provider.name, capability=capability.value,
                         operation=operation, model=model, attempt=attempt, status="failed",
-                        error_type=type(exc).__name__, latency_ms=latency, node_id=scope.node_id,
-                        agent_id=scope.agent_id), SpendState.UNKNOWN, "usage_unreadable", base)
-                self.emit(EventType.PROVIDER_REQUEST_FAILED, **base, request_id=request_id, attempt=attempt,
-                          error_type=type(exc).__name__, error=redact_text(str(exc))[:500], status=None,
-                          will_retry=False, latency_ms=latency, reason="usage_unreadable")
-                raise
-            self.usage_log.append(record)
-            self.emit(EventType.PROVIDER_REQUEST_COMPLETED, **base, request_id=request_id, attempt=attempt,
-                      latency_ms=latency, usage=record.model_dump(mode="json", exclude_none=True))
-            if ledger is not None:  # BudgetExceededError when the reported usage is over a limit (still recorded)
+                        error_type="CancelledError", latency_ms=round((self._clock() - started) * 1000, 3),
+                        node_id=scope.node_id, agent_id=scope.agent_id)
+                self._settle(ledger, scope, reservation, record,
+                             SpendState.UNKNOWN if sent else SpendState.RELEASED, "cancelled", base)
+            raise
+        except Exception as raw:  # noqa: BLE001 - every failure is recorded, then re-raised typed
+            exc = self._typed(raw, provider.name, policy)
+            exc_request_id = getattr(exc, "request_id", None) or request_id
+            if isinstance(exc, ProviderError):
+                exc.request_id = exc_request_id
+                exc.provider = exc.provider or provider.name
+            retry = is_retryable(exc) and attempt < policy.max_attempts
+            latency = round((self._clock() - started) * 1000, 3)
+            if ledger is not None:
+                state = failure_state(exc) if sent else SpendState.RELEASED
                 self._settle(ledger, scope, reservation, ProviderRequestRecord(
-                    request_id=request_id, provider=record.provider, capability=capability.value,
-                    operation=operation, model=record.model or model, attempt=attempt,
-                    vendor_request_id=record.vendor_request_id, latency_ms=latency, input_tokens=record.input_tokens,
-                    output_tokens=record.output_tokens, characters=record.characters,
-                    audio_seconds=record.audio_seconds, image_count=record.image_count,
-                    result_count=record.result_count, video_seconds=record.video_seconds,
-                    estimated_cost_usd=record.estimated_cost, actual_cost_usd=record.actual_cost,
-                    node_id=scope.node_id, agent_id=scope.agent_id), SpendState.SETTLED, None, base)
-            return result
+                    request_id=request_id, provider=provider.name, capability=capability.value,
+                    operation=operation, model=model, attempt=attempt, status="failed",
+                    error_type=type(exc).__name__, latency_ms=latency, node_id=scope.node_id,
+                    agent_id=scope.agent_id), state, _unknown_reason(exc), base)
+            self.emit(EventType.PROVIDER_REQUEST_FAILED, **base, request_id=request_id, attempt=attempt,
+                      error_type=type(exc).__name__, error=redact_text(str(exc))[:500],
+                      status=getattr(exc, "status", None), will_retry=retry, latency_ms=latency)
+            if isinstance(exc, ProviderRateLimit):
+                self.emit(EventType.PROVIDER_RATE_LIMITED, **base, request_id=request_id, source="provider",
+                          reason="http_429", wait_seconds=exc.retry_after)
+            if not retry:
+                if exc is raw:
+                    raise
+                raise exc from raw
+            raise _Retry(policy.delay_before(attempt + 1, getattr(exc, "retry_after", None))) from None
+        finally:
+            release_request_id(token)
+        latency = round((self._clock() - started) * 1000, 3)
+        try:
+            record = usage(result, request_id).model_copy(update={"attempt": attempt, "latency_ms": latency})
+        except Exception as exc:  # noqa: BLE001 - e.g. a vendor changed its usage payload
+            # The provider did (and billed) the work, but what it used cannot be read. The attempt is settled at
+            # once as unknown with its estimate charged, instead of staying reserved until the sweep, and is
+            # not retried (a retry would pay again). The original error is re-raised.
+            if ledger is not None:
+                self._settle(ledger, scope, reservation, ProviderRequestRecord(
+                    request_id=request_id, provider=provider.name, capability=capability.value,
+                    operation=operation, model=model, attempt=attempt, status="failed",
+                    error_type=type(exc).__name__, latency_ms=latency, node_id=scope.node_id,
+                    agent_id=scope.agent_id), SpendState.UNKNOWN, "usage_unreadable", base)
+            self.emit(EventType.PROVIDER_REQUEST_FAILED, **base, request_id=request_id, attempt=attempt,
+                      error_type=type(exc).__name__, error=redact_text(str(exc))[:500], status=None,
+                      will_retry=False, latency_ms=latency, reason="usage_unreadable")
+            raise
+        self.usage_log.append(record)
+        self.emit(EventType.PROVIDER_REQUEST_COMPLETED, **base, request_id=request_id, attempt=attempt,
+                  latency_ms=latency, usage=record.model_dump(mode="json", exclude_none=True))
+        if ledger is not None:  # BudgetExceededError when the reported usage is over a limit (still recorded)
+            self._settle(ledger, scope, reservation, ProviderRequestRecord(
+                request_id=request_id, provider=record.provider, capability=capability.value,
+                operation=operation, model=record.model or model, attempt=attempt,
+                vendor_request_id=record.vendor_request_id, latency_ms=latency, input_tokens=record.input_tokens,
+                output_tokens=record.output_tokens, characters=record.characters,
+                audio_seconds=record.audio_seconds, image_count=record.image_count,
+                result_count=record.result_count, video_seconds=record.video_seconds,
+                estimated_cost_usd=record.estimated_cost, actual_cost_usd=record.actual_cost,
+                node_id=scope.node_id, agent_id=scope.agent_id), SpendState.SETTLED, None, base)
+        return result
 
     def _settle(self, ledger: UsageLedger, scope, reservation: Reservation | None,
                 record: ProviderRequestRecord | None, state: SpendState, reason: str | None, base: dict) -> None:
@@ -276,6 +319,14 @@ class ProviderInvoker:
         self.emit(EventType.PROVIDER_FALLBACK, capability=capability.value, operation=operation,
                   from_provider=from_provider, to_provider=to_provider, error_type=type(error).__name__,
                   error=redact_text(str(error))[:500], request_id=getattr(error, "request_id", None))
+
+
+class _Retry(Exception):
+    """Internal: the attempt failed and is retried after `delay` seconds (its rate-limit slot given back first)."""
+
+    def __init__(self, delay: float) -> None:
+        super().__init__(delay)
+        self.delay = delay
 
 
 def failure_state(exc: BaseException) -> SpendState:

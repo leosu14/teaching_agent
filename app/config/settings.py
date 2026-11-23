@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.config.production import ProductionSettings
@@ -232,6 +232,23 @@ class Settings(BaseSettings):
     stream_heartbeat_seconds: float = Field(default=15.0, gt=0, le=290)
     stream_max_per_principal: int = Field(default=4, ge=1, le=100)
     stream_max_streams: int = Field(default=200, ge=1, le=100_000)
+    # A shared stream slot's lease (TA_SHARED_STATE=database): renewed every third of it while the stream is open; a
+    # slot whose API process died frees itself after at most this long.
+    stream_slot_ttl_seconds: float = Field(default=60.0, ge=3, le=3600)
+
+    # Shared state of several processes (multi-replica readiness, issue #66 PR 2; docs/deployment.md, "Shared state"):
+    # the provider rate limiter and the open-stream caps (the research cache is always in the database). "database":
+    # counted in the database every API process and worker shares; "memory": in each process's own memory, which holds
+    # only for one process. Unset: "database" on PostgreSQL, "memory" on SQLite. The startup check refuses "memory" on
+    # PostgreSQL unless TA_SINGLE_PROCESS=true declares that this is the only process using the database (with the
+    # worker embedded, and WEB_CONCURRENCY not above 1), and a production deployment refuses it always.
+    shared_state: Literal["memory", "database"] | None = None
+    single_process: bool = False
+    web_concurrency: int | None = Field(default=None, validation_alias=AliasChoices("web_concurrency",
+                                                                                     "WEB_CONCURRENCY"))
+    # A shared concurrency slot's lease: renewed every third of it while its provider request runs; a slot whose
+    # process died frees itself after at most this long.
+    rate_limit_slot_ttl_seconds: float = Field(default=30.0, ge=1, le=600)
 
     log_level: str = "INFO"
     log_json: bool = True
@@ -349,9 +366,40 @@ class Settings(BaseSettings):
                 + [f"TA_BUDGET_TOTAL_MAX_COST_USD cannot bound this request before it is sent: {problem}"
                    for problem in unbounded])
 
+    @property
+    def on_postgresql(self) -> bool:
+        return self.resolved_database_url.startswith(("postgresql://", "postgresql+"))
+
+    @property
+    def resolved_shared_state(self) -> Literal["memory", "database"]:
+        if self.shared_state is not None:
+            return self.shared_state
+        return "database" if self.on_postgresql else "memory"
+
+    def shared_state_problems(self) -> list[str]:
+        """Why the shared state would be decided in one process's memory while several processes share the database
+        (an empty list: it is not). Checked at every startup (issue #66 PR 2)."""
+        if self.resolved_shared_state != "memory" or not self.on_postgresql:
+            return []
+        what = "TA_SHARED_STATE=memory keeps the provider rate limiter and the progress-stream caps in each process's memory"
+        if not self.single_process:
+            return [f"{what}, so several API processes and workers on one PostgreSQL database would each apply their "
+                    "own limits: unset TA_SHARED_STATE (on PostgreSQL the default is 'database'), or set "
+                    "TA_SINGLE_PROCESS=true if this process is the only one using the database"]
+        if not self.worker_embedded:
+            return [f"{what}, but TA_SINGLE_PROCESS=true with TA_WORKER_EMBEDDED=false: the worker is a second process "
+                    "on the database. Unset TA_SHARED_STATE (on PostgreSQL the default is 'database')"]
+        if (self.web_concurrency or 1) > 1:
+            return [f"{what}, but WEB_CONCURRENCY={self.web_concurrency} starts several processes: unset "
+                    "TA_SHARED_STATE (on PostgreSQL the default is 'database')"]
+        return []
+
     def deployment_problems(self) -> list[str]:
         """Why this configuration is not a production deployment (an empty list: it is). Never shows a secret."""
         problems = []
+        if self.shared_state == "memory":  # unset is 'database' on PostgreSQL (SQLite is refused below)
+            problems.append("TA_SHARED_STATE must be 'database' (the default on PostgreSQL): the API and the worker are "
+                            "separate processes, and the rate limiter and stream caps must be shared by all of them")
         url = self.resolved_database_url
         if not url.startswith(("postgresql://", "postgresql+")):
             problems.append("TA_DATABASE_URL must be a PostgreSQL URL (postgresql+psycopg://...); SQLite is for one "

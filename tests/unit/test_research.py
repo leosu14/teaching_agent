@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
@@ -45,7 +46,7 @@ from app.tools.base import ToolCaller, ToolError, ToolTransientError
 from app.tools.manager import ToolManager
 from app.tools.rag.retrieve import RetrievalTool
 from app.tools.registry import ToolRegistry
-from app.tools.research.cache import InMemoryResearchCache
+from app.tools.research.cache import CACHE_TTL, InMemoryResearchCache, research_cache_key
 from app.tools.research.dedup import deduplicate
 from app.tools.research.rank import RankInput, RankSourcesTool
 from app.tools.web.search import SearchTool
@@ -235,12 +236,22 @@ async def test_search_tool_maps_provider_failures() -> None:
     assert fatal.calls == 1
 
 
+def learner_scope(learner_id: str = "learner-1", task_id: str = "t1"):
+    sc, seen = scope(task_id)
+    return replace(sc, learner_id=learner_id), seen
+
+
+def key(query: SearchQuery, **config) -> str:
+    providers = config.pop("providers", ["fake"])
+    return research_cache_key(query, providers=providers, provider_settings=[{} for _ in providers], **config)
+
+
 async def test_cache_serves_identical_traceable_results_and_can_be_invalidated() -> None:
     provider = FakeProvider()
     cache = InMemoryResearchCache()
     times = iter([NOW, NOW + timedelta(hours=1), NOW + timedelta(hours=2)])
     tool = SearchTool(provider, cache=cache, clock=lambda: next(times))
-    m, sc = manager(tool), scope()[0]
+    m, sc = manager(tool), learner_scope()[0]
     query = SearchQuery(query_id="q1", text="Football", target_ids=["a"])
     first = await m.call(CALLER, "search.web", query, sc)
     again = await m.call(CALLER, "search.web", query.model_copy(update={"query_id": "q7", "text": "football"}), sc)
@@ -249,23 +260,65 @@ async def test_cache_serves_identical_traceable_results_and_can_be_invalidated()
     assert again.results[0].source.retrieved_at == NOW
     line = sc.usage.summary.by_service["search:fake"]
     assert (line.calls, line.cache_hits, line.cost_usd) == (1, 1, None)  # the fake reports no cost: none invented
-    cache.invalidate(query)
+    cache.invalidate("learner-1", key(query))
     fresh = await m.call(CALLER, "search.web", query, sc)
     assert provider.calls == 2 and not fresh.cached and fresh.results[0].source.retrieved_at == NOW + timedelta(hours=1)
 
 
-def test_cache_get_set_invalidate_and_isolation() -> None:
+async def test_cache_is_per_learner_and_skipped_without_a_learner() -> None:
+    """Decision A2: one learner's cached search is never served to another, and a search made for no learner's lesson
+    task (no learner in the scope) is neither cached nor served from the cache."""
+    provider = FakeProvider()
     cache = InMemoryResearchCache()
-    q = SearchQuery(text="x")
-    assert cache.get(q) is None
+    m = manager(SearchTool(provider, cache=cache))
+    query = SearchQuery(text="Football")
+    await m.call(CALLER, "search.web", query, learner_scope("learner-1")[0])
+    other = await m.call(CALLER, "search.web", query, learner_scope("learner-2")[0])
+    assert provider.calls == 2 and not other.cached
+    mine = await m.call(CALLER, "search.web", query, learner_scope("learner-1")[0])
+    assert provider.calls == 2 and mine.cached
+    anonymous = await m.call(CALLER, "search.web", query, scope()[0])
+    assert provider.calls == 3 and not anonymous.cached and len(cache) == 2
+    cache.forget("learner-1")
+    assert cache.get("learner-1", key(query)) is None and cache.get("learner-2", key(query)) is not None
+
+
+def test_cache_key_normalises_the_query_and_distinguishes_every_setting() -> None:
+    q = SearchQuery(query_id="q1", text="Fútbol  Español", language="ES", target_ids=["x"])
+    assert key(q) == key(SearchQuery(query_id="q9", text=" fútbol\tespañol ", language="es"))
+    assert key(SearchQuery(text="ＡＢＣ")) == key(SearchQuery(text="abc"))  # NFKC: full-width letters fold
+    different = [
+        q.model_copy(update={"text": "futbol español"}), q.model_copy(update={"language": "en"}),
+        q.model_copy(update={"subject": "sport"}), q.model_copy(update={"domain": "football"}),
+        q.model_copy(update={"max_results": 9}),
+    ]
+    assert len({key(q)} | {key(d) for d in different}) == 1 + len(different)
+    configs = [{"providers": ["tavily"]}, {"providers": ["fake", "tavily"]}, {"include_domains": ["a.example"]},
+               {"exclude_domains": ["b.example"]}]
+    assert len({key(q)} | {key(q, **c) for c in configs}) == 1 + len(configs)
+    assert key(q, include_domains=["A.example", "b.example"]) == key(q, include_domains=["b.example", "a.example"])
+    assert len(key(q)) == 64  # a SHA-256: no query text is stored in the key
+
+
+def test_cache_get_set_invalidate_isolation_and_ttl() -> None:
+    now = [NOW]
+    cache = InMemoryResearchCache(clock=lambda: now[0])
+    k = key(SearchQuery(text="x"))
+    assert cache.get("l1", k) is None
     stored = [result("https://a.example/x")]
-    cache.set(q, stored)
-    got = cache.get(q)
-    assert got == stored and got is not stored
+    cache.set("l1", k, stored, task_id="t1")
+    got = cache.get("l1", k)
+    assert got == stored and got is not stored and cache.get("l2", k) is None
     got[0].source.metadata["tampered"] = True
-    assert "tampered" not in cache.get(q)[0].source.metadata
-    cache.invalidate(q)
-    assert cache.get(q) is None and len(cache) == 0
+    assert "tampered" not in cache.get("l1", k)[0].source.metadata
+    now[0] = NOW + CACHE_TTL - timedelta(seconds=1)
+    assert cache.get("l1", k) is not None
+    now[0] = NOW + CACHE_TTL  # 7 days (D4): never served at or past its expiry
+    assert cache.get("l1", k) is None and len(cache) == 0
+    cache.set("l1", k, stored, task_id="t1")
+    cache.invalidate("l1", k)
+    assert cache.get("l1", k) is None and len(cache) == 0
+    assert CACHE_TTL == timedelta(days=7)
 
 
 async def test_retrieval_tool_returns_knowledge_base_sources() -> None:

@@ -46,6 +46,15 @@ class ProviderUnavailable(ProviderError):
     """Connection failure, overload or a transient 5xx."""
 
 
+class RateLimiterUnavailable(ProviderUnavailable):
+    """The shared rate limiter could not decide (its database failed or timed out): the request is not sent and nothing
+    is reserved (issue #66, D3: fail closed). Retryable like any transient unavailability."""
+
+    def __init__(self, message: str = "the shared rate limiter is unavailable; the request is not sent", *,
+                 provider: str | None = None) -> None:
+        super().__init__(message, provider=provider, possibly_billed=False)
+
+
 class ProviderAuthenticationError(ProviderError):
     """Missing, invalid or unauthorised credentials (HTTP 401/403). Never retried."""
 

@@ -463,3 +463,61 @@ class ObjectDeletionRow(Base):
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+# --- shared state of several processes (multi-replica readiness, issue #66 PR 2) -----------------------------------
+# Bookkeeping, not domain data: a provider's rate-limit window and concurrency slots, the open progress-stream slots,
+# and the research cache. Every expiry is database time (epoch milliseconds, app/storage/dbclock.py). The rate-limit
+# and stream-slot tables are the only tables a GET route may write (decision A3: a stream's slot is acquired, renewed
+# and released while `GET .../stream` is open); they hold no learner data.
+
+
+class RateLimitStartRow(Base):
+    """One admitted provider request in the requests-per-minute window of a (capability, provider) `limit_key`.
+    Rows older than the window are deleted by the next admission of that key, and by the sweeper."""
+
+    __tablename__ = "rate_limit_starts"
+    __table_args__ = (Index("ix_rate_limit_starts_key", "limit_key", "started_ms"),)
+    start_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    limit_key: Mapped[str] = mapped_column(String(160))
+    started_ms: Mapped[int] = mapped_column(BigInteger)
+
+
+class RateLimitSlotRow(Base):
+    """One in-flight provider request of a (capability, provider) `limit_key`: a concurrency slot, held as a lease
+    that its process renews while the request runs and deletes when it ends. A killed process's slot frees itself at
+    `expires_ms`."""
+
+    __tablename__ = "rate_limit_slots"
+    __table_args__ = (Index("ix_rate_limit_slots_key", "limit_key", "expires_ms"),)
+    slot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    limit_key: Mapped[str] = mapped_column(String(160))
+    expires_ms: Mapped[int] = mapped_column(BigInteger)
+
+
+class StreamSlotRow(Base):
+    """One open progress stream (SSE), as a lease its API process renews while the stream is open and deletes when it
+    closes. `principal_hash` is a SHA-256 of whose streams count together (never the identity itself). A killed
+    process's slot frees itself at `expires_ms`."""
+
+    __tablename__ = "stream_slots"
+    __table_args__ = (Index("ix_stream_slots_principal", "principal_hash", "expires_ms"),
+                      Index("ix_stream_slots_expires", "expires_ms"))
+    slot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    principal_hash: Mapped[str] = mapped_column(String(64))
+    expires_ms: Mapped[int] = mapped_column(BigInteger)
+
+
+class ResearchCacheRow(Base):
+    """A cached web search result, per learner (decision A2: one learner's entry is never served to another).
+    `cache_key` is a SHA-256 of the normalised query and every setting that shapes the results
+    (app/tools/research/cache.py). Read only until `expires_ms` (7 days, database time; D4), deleted by the sweeper
+    after it, and erased with the learner's data."""
+
+    __tablename__ = "research_cache"
+    __table_args__ = (Index("ix_research_cache_expires", "expires_ms"),)
+    learner_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    body: Mapped[str] = mapped_column(Text)
+    created_ms: Mapped[int] = mapped_column(BigInteger)
+    expires_ms: Mapped[int] = mapped_column(BigInteger)

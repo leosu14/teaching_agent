@@ -24,8 +24,12 @@ They are validated when the container is built; errors say what to fix.
 | `TA_STREAM_POLL_SECONDS` | `1.0` | Progress streams: how often an open stream reads the database |
 | `TA_STREAM_SETTLE_SECONDS` | `2.0` | Progress streams: an event is delivered once the highest event `seq` read at least this long ago covers it (defence in depth: event appends commit in `seq` order; see architecture, Progress streams) |
 | `TA_STREAM_HEARTBEAT_SECONDS` | `15` | Progress streams: a keepalive comment after this long without a frame (below every proxy read timeout) |
-| `TA_STREAM_MAX_PER_PRINCIPAL` | `4` | Progress streams: open streams per principal in one API process (429 above) |
-| `TA_STREAM_MAX_STREAMS` | `200` | Progress streams: open streams in one API process (429 above) |
+| `TA_STREAM_MAX_PER_PRINCIPAL` | `4` | Progress streams: open streams per principal, across every API process on PostgreSQL (429 above) |
+| `TA_STREAM_MAX_STREAMS` | `200` | Progress streams: open streams in total, across every API process on PostgreSQL (429 above) |
+| `TA_STREAM_SLOT_TTL_SECONDS` | `60` | A shared stream slot's lease: a dead API process's slots are reusable after it |
+| `TA_SHARED_STATE` | `database` on PostgreSQL, `memory` on SQLite | Where the rate limiter and stream caps are counted (the research cache is always in the database) (docs/deployment.md, "Shared state"); `memory` on PostgreSQL is refused unless `TA_SINGLE_PROCESS=true` |
+| `TA_SINGLE_PROCESS` | `false` | Declares that this process is the only one using the database (allows `TA_SHARED_STATE=memory` on PostgreSQL with `TA_WORKER_EMBEDDED=true`; refused with `WEB_CONCURRENCY` above 1) |
+| `TA_RATE_LIMIT_SLOT_TTL_SECONDS` | `30` | A shared concurrency slot's lease: a dead process's slots free themselves after it |
 | `TA_RETRIEVAL_PROVIDER` | `local` | Knowledge-base retrieval |
 | `TA_VIDEO_COMPOSER` | `ffmpeg` | `ffmpeg` composes a real MP4 (needs `ffmpeg` and `ffprobe`); `mock` writes a manifest-only file for tests |
 | `TA_CORPUS_DIR` | `fixtures/demo` | Corpus for the mock search, mock image search (`image_catalog.json`) and local knowledge base |
@@ -66,7 +70,7 @@ They are validated when the container is built; errors say what to fix.
 | `TA_RESEARCH_MAX_RESULTS` | `5` | Results requested per search query |
 | `TA_RESEARCH_MAX_SOURCES` | `6` | Sources kept after ranking |
 | `TA_RESEARCH_MIN_RELIABILITY` | `0.5` | Sources rated below this are rejected (the reason is kept in the bundle) |
-| `TA_RESEARCH_CACHE` | `true` | Process-local cache of search results |
+| `TA_RESEARCH_CACHE` | `true` | Cache of search results, per learner, 7 days (shared by every process on PostgreSQL) |
 | `TA_VISUAL_FAILURE_POLICY` | `fail` | When a required visual cannot be produced: `fail` the lesson task, or `continue` with a warning. Optional visuals never stop a lesson |
 | `TA_VISUAL_MAX_PER_LESSON` | `6` | Most visuals the visual planner may propose (`0` disables visuals) |
 | `TA_VISUAL_MAX_CANDIDATES` | `3` | Searched candidates fetched and validated per visual before falling back or giving up |
@@ -145,7 +149,7 @@ are no longer read (they only ever accepted the mocks).
 | `VIDEO_GENERATION_MAX_DOWNLOAD_BYTES` | 200 MB | Largest clip file accepted from the provider |
 | `<CAP>_TIMEOUT_SECONDS` | LLM 120, TTS 90, IMAGE 110, SEARCH 15, IMAGE_SEARCH 15, VIDEO_GENERATION 60 (per request; jobs are polled) | Per-attempt timeout; every call has one |
 | `<CAP>_MAX_ATTEMPTS` | 3 (IMAGE 2) | Attempts for transient failures only |
-| `<CAP>_REQUESTS_PER_MINUTE` / `<CAP>_MAX_CONCURRENCY` | unlimited | Local, per-process rate limit; waiting emits `provider.rate_limited` |
+| `<CAP>_REQUESTS_PER_MINUTE` / `<CAP>_MAX_CONCURRENCY` | unlimited | Rate limit per capability and provider, shared by every process on PostgreSQL (`TA_SHARED_STATE`); waiting emits `provider.rate_limited` |
 | `PROVIDER_BACKOFF_SECONDS` / `_MULTIPLIER` / `PROVIDER_MAX_BACKOFF_SECONDS` | `0.5` / `2.0` / `8.0` | Bounded exponential backoff; a vendor `Retry-After` is honoured up to the cap |
 | `PROVIDER_MAX_REQUEST_BYTES` / `PROVIDER_MAX_RESPONSE_BYTES` | 4 MB / 32 MB | Size limits on provider HTTP bodies |
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.agents.audio.agent import AudioPlannerAgent
 from app.agents.curriculum.agent import LearningPathPlannerAgent
@@ -110,7 +110,9 @@ from app.services.learner_deletion import LearnerDeletionService
 from app.services.lesson_reading import LessonReadingService
 from app.services.releases import LessonReleaseService
 from app.services.ownership import OwnershipService
-from app.services.progress_stream import ProgressStreamService, StreamLimits
+from app.services.progress_stream import ProgressStreamService, SharedStreamSlots, StreamLimits
+from app.storage.shared_state import SharedStateSweeper, SqlRateLimits, SqlResearchCacheStore, SqlStreamSlots
+from app.providers.core.ratelimit import SharedRateLimiter
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
 from app.services.sweeper import TaskSweeper
@@ -173,7 +175,7 @@ from app.tools.video.generation import GeneratedVideoService, generation_tools
 from app.tools.video.service import VideoService
 from app.tools.video.tools import VideoArtifactTool, VideoComposeTool, VideoValidateTool
 from app.tools.video.validation import VideoPlanValidationTool
-from app.tools.research.cache import InMemoryResearchCache
+from app.tools.research.cache import SharedResearchCache
 from app.tools.research.rank import RankSourcesTool
 from app.tools.assessment.tools import AssessmentGradeTool
 from app.tools.teaching.grounding import TeachingGroundingTool
@@ -328,17 +330,33 @@ def build_llm_providers(settings: Settings, routing: RoutingConfig) -> dict[str,
     return providers
 
 
+def shared_limiters(store: SqlRateLimits, slot_ttl: timedelta):
+    """The invoker's limiter factory on a multi-process deployment: each (capability, provider) key's limits are
+    counted in the database every process shares (issue #66 PR 2)."""
+
+    def build(capability: Capability, provider: str, policy) -> SharedRateLimiter:
+        return SharedRateLimiter(store, f"{capability.value}:{provider}", requests_per_minute=policy.requests_per_minute,
+                                 max_concurrency=policy.max_concurrency, slot_ttl=slot_ttl, provider=provider)
+
+    return build
+
+
 def build_providers(settings: Settings, events: EventBus, *, llm_providers: dict[str, LLMProvider] | None = None,
-                    injected: dict[Capability, object] | None = None) -> ProviderStack:
+                    injected: dict[Capability, object] | None = None,
+                    rate_limits: SqlRateLimits | None = None) -> ProviderStack:
     """Build, register and select every provider. `llm_providers` and `injected` replace configured providers
-    (tests and demos); they are still registered and run under the invoker like any other."""
+    (tests and demos); they are still registered and run under the invoker like any other. With `rate_limits`, the
+    rate limits are shared by every process on the database; without, each process counts its own."""
     p = settings.providers
     for secret in p.secret_values():
         register_secret(secret)
     routing = apply_llm_overrides(load_routing(settings.routing_file), p)
     total = settings.budget_total_max_cost_usd
-    invoker = ProviderInvoker(policies=p.policies(), events=events, offline=p.offline,
-                              required_scope=TOTAL_SCOPE if total is not None else None, required_limit=total or 0.0)
+    invoker = ProviderInvoker(
+        policies=p.policies(), events=events, offline=p.offline,
+        required_scope=TOTAL_SCOPE if total is not None else None, required_limit=total or 0.0,
+        limiter_factory=(shared_limiters(rate_limits, timedelta(seconds=settings.rate_limit_slot_ttl_seconds))
+                         if rate_limits is not None else None))
     registry = ProviderRegistry(offline=p.offline)
 
     raw_llm = llm_providers if llm_providers is not None else build_llm_providers(settings, routing)
@@ -428,6 +446,8 @@ class Container:
     spend: SpendStore  # the spend ledger: entries and budget counters, read-only for callers
     _sessions: object
     object_store: object = None  # the artifacts' store (filesystem or S3), for readiness checks and closing
+    # The shared state's stores (None when TA_SHARED_STATE=memory): for operators and tests.
+    rate_limits: SqlRateLimits | None = None
 
     def close(self) -> None:
         self.progress_streams.close()
@@ -469,6 +489,8 @@ def build_container(
     if settings.deployment == "production" and (problems := settings.deployment_problems()):
         raise ConfigError("TA_DEPLOYMENT=production, but this is not a production deployment: "
                           + "; ".join(problems))
+    if problems := settings.shared_state_problems():  # issue #66 PR 2: no process-local limits on a shared database
+        raise ConfigError("; ".join(problems))
     knowledge_documents = None
     courses: list[CourseSummary] = []
     if retriever is None and settings.course_paths():
@@ -479,6 +501,14 @@ def build_container(
             raise ConfigError(f"TA_COURSES: {exc}") from None
 
     sessions = create_db(settings.resolved_database_url, settings.resolved_database_schema)
+    # Shared state (issue #66 PR 2): counted in the database every process shares, or in this process's memory.
+    shared = settings.resolved_shared_state == "database"
+    rate_limits = SqlRateLimits(sessions, clock) if shared else None
+    stream_store = SqlStreamSlots(sessions, clock) if shared else None
+    # The research cache is always in the database, SQLite included: the worker (which searches) and the API (which
+    # deletes a learner's data) are separate processes there too.
+    cache_store = SqlResearchCacheStore(sessions, clock)
+    research_cache = SharedResearchCache(cache_store) if settings.research_cache else None
     task_repo = SqlTaskRepository(sessions, clock)
     spend = SqlSpendRepository(sessions, clock)  # the durable spend ledger and budget counters
     budgets = settings.budget_defaults()
@@ -491,7 +521,8 @@ def build_container(
                 Capability.IMAGE_SEARCH: image_search_provider, Capability.SEARCH: search_provider,
                 Capability.VIDEO_GENERATION: video_generation_provider}
     providers = build_providers(settings, events, llm_providers=llm_providers,
-                                injected={k: v for k, v in injected.items() if v is not None})
+                                injected={k: v for k, v in injected.items() if v is not None},
+                                rate_limits=rate_limits)
     routing = providers.routing
     router = ModelRouter(routing, providers.llm)
 
@@ -525,7 +556,7 @@ def build_container(
     assessment_port = _AssessmentPort()  # bound to the AssessmentService once it exists (it needs the task service)
     registry = ToolRegistry()
     for tool in (
-        SearchTool(search, cache=InMemoryResearchCache() if settings.research_cache else None,
+        SearchTool(search, cache=research_cache,
                    include_domains=settings.providers.include_domains(),
                    exclude_domains=settings.providers.exclude_domains()),
         RankSourcesTool(HeuristicRanker()),
@@ -634,7 +665,9 @@ def build_container(
                              retry_max_backoff_seconds=settings.job_retry_max_backoff_seconds,
                              busy_retry_seconds=settings.job_busy_retry_seconds, clock=clock,
                              sweeper=TaskSweeper(task_repo, jobs, task_service,
-                                                 purge_objects=learner_deletion.purge_due),
+                                                 purge_objects=learner_deletion.purge_due,
+                                                 shared_state=SharedStateSweeper(rate_limits, stream_store,
+                                                                                 cache_store).sweep),
                              sweep_seconds=settings.worker_sweep_seconds)
     learner_service = LearnerService(memory, RetrieverKnowledgeBase(retriever), pedagogy, strategies)
     curriculum_service = CurriculumService(memory, RetrieverKnowledgeBase(retriever), curriculum, task_service, events)
@@ -658,6 +691,12 @@ def build_container(
     assignments = AssignmentService(SqlAssignmentRepository(sessions, clock), class_repo, memory, curriculum_service,
                                     courses=courses, events=events, clock=clock)
     curriculum_service.goal_lock = assignments.locks  # D7: what a learner may change on an assigned goal
+    stream_limits = StreamLimits(max_seconds=settings.stream_max_seconds, poll_seconds=settings.stream_poll_seconds,
+                                 settle_seconds=settings.stream_settle_seconds,
+                                 heartbeat_seconds=settings.stream_heartbeat_seconds,
+                                 max_per_principal=settings.stream_max_per_principal,
+                                 max_streams=settings.stream_max_streams,
+                                 slot_ttl_seconds=settings.stream_slot_ttl_seconds)
     return Container(
         settings=settings, events=events, llm_providers=providers.llm, router=router, providers=providers,
         tools=tools, agents=agents,
@@ -669,12 +708,11 @@ def build_container(
         ownership=OwnershipService(tasks=task_service, artifacts=artifacts, memory=memory, teaching=teaching_service,
                                    assessment=assessment_service, cycles=learning_cycle_service),
         progress_streams=ProgressStreamService(
-            tasks=task_service, cycles=learning_cycle_service, events=event_repo,
-            limits=StreamLimits(max_seconds=settings.stream_max_seconds, poll_seconds=settings.stream_poll_seconds,
-                                settle_seconds=settings.stream_settle_seconds,
-                                heartbeat_seconds=settings.stream_heartbeat_seconds,
-                                max_per_principal=settings.stream_max_per_principal,
-                                max_streams=settings.stream_max_streams)),
+            tasks=task_service, cycles=learning_cycle_service, events=event_repo, limits=stream_limits,
+            slots=SharedStreamSlots(stream_store, per_principal=stream_limits.max_per_principal,
+                                    total=stream_limits.max_streams,
+                                    ttl=timedelta(seconds=stream_limits.slot_ttl_seconds)) if shared else None),
+        rate_limits=rate_limits,
         classes=classes,
         lesson_releases=lesson_releases,
         assignments=assignments,

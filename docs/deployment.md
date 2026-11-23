@@ -234,12 +234,10 @@ through the gateway to its end while the worker runs the lesson.
 
 ### Stream caps
 
-Both caps are counted in the memory of one API process (`StreamSlots` in `app/services/progress_stream.py`): the
-per-principal cap and the "global" cap are per process. The pilot runs one API replica as one Uvicorn process
-(`deploy/entrypoint.sh`), so today they hold for the whole deployment. Running several Uvicorn workers (`--workers`
-or `WEB_CONCURRENCY`) or several API replicas would multiply both limits by the number of processes. Do not run more
-than one API process until the caps are counted in a shared store; that belongs with the multi-replica readiness work
-below.
+On PostgreSQL both caps are counted across every API process (`SharedStreamSlots`, issue #66 PR 2; "Shared state"
+below): each open stream holds a row in `stream_slots`, renewed every third of `TA_STREAM_SLOT_TTL_SECONDS` (60 s)
+while it is open and deleted when it ends, reconnects or the client goes away. A stream of an API process that died
+keeps its slot until the TTL runs out, then the slot is reusable. On SQLite (one process) they are counted in memory.
 
 ## Time and leases
 
@@ -265,10 +263,34 @@ database's clock on PostgreSQL (`clock_timestamp()`, read in each decision's own
   database is down.
 - **SQLite** (development, one machine) keeps the process clock.
 
+## Shared state
+
+The provider rate limiter, the progress-stream caps and the research cache are shared by every API process and worker
+on one PostgreSQL database (issue #66 PR 2; `app/storage/shared_state.py`, migration `0006_shared_state`). Time is the
+database's (above, "Time and leases"). No Redis or other service is needed.
+
+| Part | Where | When it cannot decide |
+|---|---|---|
+| Rate limiter: `<CAP>_REQUESTS_PER_MINUTE` (a 60 s window of admitted starts) and `<CAP>_MAX_CONCURRENCY` (slots held as leases of `TA_RATE_LIMIT_SLOT_TTL_SECONDS`, 30 s, renewed every third of it while the request runs) per capability and provider | `rate_limit_starts`, `rate_limit_slots` | **Fails closed** (D3): the request is not sent and nothing is reserved; it fails as `RateLimiterUnavailable` (retryable, so the task retries or goes `BLOCKED` like any provider outage), with `provider.request_failed` (`reason: rate_limiter_unavailable`) and the log line "provider rate limiter unavailable: no rate-limit decision could be made; the request is not sent". An admission waits at most 5 s on a lock or a statement. |
+| Stream caps (`TA_STREAM_MAX_PER_PRINCIPAL`, `TA_STREAM_MAX_STREAMS`) | `stream_slots` (a hash of the principal and an expiry) | A stream that cannot get a decision is refused with `503`; a stream whose renew fails, or finds its slot gone, stops as on access loss (the client reconnects). |
+| Research cache (`TA_RESEARCH_CACHE`): web search results per learner for 7 days | `research_cache` | A failed read is a miss (the search runs, rate-limited and budgeted); a failed write is not cached. |
+
+A process that dies keeps its rate-limit slots and stream slots only until their TTL: the next admission deletes
+expired rows before it counts, and the sweeper (`python -m app.services.worker --sweep`, and every
+`TA_WORKER_SWEEP_SECONDS` in the worker) deletes the rest, with expired cache entries.
+
+`TA_SHARED_STATE` chooses where the rate limiter and the stream caps are counted: `database` (the default on
+PostgreSQL) or `memory` (the default on SQLite: each process counts its own). The research cache is always in the
+database. Every process refuses to start with `memory` on PostgreSQL unless `TA_SINGLE_PROCESS=true` declares that it
+is the only process using the database, with the worker embedded (`TA_WORKER_EMBEDDED=true`) and `WEB_CONCURRENCY` not
+above 1; a production deployment (`TA_DEPLOYMENT=production`, an API and a worker) refuses `memory` always. The check
+cannot see `uvicorn --workers` or a second process started by hand with the same declaration: do not declare
+`TA_SINGLE_PROCESS` for those.
+
 ## Known limits
 
-- One API replica (one Uvicorn process) and one worker: the remaining multi-replica items (a shared rate limiter,
-  shared research cache, shared progress-stream caps, GET routes that do not write; issue #66 PRs 2 and 3) come next.
-  Database-time leases and the teaching-turn lease are in place (PR 1).
+- One API replica (one Uvicorn process) and one worker: the last multi-replica item (GET routes that do not write;
+  issue #66 PR 3) comes next. Database-time leases, the teaching-turn lease (PR 1), and the shared rate limiter,
+  stream caps and research cache (PR 2) are in place.
 - No metrics or alerting yet; `/health` and `check` are the readiness signals.
 - The login proxy is the deployment's choice and is not part of the image.

@@ -24,10 +24,12 @@ ROOT = Path(__file__).resolve().parents[2]
 # (app/teaching/repository.py, app/curriculum/repository.py, InMemorySpendStore) have no database: their injected
 # clock is their only clock.
 MODULES = ["app/storage/repositories.py", "app/services/learning_cycles.py", "app/services/sweeper.py",
-           "app/services/teaching.py", "app/observability/spend.py"]
+           "app/services/teaching.py", "app/observability/spend.py",
+           "app/storage/shared_state.py"]  # issue #66 PR 2: rate-limit, stream-slot and research-cache expiry
 # What a lease, fence or expiry decision names.
 LEASE_NAMES = {"lease_expires_ms", "turn_lease_expires_ms", "reserved_until_ms", "reserved_until", "available_at_ms",
-               "_require_fence", "_fence_current", "lease_live", "until", "claim_turns", "renew_turns", "turn_lease"}
+               "_require_fence", "_fence_current", "lease_live", "until", "claim_turns", "renew_turns", "turn_lease",
+               "expires_ms", "started_ms"}
 # Functions that name a lease column but read the process clock for something that is not a lease decision.
 ALLOWED = {
     # The job's requested backoff (`job.available_at`, from the caller's clock) is turned into a delay from the
