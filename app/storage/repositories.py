@@ -33,9 +33,11 @@ from app.schemas.review import GradeOverride, LessonRelease, ReleaseStatus
 from app.schemas.curriculum import (
     CurriculumProgress,
     CurriculumRecord,
+    CurriculumStatus,
     CurriculumVersion,
     RecordConflict,
     VersionConflict,
+    curriculum_status_for,
 )
 from app.schemas.common import new_id, utcnow
 from app.schemas.events import Event
@@ -50,6 +52,7 @@ from app.schemas.learning_cycle import (
 )
 from app.schemas.learner import (
     EvidenceConflict,
+    GoalStatus,
     LearnerProfile,
     LearningEvent,
     LearningEvidence,
@@ -721,6 +724,30 @@ class SqlCurriculumRepository:
         with self._sessions() as s:
             row = s.get(CurriculumRow, curriculum_id)
             return self._record(row) if row else None
+
+    def follow_goal(self, curriculum_id: str, goal_id: str, stored_status: Callable[[], GoalStatus | None],
+                    now: datetime) -> CurriculumStatus | None:
+        """One transaction: lock the goal's row (as every goal change does, `_lock_goal`), read its status, and save
+        the record's status from it (#65). A goal change committing after this read waits for this transaction and
+        is followed by its own writer's call, so the status written last is always the latest goal's. The goal is
+        read here, from the database; `stored_status` is for the stores that do not hold goals."""
+        conflict = RecordConflict(f"curriculum {curriculum_id} changed since it was read")
+        with self._sessions.begin() as s:
+            _fence_current(s, self._time)
+            goal = _lock_goal(s, goal_id)
+            if goal is None:
+                return None
+            row = s.get(CurriculumRow, curriculum_id, populate_existing=True)
+            if row is None:
+                return None
+            record = self._record(row)
+            wanted = curriculum_status_for(GoalStatus(goal.status))
+            if record.status == wanted:
+                return wanted
+            _versioned_save(s, CurriculumRow, CurriculumRow.curriculum_id, curriculum_id, row.version,
+                            {"body": record.model_copy(update={"status": wanted, "updated_at": now})
+                             .model_dump_json()}, conflict)
+            return wanted
 
     def records_for_learner(self, learner_id: str) -> list[CurriculumRecord]:
         with self._sessions() as s:

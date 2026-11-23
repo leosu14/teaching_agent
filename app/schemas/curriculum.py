@@ -554,6 +554,16 @@ def curriculum_id_for(goal_id: str) -> str:
     return stable_id("cur", goal_id)
 
 
+def curriculum_status_for(status: GoalStatus) -> CurriculumStatus:
+    """The curriculum status that follows a goal status (#65): a cancelled goal's curriculum is ARCHIVED, a completed
+    one's COMPLETED, an active or paused one's ACTIVE."""
+    if status == GoalStatus.CANCELLED:
+        return CurriculumStatus.ARCHIVED
+    if status == GoalStatus.COMPLETED:
+        return CurriculumStatus.COMPLETED
+    return CurriculumStatus.ACTIVE
+
+
 def curriculum_consistency(goal_id: str, objectives: list[CurriculumObjective]) -> list[str]:
     """Structural invariants every stored curriculum satisfies (the full validation, against the knowledge base,
     is app/curriculum/validation.py)."""

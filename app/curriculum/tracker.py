@@ -122,6 +122,16 @@ class CurriculumTracker:
         except UnknownGoal:  # deleted since it was read: with the learner's data
             raise LearnerDataGone() from None
 
+    def follow_goal(self, goal_id: str) -> CurriculumStatus | None:
+        """The goal's curriculum status set from the goal as stored now (`CurriculumEngine.follow_goal`)."""
+        def stored() -> GoalStatus | None:
+            try:
+                return self.memory.goal(goal_id).status
+            except UnknownGoal:  # deleted meanwhile: its curriculum goes with the learner's data
+                return None
+
+        return self.engine.follow_goal(curriculum_id_for(goal_id), goal_id, stored)
+
     @staticmethod
     def review_counts(model: LearnerModel, evidence_required: Mapping[str, int]) -> dict[str, int]:
         """Reviews of a concept: the pieces of evidence recorded beyond what mastering it required."""
@@ -159,9 +169,9 @@ class CurriculumTracker:
                 goal = self.complete(goal, version, as_of)
                 if goal.status == GoalStatus.COMPLETED:
                     completed.add(goal.goal_id)
-                else:  # paused or cancelled meanwhile: not completed, and its curriculum follows the goal
-                    self.engine.set_status(curriculum_id_for(goal.goal_id), CurriculumStatus.ARCHIVED
-                                           if goal.status == GoalStatus.CANCELLED else CurriculumStatus.ACTIVE)
+                # Completed, or paused or cancelled meanwhile: the curriculum follows the goal as stored now, never
+                # `goal` (a copy that a cancel committed after can make stale, #65).
+                self.follow_goal(goal.goal_id)
             current = self.engine.current(curriculum_id_for(goal.goal_id))
             if current is None:  # as above
                 raise LearnerDataGone()

@@ -26,7 +26,6 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 
-from app.curriculum.engine import curriculum_id_for
 from app.curriculum.tracker import DEFAULT_FRAMEWORK, FRAMEWORK_KEY
 from app.learner.memory import LearnerMemoryService, UnknownGoal, UnknownLearner
 from app.schemas.assignment import (
@@ -52,7 +51,7 @@ from app.schemas.assignment import (
 )
 from app.schemas.classroom import Classroom
 from app.schemas.common import utcnow
-from app.schemas.curriculum import CurriculumStatus, GoalInput, ObjectiveStatus
+from app.schemas.curriculum import GoalInput, ObjectiveStatus
 from app.schemas.events import EventType
 from app.schemas.lease import LearnerDataGone, learner_writes
 from app.schemas.learner import GoalStatus, LearningGoal, stable_id
@@ -326,8 +325,8 @@ class AssignmentService:
                 goal = self.repository.sync_goal(assignment_id, record.goal_id, lambda a, g: synced(a, g, now))
         except LearnerDataGone:
             return
-        if goal is not None and goal.status == GoalStatus.CANCELLED:
-            self._curriculum.engine.set_status(curriculum_id_for(goal.goal_id), CurriculumStatus.ARCHIVED)
+        if goal is not None and goal.status == GoalStatus.CANCELLED:  # from the goal as stored now (#65)
+            self._curriculum.follow_goal(goal.goal_id)
 
     # --- targets ----------------------------------------------------------------------------------------------------
 

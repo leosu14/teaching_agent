@@ -108,9 +108,14 @@ artifacts, results, grades, learner memory or curricula (`app/schemas/lease.py`,
   write made from a stale read is refused instead of silently dropping the other writer's change. Learner memory then
   redoes the whole change on a fresh read (`LearnerMemoryService._changing`; every change is idempotent, so redoing
   is safe); a curriculum status change is redone the same way, and a commit whose base version moved meanwhile is a
-  `CurriculumConflict` (rebuild the plan), as when the base had already moved at planning time. Goals and the
-  curriculum progress snapshot stay last-write-wins: a goal's only automatic change is its completion, and the
-  snapshot only decides which transitions are reported.
+  `CurriculumConflict` (rebuild the plan), as when the base had already moved at planning time. The progress
+  snapshot stays last-write-wins: it only decides which transitions are reported.
+- **A curriculum's status follows its goal (#65).** ACTIVE for an active or paused goal, COMPLETED for a completed
+  one, ARCHIVED for a cancelled one (`curriculum_status_for`). It is never derived from a copy of the goal: every
+  writer that changes a goal's status (a PATCH, an assignment's cancellation, a refresh completing it) then calls
+  `CurriculumEngine.follow_goal`, which locks the goal's row (as every goal change does), reads its status and saves
+  the record's status in that one transaction. Whatever order racing writers commit in, the last status written is
+  the latest goal's.
 - **Shared planning tasks.** `build_curriculum` derives the planning task's id from its build key, so concurrent
   callers share one task and its lease lets one of them run it; a caller that finds it finished uses the result.
 - **Learning cycles** keep their own drive lease in the cycle record (below), with the same rules: each claim raises

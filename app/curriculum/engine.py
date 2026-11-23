@@ -9,6 +9,7 @@ Every change is deterministic and idempotent:
   replans deterministically (a new version only when the path changes; wording is carried over).
 
 The goal's own status lives with the learner's goals: `refresh` reports `goal_completed`, the caller stores it.
+The curriculum's status follows the goal as stored (`follow_goal`), never a copy of the goal read earlier (#65).
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from app.schemas.curriculum import (
     curriculum_id_for,
 )
 from app.schemas.events import EventType
-from app.schemas.learner import LearningGoal
+from app.schemas.learner import GoalStatus, LearningGoal
 from app.schemas.pedagogy import LearnerModel
 
 
@@ -134,6 +135,21 @@ class CurriculumEngine:
                 if attempt == STATUS_ATTEMPTS:
                     raise
 
+    def follow_goal(self, curriculum_id: str, goal_id: str,
+                    stored_status: Callable[[], GoalStatus | None]) -> CurriculumStatus | None:
+        """Set the curriculum's status from its goal's status as stored now (`curriculum_status_for`) and return it;
+        None when the curriculum or the goal is gone. Every writer that changes a goal's status calls this after its
+        change committed (#65), so the last call reads the latest status; never a copy of the goal read earlier.
+        The store reads the goal under its write lock in the transaction that writes the record
+        (`CurriculumRepository.follow_goal`); a pointer moved meanwhile (a replan) is read again."""
+        for attempt in range(1, STATUS_ATTEMPTS + 1):
+            try:
+                return self.repository.follow_goal(curriculum_id, goal_id, stored_status, self._clock())
+            except RecordConflict:
+                if attempt == STATUS_ATTEMPTS:
+                    raise
+        return None  # unreachable
+
     def refresh(self, goal: LearningGoal, model: LearnerModel, as_of: datetime, *,
                 review_counts: Mapping[str, int] | None = None, graph: ConceptGraph | None = None,
                 task_id: str | None = None, scope: ExecutionScope | None = None,
@@ -165,9 +181,7 @@ class CurriculumEngine:
             if p.status == ObjectiveStatus.MASTERED and old != ObjectiveStatus.MASTERED:
                 mastered.append(p.objective_id)
         completed = progress.goal_complete and goal.is_active
-        self.repository.save_progress(progress)
-        if completed:
-            self.set_status(curriculum_id, CurriculumStatus.COMPLETED)
+        self.repository.save_progress(progress)  # the status is the caller's: it follows the stored goal (#65)
         if scope is not None:
             for oid in started:
                 o = version.objective(oid)
