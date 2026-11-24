@@ -93,6 +93,10 @@ class CurriculumService:
     def _scope(self) -> ExecutionScope:
         return ExecutionScope(events=self._events, usage=UsageLedger())
 
+    def follow_goal(self, goal_id: str) -> CurriculumStatus | None:
+        """Set the goal's curriculum status from the goal as stored now (#65); call it after a goal status change."""
+        return self._tracker.follow_goal(goal_id)
+
     # --- goals --------------------------------------------------------------------------------------------------
 
     async def create_goal(self, learner_id: str, data: GoalInput) -> tuple[LearningGoal, bool]:
@@ -189,7 +193,10 @@ class CurriculumService:
             update["metadata"] = {**given, FRAMEWORK_KEY: goal.metadata.get(FRAMEWORK_KEY), **kept}
         now = self._clock()
 
+        stored_before: list[GoalStatus] = []  # the status this change replaced, as stored (under the goal's lock)
+
         def apply(current: LearningGoal) -> LearningGoal:
+            stored_before[:] = [current.status]
             if locked:  # the lock's status rules hold against the goal as stored now (D7, D13)
                 check_assigned_update(current, data)
             changes = {**update, "updated_at": now}
@@ -200,9 +207,10 @@ class CurriculumService:
         # One atomic update of the stored goal: a concurrent change (a teacher's new deadline, a refresh completing
         # it) is applied before or after this one, never overwritten by a stale copy.
         changed = self._memory.update_goal(goal_id, apply)
-        if changed.status != goal.status:
-            self._engine.set_status(curriculum_id_for(goal_id), CurriculumStatus.ARCHIVED
-                                    if changed.status == GoalStatus.CANCELLED else CurriculumStatus.ACTIVE)
+        if stored_before and changed.status != stored_before[0]:
+            # This change moved the stored status (judged against the goal it replaced, not the earlier read `goal`):
+            # the curriculum follows the goal as stored now, not `changed`, which a racing writer can make stale (#65).
+            self.follow_goal(goal_id)
         self._scope().emit(EventType.GOAL_UPDATED, learner_id=goal.learner_id, goal_id=goal_id,
                            fields=sorted(update), status=changed.status.value)
         before, after = GoalSpec.of(goal), GoalSpec.of(changed)

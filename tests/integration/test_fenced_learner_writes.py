@@ -321,6 +321,37 @@ def test_a_status_change_racing_a_replan_keeps_the_new_version(tmp_path) -> None
         dispose(sessions)
 
 
+def test_following_a_goal_reads_the_stored_goal_under_its_lock(tmp_path) -> None:
+    """#65: on the database, `follow_goal` reads the goal's status from its row, under the row's lock, in the
+    transaction that writes the curriculum's status: never from a copy a caller holds (here a stale PAUSED), and a
+    replan that moved the pointer is kept."""
+    from app.curriculum.engine import CurriculumEngine
+    from app.schemas.learner import GoalStatus, LearningGoal
+
+    sessions = create_db(f"sqlite:///{tmp_path / 'db.sqlite'}")
+    try:
+        repo = SqlCurriculumRepository(sessions)
+        goals = SqlGoalRepository(sessions)
+        now = utcnow()
+        goals.save(LearningGoal(goal_id="g", learner_id="l1", domain="spanish", target_concepts=["es.present"],
+                                status=GoalStatus.CANCELLED))
+        repo.save_record(CurriculumRecord(curriculum_id="cur", learner_id="l1", goal_id="g", title="t",
+                                          domain="spanish", current_version=1, current_version_id="v1",
+                                          created_at=now, updated_at=now))
+        repo.save_record(repo.record("cur").model_copy(update={"current_version": 2, "current_version_id": "v2"}))
+        engine = CurriculumEngine(repo)
+        assert engine.follow_goal("cur", "g", lambda: GoalStatus.PAUSED) == CurriculumStatus.ARCHIVED
+        stored = repo.record("cur")
+        assert stored.status == CurriculumStatus.ARCHIVED and stored.current_version_id == "v2"
+        goals.update("g", lambda g: g.model_copy(update={"status": GoalStatus.COMPLETED}))
+        assert engine.follow_goal("cur", "g", lambda: GoalStatus.PAUSED) == CurriculumStatus.COMPLETED
+        assert engine.follow_goal("cur", "gone", lambda: GoalStatus.ACTIVE) is None  # the goal is gone
+        assert engine.follow_goal("nothing", "g", lambda: GoalStatus.ACTIVE) is None  # no curriculum
+        assert repo.record("cur").status == CurriculumStatus.COMPLETED
+    finally:
+        dispose(sessions)
+
+
 def test_an_existing_sqlite_database_gets_the_version_columns(tmp_path) -> None:
     from sqlalchemy import text
 

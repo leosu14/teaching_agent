@@ -465,7 +465,8 @@ def test_refresh_reports_transitions_once_and_completes_the_goal_once() -> None:
     assert done.goal_completed and len(done.mastered) == 1
     assert [e.type for e in events].count(EventType.GOAL_COMPLETED) == 1
     assert [e.type for e in events].count(EventType.OBJECTIVE_MASTERED) == 1
-    assert engine.record(curriculum_id_for(gl.goal_id)).status.value == "COMPLETED"
+    # The engine reports the completion; the curriculum status follows the goal once the caller stored it (#65).
+    assert engine.record(curriculum_id_for(gl.goal_id)).status.value == "ACTIVE"
     completed = gl.model_copy(update={"status": GoalStatus.COMPLETED})
     assert not engine.refresh(completed, model_of(memory, g), NOW, scope=s).goal_completed
 
@@ -512,6 +513,7 @@ def test_tracker_ignores_goals_without_curricula_and_stores_completion() -> None
     committed(engine, gl, model_of(memory, g), g)
     tracked = tracker.tracked(LEARNER, NOW, graphs={DOMAIN: g})
     assert tracked.completed_now == {"goal-2"} and memory.goal("goal-2").status == GoalStatus.COMPLETED
+    assert engine.record(curriculum_id_for("goal-2")).status.value == "COMPLETED"  # follows the stored goal
     assert tracker.next_action(LEARNER, tracked).action == LearningActionType.COMPLETE
     assert memory.goal(implicit.goal_id).status == GoalStatus.ACTIVE
 

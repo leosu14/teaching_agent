@@ -5,10 +5,19 @@ same pattern."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
 
-from app.schemas.curriculum import CurriculumProgress, CurriculumRecord, CurriculumVersion, VersionConflict
+from app.schemas.curriculum import (
+    CurriculumProgress,
+    CurriculumRecord,
+    CurriculumStatus,
+    CurriculumVersion,
+    VersionConflict,
+    curriculum_status_for,
+)
+from app.schemas.learner import GoalStatus
 from app.schemas.learning_cycle import (
     TERMINAL_CYCLE_STATUSES,
     CycleConflict,
@@ -27,6 +36,15 @@ class CurriculumRepository(Protocol):
     def record(self, curriculum_id: str) -> CurriculumRecord | None: ...
 
     def records_for_learner(self, learner_id: str) -> list[CurriculumRecord]: ...
+
+    def follow_goal(self, curriculum_id: str, goal_id: str, stored_status: Callable[[], GoalStatus | None],
+                    now: datetime) -> CurriculumStatus | None:
+        """Set the curriculum's status from its goal's status as stored now (`curriculum_status_for`) and return it;
+        None when the curriculum or the goal is gone (nothing written). A store that holds the goals reads the
+        goal's status itself, under the goal's write lock, in the transaction that writes the record (#65);
+        `stored_status` reads it for a store that does not (returning None there writes nothing). `RecordConflict`
+        when the record moved meanwhile."""
+        ...
 
     def add_version(self, version: CurriculumVersion) -> bool:
         """Store a new version and return True; False for an identical re-add; VersionConflict otherwise."""
@@ -64,6 +82,18 @@ class InMemoryCurriculumRepository:
     def records_for_learner(self, learner_id: str) -> list[CurriculumRecord]:
         return sorted((r.model_copy(deep=True) for r in self._records.values() if r.learner_id == learner_id),
                       key=lambda r: r.curriculum_id)
+
+    def follow_goal(self, curriculum_id: str, goal_id: str, stored_status: Callable[[], GoalStatus | None],
+                    now: datetime) -> CurriculumStatus | None:
+        """In one process, with no await in between: nothing can change the goal between the read and the write."""
+        record = self._records.get(curriculum_id)
+        status = stored_status() if record is not None else None
+        if status is None:
+            return None
+        wanted = curriculum_status_for(status)
+        if record.status != wanted:
+            self._records[curriculum_id] = record.model_copy(update={"status": wanted, "updated_at": now})
+        return wanted
 
     def add_version(self, version: CurriculumVersion) -> bool:
         existing = self._versions.get(version.version_id)
