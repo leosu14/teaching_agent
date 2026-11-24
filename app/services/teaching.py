@@ -448,7 +448,8 @@ class TeachingSessionService:
                 curriculum = None
             if curriculum is not None and any(o.objective_id == session.objective_id for o in curriculum.objectives):
                 return curriculum.progress.of(session.objective_id).model_dump(mode="json")
-        concept = self._memory.get_or_create(session.learner_id).concepts.get(session.state.concept_id)
+        profile = self._memory.find(session.learner_id)  # a read: never stores a profile (#66 PR 3)
+        concept = profile.concepts.get(session.state.concept_id) if profile is not None else None
         return {"concept_id": session.state.concept_id, "current_mastery": concept.mastery if concept else None,
                 "evidence_count": concept.evidence_count if concept else 0}
 

@@ -6,6 +6,7 @@ so they run the exact same application services.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -562,9 +563,13 @@ def build_container(
         task's own (fenced) writes, so a goal its evidence completes is COMPLETED without any read (#66 PR 3)."""
         if not memory.goals(learner_id, subject):  # no goal in the subject: nothing to refresh, no graph to load
             return
-        graph = await evidence_knowledge.graph(subject)
-        evidence_tracker.tracked(learner_id, curriculum.now(), graphs={subject: graph}, domain=subject, replan=False,
-                                 task_id=scope.task_id, scope=scope)
+        try:
+            graph = await evidence_knowledge.graph(subject)
+            evidence_tracker.tracked(learner_id, curriculum.now(), graphs={subject: graph}, domain=subject,
+                                     replan=False, task_id=scope.task_id, scope=scope)
+        except Exception as exc:  # noqa: BLE001 - the evidence is stored; the sweeper refreshes what this missed
+            logging.getLogger(__name__).warning("lesson task %s: refreshing curricula after its evidence failed: %s",
+                                                scope.task_id, type(exc).__name__)
     registry = ToolRegistry()
     for tool in (
         SearchTool(search, cache=research_cache,

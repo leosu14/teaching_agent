@@ -51,13 +51,21 @@ async def test_each_pass_is_bounded_and_every_learner_is_reached_within_ceil_n_o
     assert seen["curricula"][-5:] == learners[:5]
 
 
-async def test_an_exact_multiple_wraps_with_an_empty_batch() -> None:
-    s, seen = sweeper(["a", "b", "c", "d"], batch=2)
-    for _ in range(3):
+@pytest.mark.parametrize("n,batch", [(4, 2), (6, 3), (5, 5), (1, 1), (7, 2)])
+async def test_every_id_is_reached_in_any_window_of_ceil_n_over_batch_passes(n, batch) -> None:
+    """No empty pass when N is a multiple of the batch: any ceil(N / batch) consecutive passes cover every id."""
+    learners = [f"l{i}" for i in range(n)]
+    s, seen = sweeper(learners, batch=batch)
+    window = math.ceil(n / batch)
+    per_pass = []
+    for _ in range(3 * window):
+        before = len(seen["curricula"])
         await s.sweep()
-    assert seen["curricula"] == ["a", "b", "c", "d"]  # the third pass found nothing after "d" and wrapped
-    await s.sweep()
-    assert seen["curricula"][-2:] == ["a", "b"]
+        per_pass.append(seen["curricula"][before:])
+    assert all(per_pass), per_pass  # never an empty pass
+    for start in range(len(per_pass) - window + 1):
+        covered = {i for p in per_pass[start:start + window] for i in p}
+        assert covered == set(learners), (start, per_pass)
 
 
 async def test_full_walks_every_id_batch_by_batch_from_the_first() -> None:
@@ -88,7 +96,7 @@ async def test_an_id_deleted_meanwhile_is_skipped_without_an_error(gone) -> None
 async def test_a_failure_is_counted_logged_without_the_learner_and_does_not_stop_the_pass(caplog) -> None:
     async def refresh(i: str) -> None:
         if i == "secret-learner":
-            raise RuntimeError("database down")
+            raise RuntimeError(f"database down while refreshing {i}")  # a message naming the learner
 
     s, seen = sweeper(["a", "secret-learner", "z"], batch=10, refresh=refresh, cycles=["c1"])
     with caplog.at_level(logging.INFO, logger="app.services.sweeper"):

@@ -522,10 +522,13 @@ class _CycleReader(_Reader):
         for step in record.steps:
             if step.kind in TASK_STEP_KINDS and step.child_id and self._own(record, step.child_id):
                 sources[task_source(step.child_id)] = step.child_id
-        return Snapshot(view=view, stopped=cycle_stopped(view, lease_live=self._cycles.lease_live(record),
-                                                         child_busy=self._child_busy(record),
-                                                         after_version=self._after_version),
-                        sources=sources)
+        # A read stores nothing (issue #66 PR 3): while the view is ahead of the stored record, the events of what it
+        # shows are still owed (the worker's hook or the sweeper stores them), so the stream is in progress and does
+        # not send `end` before they can be delivered.
+        owed = record.version != view.version
+        return Snapshot(view=view, stopped=not owed and cycle_stopped(
+            view, lease_live=self._cycles.lease_live(record), child_busy=self._child_busy(record),
+            after_version=self._after_version), sources=sources)
 
     def _own(self, record: LearningCycle, child_id: str) -> bool:
         if child_id not in self._children:

@@ -151,9 +151,9 @@ class TaskWorker:
         if self.on_settled is not None:
             try:
                 await self.on_settled(job.task_id)
-            except Exception:  # noqa: BLE001 - the sweeper reconciles it later
-                logger.exception("job %s: storing the outcome of task %s for its learning cycle failed", job.job_id,
-                                 job.task_id)
+            except Exception as exc:  # noqa: BLE001 - the sweeper reconciles it later
+                logger.warning("job %s: storing the outcome of task %s for its learning cycle failed: %s", job.job_id,
+                               job.task_id, type(exc).__name__)  # the type only: a message can name a learner
 
     async def _attempt(self, job: TaskJob) -> None:
         try:

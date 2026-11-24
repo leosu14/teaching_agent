@@ -92,9 +92,10 @@ class CurriculumTracker:
         return self.memory.framework_for(goal.learner_id, goal.domain,
                                          goal.metadata.get(FRAMEWORK_KEY) or DEFAULT_FRAMEWORK)
 
-    def model(self, goal: LearningGoal, universe: list[str], as_of: datetime) -> LearnerModel:
+    def model(self, goal: LearningGoal, universe: list[str], as_of: datetime, *, create: bool = True) -> LearnerModel:
+        """`create=False`: a read's model, which never stores a profile (`LearnerMemoryService.learner_model`)."""
         return self.memory.learner_model(goal.learner_id, goal.domain, self.framework_for(goal), goal.target_level,
-                                         universe, as_of=as_of)
+                                         universe, as_of=as_of, create=create)
 
     def completion_time(self, goal: LearningGoal, version: CurriculumVersion, as_of: datetime) -> datetime:
         """When the learner first reached the mastery that completes the goal (D11): the timestamp of the earliest
@@ -226,9 +227,9 @@ class CurriculumTracker:
             if version is None:
                 continue
             model = result.models.get(goal.domain)
-            if model is None:  # the same model as `tracked` reads
+            if model is None:  # the same model as `tracked` reads (stored nothing: no profile is created)
                 graph = graphs.get(goal.domain)
-                model = self.model(goal, graph.ids if graph is not None else [], as_of)
+                model = self.model(goal, graph.ids if graph is not None else [], as_of, create=False)
                 result.models[goal.domain] = model
             counts = self.review_counts(model, {o.concept_id: o.evidence_required for o in version.objectives})
             progress = self.engine.progress(version, model, as_of, counts)

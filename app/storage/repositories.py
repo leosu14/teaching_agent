@@ -752,14 +752,14 @@ class SqlCurriculumRepository:
             return wanted
 
     def learners_to_refresh(self, after: str | None, limit: int) -> list[str]:
-        """The sweeper's round-robin (issue #66 PR 3): learners after `after` (in id order) with an ACTIVE goal that
-        has a curriculum, at most `limit`. Read-only."""
+        """The sweeper's round-robin (issue #66 PR 3): learners after `after` (in id order) with a curriculum, at most
+        `limit`. Read-only. Every one, not only those with an ACTIVE goal: the refresh also repairs a curriculum
+        whose status no longer follows its (completed, paused or cancelled) goal, a follow a crash lost (#65)."""
         with self._sessions() as s:
-            query = (select(LearningGoalRow.learner_id).join(CurriculumRow, CurriculumRow.goal_id == LearningGoalRow.goal_id)
-                     .where(LearningGoalRow.status == GoalStatus.ACTIVE.value).distinct()
-                     .order_by(LearningGoalRow.learner_id).limit(limit))
+            query = (select(CurriculumRow.learner_id).distinct()
+                     .order_by(CurriculumRow.learner_id).limit(limit))
             if after is not None:
-                query = query.where(LearningGoalRow.learner_id > after)
+                query = query.where(CurriculumRow.learner_id > after)
             return list(s.scalars(query))
 
     def records_for_learner(self, learner_id: str) -> list[CurriculumRecord]:
@@ -811,11 +811,17 @@ class SqlCurriculumRepository:
                 done = s.execute(insert(CurriculumProgressRow).values(curriculum_id=progress.curriculum_id, body=body)
                                  .on_conflict_do_nothing(index_elements=["curriculum_id"]))
                 return done.rowcount == 1
-            # A compare-and-set on the snapshot read (a stored body is `model_dump_json()`, which round-trips).
-            # PostgreSQL: a concurrent UPDATE waits on the row, then re-checks the body, which no longer matches.
+            # A compare-and-set on the snapshot read: the stored row is compared as a model (so a change of the
+            # schema's serialisation never freezes old snapshots), then replaced only if its text is still the text
+            # just compared (PostgreSQL: a concurrent UPDATE waits on the row, then re-checks the body, which no
+            # longer matches; SQLite serialises writers).
+            raw = s.scalar(select(CurriculumProgressRow.body)
+                           .where(CurriculumProgressRow.curriculum_id == progress.curriculum_id))
+            if raw is None or CurriculumProgress.model_validate_json(raw) != expected:
+                return False
             done = s.execute(update(CurriculumProgressRow)
                              .where(CurriculumProgressRow.curriculum_id == progress.curriculum_id,
-                                    CurriculumProgressRow.body == expected.model_dump_json())  # type: ignore[union-attr]
+                                    CurriculumProgressRow.body == raw)
                              .values(body=body))
             return done.rowcount == 1
 

@@ -117,3 +117,20 @@ def test_get_next_action_writes_nothing_on_postgresql(replicas) -> None:  # noqa
     finally:
         event.remove(bind, "before_cursor_execute", before)
     assert writes == [], writes
+
+
+def test_the_sweepers_id_queries_run_on_postgresql(replicas) -> None:  # noqa: F811
+    """The three batch queries the container's sweeper uses (the race tests above stub the cycle and outbox ones)."""
+    c0, _ = replicas
+    lid, _ = learner_with_a_mastered_goal(c0)
+    found, after = [], None
+    while True:  # every learner with a curriculum, in id order, a batch at a time
+        batch = c0.curriculum_service.engine.repository.learners_to_refresh(after, 500)
+        found += batch
+        if len(batch) < 500:
+            break
+        after = batch[-1]
+    assert lid in found and found == sorted(found)
+    for ids in (c0.learning_cycle_service.repository.active_ids(None, 50),
+                c0.teaching_service.repository.with_pending_outbox(None, 50)):
+        assert isinstance(ids, list) and ids == sorted(ids) and len(ids) <= 50

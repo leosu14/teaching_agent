@@ -288,14 +288,17 @@ class CurriculumService:
         if version is None or record is None:
             return None
         when = as_of or self._clock()
-        model = self._tracker.model(goal, [], when)
+        model = self._tracker.model(goal, [], when, create=False)  # a read: no profile is stored (#66 PR 3)
         counts = self._tracker.review_counts(model, {o.concept_id: o.evidence_required for o in version.objectives})
         progress = self._engine.progress(version, model, when, counts)
         objectives = [o.model_copy(update={"current_mastery": progress.of(o.objective_id).current_mastery,
                                            "status": progress.of(o.objective_id).status}) for o in version.objectives]
+        versions = len(self._engine.versions(record.curriculum_id))
+        if versions == 0:  # deleted with the learner's data since the version was read: no curriculum any more
+            return None
         return Curriculum(curriculum_id=record.curriculum_id, learner_id=record.learner_id, goal_id=record.goal_id,
                           title=record.title, objectives=objectives, version=version.version,
-                          version_id=version.version_id, versions=len(self._engine.versions(record.curriculum_id)),
+                          version_id=version.version_id, versions=versions,
                           status=record.status, created_at=record.created_at, updated_at=record.updated_at,
                           progress=progress, warnings=version.warnings)
 

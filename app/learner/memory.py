@@ -110,6 +110,10 @@ class LearnerMemoryService:
             raise UnknownLearner(learner_id)
         return profile
 
+    def find(self, learner_id: str) -> LearnerProfile | None:
+        """The profile, or None: a read that never stores one (GET routes, issue #66 PR 3)."""
+        return self._repo.get(learner_id)
+
     def get_or_create(self, learner_id: str) -> LearnerProfile:
         profile = self._repo.get(learner_id)
         if profile is None:
@@ -251,10 +255,17 @@ class LearnerMemoryService:
         )
 
     def learner_model(self, learner_id: str, subject: str, framework_id: str, target_level: str | None = None,
-                      universe: list[str] | None = None, as_of: datetime | None = None) -> LearnerModel:
-        """`as_of`: the time the model is read at (review due dates, recency); default now."""
+                      universe: list[str] | None = None, as_of: datetime | None = None, *,
+                      create: bool = True) -> LearnerModel:
+        """`as_of`: the time the model is read at (review due dates, recency); default now. `create=False` (a read:
+        a GET, issue #66 PR 3) never stores a profile: a learner without one (never sent, or deleted meanwhile) is
+        modelled from a blank profile that is not saved."""
         self._frameworks.get(framework_id)
-        profile = self.get_or_create(learner_id)
+        if create:
+            profile = self.get_or_create(learner_id)
+        else:
+            profile = self.find(learner_id) or LearnerProfile(
+                learner_id=learner_id, created_at=self._clock(), updated_at=self._clock())
         return build_learner_model(
             profile, domain=subject, framework_id=framework_id, target_level=target_level,
             evidence=self._evidence.for_learner(learner_id), events=self._events.for_learner(learner_id),

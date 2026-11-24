@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from app.api.auth import AUTHOR
+from app.api.auth import AUTHOR, TEACHER
 from app.storage.orm import EventRow
 from tests.auth import client_for
 from tests.conftest import LEARNER as ONBOARDING
@@ -104,6 +104,73 @@ def _next_action_racing_the_deletion(world, obj, attr) -> int:
     with c._sessions() as s:
         assert not [e.type for e in s.scalars(select(EventRow)) if ids["goal"] in e.body]
     return status
+
+
+GET_ROUTES = [(m, p) for m, p in ROUTES if m == "GET"]
+
+
+@pytest.mark.parametrize("method,template", GET_ROUTES)
+def test_a_deletion_just_before_a_gets_profile_read_recreates_nothing(world, method, template) -> None:
+    """Issue #66 PR 3: a GET writes nothing, even racing the learner's deletion. The deletion commits just before the
+    request's first read of the learner's profile (where a learner model or a mastery lookup reads it): the GET
+    answers without a server error and never re-creates the profile (a read builds a blank model instead of storing
+    one), and nothing of the learner is left."""
+    env, ids, auth = world
+    c = env.container
+    a_ids = learner_ids(c._sessions, LEARNER)
+    m, path, body = concrete(method, template, ids)
+    repo = c.learner_service._memory._repo
+    real, state = repo.get, {"armed": False, "deleted": False}
+
+    def get_after_a_deletion(learner_id, *args, **kwargs):
+        if state["armed"] and not state["deleted"] and learner_id == LEARNER:
+            state["deleted"] = True
+            c.learner_deletion.delete(LEARNER)
+        return real(learner_id, *args, **kwargs)
+
+    repo.get = get_after_a_deletion
+    try:
+        with client_for(c, LEARNER, roles=(AUTHOR,), auth=auth) as a:
+            state["armed"] = True
+            headers = auth.headers(user_id=test_security_api.TEACHER_ID, roles=(TEACHER,)) \
+                if path.startswith("/classes") else None
+            status = a.request(m, path, json=body, headers=headers).status_code
+            state["armed"] = False
+    finally:
+        repo.get = real
+    if not state["deleted"]:
+        pytest.skip("the route reads no profile")
+    assert status < 500, (m, template, status)
+    assert real(LEARNER) is None, (m, template)  # not re-created
+    c.learner_deletion.delete(LEARNER)
+    assert sorted(set(db_residue(c._sessions, a_ids))) == []
+
+
+def test_a_deletion_just_before_the_next_actions_model_read_recreates_no_profile(world) -> None:
+    """Issue #66 PR 3 (the review's probe): the deletion commits after GET next-action read the goals and curricula,
+    just before it builds the learner model. The read never stores a profile (on main its write was refused under
+    the deletion lock; now nothing is written), so the learner stays deleted."""
+    env, ids, auth = world
+    c = env.container
+    a_ids = learner_ids(c._sessions, LEARNER)
+    tracker = c.curriculum_service._tracker
+    real, receipts = tracker.model, []
+
+    def after_a_deletion(*args, **kwargs):
+        if not receipts:
+            receipts.append(c.learner_deletion.delete(LEARNER))
+        return real(*args, **kwargs)
+
+    tracker.model = after_a_deletion
+    try:
+        with client_for(c, LEARNER, auth=auth) as a:
+            assert a.get(f"/learners/{LEARNER}/next-action").status_code < 500
+    finally:
+        tracker.model = real
+    assert receipts and receipts[0].records.get("learners") == 1
+    assert c.learner_service._memory._repo.get(LEARNER) is None  # not re-created
+    assert c.learner_deletion.delete(LEARNER).records == {}
+    assert sorted(set(db_residue(c._sessions, a_ids))) == []
 
 
 def test_a_deletion_during_the_next_actions_graph_load(world) -> None:

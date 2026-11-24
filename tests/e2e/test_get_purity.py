@@ -262,3 +262,35 @@ def test_a_get_racing_nothing_is_still_pure_after_a_restart(world) -> None:
             assert a.get(path, headers=headers).status_code < 500, path
     assert writes.domain() == [], writes.domain()
     asyncio.run(c.task_worker.sweep_learning(full=True))
+
+
+async def test_a_cycle_stream_does_not_end_while_the_view_is_ahead_of_the_stored_cycle(world, monkeypatch) -> None:
+    """The stream's read stores nothing, so a stop state it folds in (here WAITING) has no stored events yet when
+    the read's copy is ahead of the stored record: the stream is in progress (no `end` before the writer stores and
+    publishes them). With the copy at the stored version, the same WAITING view stops it."""
+    import threading
+
+    from app.services.progress_stream import _CycleReader
+
+    env, ids, auth = world
+    c = env.container
+    cycles = c.learning_cycle_service
+    record, view = await cycles.read(ids["cycle"])
+    assert view.status.value == "WAITING" and record.version == view.version
+
+    def snapshot():
+        out = []
+        t = threading.Thread(target=lambda: out.append(
+            _CycleReader(cycles, c.task_service, ids["cycle"], None).read()))
+        t.start()
+        t.join()
+        return out[0]
+
+    assert snapshot().stopped is True  # nothing owed: WAITING stops it
+    ahead = record.model_copy(update={"version": record.version + 1})  # an observation folded in, not stored
+
+    async def read_ahead(cycle_id):
+        return ahead, view
+
+    monkeypatch.setattr(cycles, "read", read_ahead)
+    assert snapshot().stopped is False

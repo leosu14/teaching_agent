@@ -196,16 +196,18 @@ fencing and checkpoints above still apply unchanged.
   exhausted jobs whose worker died. Recovery still waits for the killed worker's lease to run out (up to
   `TASK_LEASE`): telling a dead worker from a slow one sooner needs worker liveness, a later item.
 - **Learning sweeper** (`LearningSweeper`, same file; issue #66 PR 3). It runs with every sweep and owns the writes
-  GET routes used to make (below, "GET routes write nothing"): it refreshes the curricula of every learner with an
-  active goal that has one (progress, transitions, completion with D11's `completed_at`, the curriculum following
+  GET routes used to make (below, "GET routes write nothing"): it refreshes the curricula of every learner with a
+  curriculum (progress, transitions, completion with D11's `completed_at`, the curriculum following
   the goal: what time alone changes, such as reviews falling due, and an evidence write's refresh a crash lost),
   reconciles every active learning cycle with its children (and publishes any cycle's events a crash left), and
   publishes every teaching outbox a crash left. Each kind takes at most `TA_SWEEP_BATCH` ids per pass, round robin
   from a cursor kept in the process, so a pass is bounded and every id is reached within ceil(N / batch) passes;
   `--sweep` walks every id, a batch at a time. Every action is idempotent (stable ids, version-checked or fenced
   writes, transitions reported once), so concurrent sweepers on several workers change nothing twice; one id's
-  failure is logged and counted and never stops the pass, an id deleted meanwhile is skipped, and each pass logs one
-  summary line. Production refuses to start without it (docs/deployment.md, "The sweeper").
+  failure is logged (its exception type, never a learner id) and counted and never stops the pass, an id deleted
+  meanwhile is skipped, and each pass logs one summary line. The curricula pass visits every learner with a
+  curriculum, so a follow a crash lost is repaired even when the learner has no active goal left. A failed refresh
+  in a lesson task's evidence step is logged and left to the sweeper: the evidence itself is stored. Production refuses to start without it (docs/deployment.md, "The sweeper").
 - **The cycle hook.** After each job the worker calls `LearningCycleService.child_settled(task_id)`: when the task is
   a learning cycle's child, the cycle stores what the child did (`reconcile`, under the learner's deletion lock), so
   a lesson answered through the task API moves its cycle on without anyone reading it. A failed or lost hook (the
@@ -231,8 +233,13 @@ DELETE. Where each write the reads used to make happens now:
 | `GET /learning-cycles/{id}` and its stream: the observation of the cycle's children, the events it implies, a crash's unpublished cycle events | Folded into the view only (`read` returns the stored `version`); stored by the cycle's own POSTs (responses, resume, cancel, start), the worker's cycle hook and the sweeper. |
 | `GET /teaching-sessions/{id}` and the cycle's read of its session: a crash's unpublished outbox (events, artifacts, the finalize that integrates the session into learner memory and curricula) | Left owed; published by the session's next write (an answer, pause, resume, cancel) and by the sweeper. |
 
-A goal whose completion rule holds but that no write has completed shows as complete in every read (the next
-action's COMPLETE, the assignment views' COMPLETED with D11's time computed read-only) until a writer stores it.
+A goal whose completion rule holds but that no write has completed shows as complete in the next action (COMPLETE)
+and in the assignment views (COMPLETED, with D11's time computed read-only) until a writer stores it; the goal
+routes show it as stored (ACTIVE) until then. A read never stores a learner profile either: a learner model for a
+read is built from a blank profile when there is none (never sent, or deleted while the request ran).
+`goal.completed` is emitted just after the completion is stored; a crash between the two loses that event (the goal
+is no longer active, so no later refresh reports it), where before this change a crash could report a completion
+that was never stored.
 `LearnerService.record_evidence` (used by scripts and tests; no route) records evidence without a refresh: the
 sweeper refreshes after it.
 
@@ -1132,7 +1139,8 @@ read-only. Every stored change goes through one transition that copies the recor
 `app/curriculum/cycle.py`) and a version-checked write, so it strictly increases: status, the current step, a child
 attached, the drive lease (claim, renew, release, takeover), the waiting prompt, failure and outcome all advance it.
 A child's own progress advances it once a writer stores it (the cycle's own POSTs, the worker's cycle hook, the
-sweeper; a read folds it into the view only); the termination rule also reads the current child's
+sweeper; a read folds it into the view only, and a stream whose view is ahead of the stored record is in progress,
+so `end` waits for the writer to store and publish what the view shows); the termination rule also reads the current child's
 status and job directly. `after_version` (query parameter, cycle stream only) is set by the client to the `version`
 of the view it showed when it sent a POST, and only decides whether WAITING or BLOCKED may send `end`. The cursor
 orders event rows by `seq`; the version orders cycle states. Neither is encoded in or compared with the other.

@@ -205,3 +205,31 @@ async def test_a_cancel_before_the_first_plan_commits_leaves_the_new_curriculum_
         engine.commit = commit
     assert c.curriculum_service.goal(goal.goal_id).status == GoalStatus.CANCELLED
     assert status_of(c, goal.goal_id) == CurriculumStatus.ARCHIVED
+
+
+async def test_a_lost_follow_of_a_learner_with_no_active_goal_is_repaired_by_the_sweeper(world) -> None:  # noqa: F811
+    """Issue #66 PR 3: no GET repairs it any more, and the learner has no ACTIVE goal left; the sweeper still visits
+    every learner with a curriculum and its refresh repairs the follow."""
+    c = world.c
+    goal = await own_mastered_goal(world)
+    for other in c.curriculum_service.goals(LEARNER):
+        if other.goal_id != goal.goal_id and other.status == GoalStatus.ACTIVE:
+            await c.curriculum_service.update_goal(other.goal_id, GoalUpdate(status=GoalStatus.PAUSED), user_id="test")
+    tracker = c.curriculum_service._tracker
+    complete = tracker.complete
+
+    def dies(g, version, as_of):
+        complete(g, version, as_of)
+        raise RuntimeError("the worker died here")
+
+    tracker.complete = dies
+    try:
+        with pytest.raises(RuntimeError):
+            await c.curriculum_service.tracked(LEARNER, as_of=utcnow() + timedelta(minutes=5))
+    finally:
+        tracker.complete = complete
+    assert all(g.status != GoalStatus.ACTIVE for g in c.curriculum_service.goals(LEARNER))
+    assert status_of(c, goal.goal_id) == CurriculumStatus.ACTIVE  # the follow never ran
+    report = await c.task_worker.sweep_learning(full=True)
+    assert report.errors == 0, report.summary()
+    assert status_of(c, goal.goal_id) == CurriculumStatus.COMPLETED

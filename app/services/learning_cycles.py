@@ -350,8 +350,10 @@ class LearningCycleService:
     async def read(self, cycle_id: str) -> tuple[LearningCycle, LearningCycleView]:
         """`get`, with the record its view was built from (the progress stream reads its lease and steps)."""
         stored = self.cycle(cycle_id)
-        cycle = await self._advance(cycle_id, token=None, store=False)
+        cycle = await self._advance(cycle_id, token=None, store=False, start=stored)
         view = await self._view(cycle)
+        # The stored version: a folded observation bumps only the copy's (`cycle.version > view.version` then: work
+        # a writer still owes, which the progress stream counts as in progress).
         return cycle, view.model_copy(update={"version": stored.version})
 
     async def child_settled(self, task_id: str) -> LearningCycle | None:
@@ -460,14 +462,15 @@ class LearningCycleService:
                 continue
         return await self._load(cycle_id)
 
-    async def _advance(self, cycle_id: str, *, token: str | None, store: bool = True) -> LearningCycle:
+    async def _advance(self, cycle_id: str, *, token: str | None, store: bool = True,
+                       start: LearningCycle | None = None) -> LearningCycle:
         """Fold the children's state into the cycle and, under the lease `token`, do the work it owes: record its
         artifact, start the next step's child, run or resume a child, finish. Without the lease it only observes.
         Returns when the learner is needed, the cycle ended or blocked, or (without the lease) when only driving could
         change it. A write that lost to a concurrent one is recomputed from the stored cycle: every step is derived
         from the record and the children, and children are found by key, so recomputing never repeats work. Without
         `store` (a read) nothing is written or published: each observation is folded into the returned copy only."""
-        cycle = await self._load(cycle_id, publish=store)
+        cycle = start if start is not None and not store else await self._load(cycle_id, publish=store)
         drive = token is not None
         for _ in range(MAX_TRANSITIONS):
             now = self._lease_now() if drive else None

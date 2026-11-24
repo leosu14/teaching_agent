@@ -135,7 +135,7 @@ class LearningSweepReport:
 class LearningSweeper:
     """The writes no read makes any more (issue #66 PR 3), recovered in bounded batches:
 
-    - **curricula**: every learner with an ACTIVE goal that has a curriculum gets its curricula refreshed and stored
+    - **curricula**: every learner with a curriculum gets its curricula refreshed and stored
       (progress, transitions once, completion with D11's `completed_at`, the curriculum status following the goal):
       what time alone changes (review due dates, mastery decay), and an evidence write's refresh a crash lost;
     - **cycles**: every active learning cycle stores what its children did (`reconcile`): a child a worker finished
@@ -170,17 +170,22 @@ class LearningSweeper:
             if full:
                 p.cursor = None  # every id, from the first
             while True:
-                ids = p.ids(p.cursor, self._batch)
+                # One id past the batch tells whether more follow, so a pass that reaches the end wraps at once
+                # (never an empty pass: every id within ceil(N / batch) passes).
+                found = p.ids(p.cursor, self._batch + 1)
+                ids, more = found[:self._batch], len(found) > self._batch
                 for item in ids:
                     try:
                         await p.act(item)
                         report.done[p.name] += 1
                     except (NotFound, LearnerDataGone, CycleNotFound, TeachingSessionNotFound):  # deleted meanwhile
                         continue
-                    except Exception:  # noqa: BLE001 - logged; the next round tries again
+                    except Exception as exc:  # noqa: BLE001 - logged; the next round tries again
                         report.failed[p.name] += 1
-                        logger.exception("sweeper: %s %s failed", p.name, item if p.log_ids else "(a learner)")
-                p.cursor = ids[-1] if len(ids) == self._batch else None
+                        # The exception's type only: its message (and a traceback's) can name a learner.
+                        logger.warning("sweeper: %s %s failed: %s", p.name, item if p.log_ids else "(a learner)",
+                                       type(exc).__name__)
+                p.cursor = ids[-1] if more else None
                 report.wrapped[p.name] = p.cursor is None
                 if not full or p.cursor is None:
                     break

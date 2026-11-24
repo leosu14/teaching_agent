@@ -297,6 +297,9 @@ learning cycles with their children, and publishing what a crash left in a cycle
 outbox. It also queues the recovery of tasks a killed worker left mid-run, fails exhausted jobs and deletes expired
 shared-state rows ([Shared state](#shared-state)).
 
+- **Coverage.** Curricula: every learner with a curriculum (so a curriculum whose goal was completed or cancelled by a
+  writer that crashed before the curriculum followed it is repaired too). Cycles: every active one, and any with
+  events a crash left. Outboxes: every teaching session with unpublished items.
 - **Startup.** The worker sweeps every `TA_WORKER_SWEEP_SECONDS` (default 60). With `TA_DEPLOYMENT=production` the
   API and the worker refuse to start with `TA_WORKER_SWEEP_SECONDS=0` unless `TA_SWEEP_EXTERNAL=true` declares that
   cron runs `python -m app.services.worker --sweep` instead (for example every minute; one at a time is enough, and
@@ -310,9 +313,11 @@ shared-state rows ([Shared state](#shared-state)).
   writes are version-checked or fenced, objective transitions and `goal.completed` are reported once, and a goal's
   completion time is the evidence's, not the sweep's. A learner deleted during a pass is skipped.
 - **Monitoring.** Each pass logs one line, `sweeper: learning pass: curricula: N done, F failed; cycles: ...;
-  outboxes: ...`, at INFO, or at WARNING when anything failed; each failure is logged with its traceback (never with a
-  learner id) and retried on the next pass. `--sweep` prints the same counts and exits 1 when anything failed, 0
-  otherwise: alert on a non-zero exit, or on WARNING lines from the worker.
+  outboxes: ...`, at INFO, or at WARNING when anything failed; each failure is logged as a WARNING line with its
+  kind and exception type (never a learner id, nor a message that could name one) and retried on the next pass.
+  `--sweep` prints the same counts and exits 1 when anything in the learning sweep failed, 0 otherwise (an error of
+  the task sweep itself ends it with a traceback, also non-zero; tasks left FAILED for a manual resume are counted,
+  not an error): alert on a non-zero exit, or on WARNING lines from the worker.
 - **Recovery.** Nothing to do by hand for a failure that clears (a database blip): the next pass retries every id.
   A failure that persists keeps its WARNING line and traceback until fixed; after the fix, the next pass (or a manual
   `python -m app.services.worker --sweep`) catches up on everything owed. A stopped worker leaves the work owed, not

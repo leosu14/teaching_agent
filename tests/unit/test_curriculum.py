@@ -331,6 +331,15 @@ def test_a_progress_snapshot_is_stored_only_over_the_one_its_refresh_read(tmp_pa
     assert repo.progress(v1.curriculum_id) == later
     assert repo.save_progress(stale) is True  # unconditional, as before
     assert repo.progress(v1.curriculum_id) == stale
+    if kind == "sql":  # a row serialised differently (another key order, an older schema) still compares as a model
+        from sqlalchemy import update as sql_update
+
+        from app.storage.orm import CurriculumProgressRow
+        import json
+        reordered = json.dumps(dict(reversed(list(json.loads(stale.model_dump_json()).items()))))
+        with repo._sessions.begin() as s:
+            s.execute(sql_update(CurriculumProgressRow).values(body=reordered))
+        assert repo.save_progress(later, expected=stale) is True
 
 
 # --- next learning action ------------------------------------------------------------------------------------------
