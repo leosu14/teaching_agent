@@ -19,6 +19,7 @@ from app.api.routes import (
     assessment,
     classes,
     curriculum,
+    dev_reload,
     learners,
     learning_cycles,
     lessons,
@@ -68,8 +69,9 @@ from app.storage.repositories import NotFound
 def create_app(container: Container | None = None, *, authenticator: Authenticator | None = None) -> FastAPI:
     """`authenticator` defaults to the one the settings configure (TA_AUTH_MODE); a configuration that cannot
     authenticate anyone raises ConfigError here, so the API never starts open."""
+    settings = container.settings if container is not None else Settings()
     if authenticator is None:
-        authenticator = authenticator_from_settings(container.settings if container is not None else Settings())
+        authenticator = authenticator_from_settings(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -115,6 +117,9 @@ def create_app(container: Container | None = None, *, authenticator: Authenticat
     app.add_exception_handler(ArtifactContentUnavailable, _handler(500, error="ContentUnavailable"))
 
     app.include_router(system.public)
+    if settings.dev_live_reload:  # development only, off by default (app/api/routes/dev_reload.py)
+        dev_reload.quiet_access_log()
+        app.include_router(dev_reload.router())
     app.include_router(web.router)
     for module in (system, tasks, artifacts, learners, curriculum, teaching, lessons, assessment, learning_cycles,
                    classes):

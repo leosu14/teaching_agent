@@ -14,6 +14,7 @@ They are validated when the container is built; errors say what to fix.
 | `TA_AUTH_GATEWAY_MAX_SKEW_SECONDS` | `300` | `gateway` mode: how old a signed identity may be |
 | `TA_AUTH_STATIC_TOKENS_FILE` | unset | `static` mode: JSON `{token: {user_id, learner_ids, roles}}`, kept outside the repository |
 | `TA_WORKER_EMBEDDED` | `false` | Run the task worker inside the API process (development). Otherwise run `python -m app.services.worker` next to the API |
+| `TA_DEV_LIVE_RELOAD` | `false` | Development only: serve `app/api/web/` from disk and reload open pages of the student app and the teacher dashboard when their HTML, CSS or JS changes (see [development-macos.md](development-macos.md)). Refused under `TA_DEPLOYMENT=production` |
 | `TA_WORKER_POLL_SECONDS` | `1.0` | How often an idle worker looks for queued jobs |
 | `TA_JOB_MAX_ATTEMPTS` | `3` | Attempts of a task job whose worker errors or dies before the job is FAILED |
 | `TA_JOB_RETRY_BACKOFF_SECONDS` | `5` | Delay before a failed job's next attempt, doubled per attempt |
