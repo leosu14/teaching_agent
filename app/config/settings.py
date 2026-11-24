@@ -212,6 +212,9 @@ class Settings(BaseSettings):
     # work; a worker process (`python -m app.services.worker`) runs it. `worker_embedded` runs one inside the API
     # process instead, for local development with a single process.
     worker_embedded: bool = False
+    # Development only (app/api/routes/dev_reload.py): serve app/api/web/ from disk and reload open pages when it
+    # changes. Off by default; refused under TA_DEPLOYMENT=production.
+    dev_live_reload: bool = False
     worker_poll_seconds: float = Field(default=1.0, gt=0, le=60)
     job_max_attempts: int = Field(default=3, ge=1, le=20)  # attempts of a job whose worker errors or dies
     job_retry_backoff_seconds: float = Field(default=5.0, ge=0, le=3600)  # doubled per failed attempt
@@ -421,6 +424,8 @@ class Settings(BaseSettings):
                             "characters")
         if self.worker_embedded:
             problems.append("TA_WORKER_EMBEDDED must be false: the worker runs as its own process")
+        if self.dev_live_reload:
+            problems.append("TA_DEV_LIVE_RELOAD must be false: live reload is for local development only")
         priced = (self.providers.llm_input_price_per_mtok is not None
                   and self.providers.llm_output_price_per_mtok is not None)
         for scope in ("learner_daily", "global_daily"):

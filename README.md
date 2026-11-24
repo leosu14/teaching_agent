@@ -188,6 +188,8 @@ run, use development tokens (`TA_AUTH_MODE=static`, [docs/security.md](docs/secu
 `TA_WORKER_EMBEDDED=true`, open `http://localhost:8000/app/` and paste a token whose principal has one learner id.
 Teachers use the dashboard at `/app/teacher.html` with a token whose principal has the `teacher` role (see
 [architecture](docs/architecture.md#teacher-dashboard)).
+For a live preview while editing the apps (the page reloads itself after each edit to `app/api/web/`), see
+[docs/development-macos.md](docs/development-macos.md).
 
 Every route except `/health` and the app's static files requires authentication, and every learner-owned resource is checked against the
 caller's learner scope (another learner's resource is a 404, exactly like a missing one). Learner-facing responses
