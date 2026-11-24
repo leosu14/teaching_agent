@@ -390,8 +390,20 @@ class TeachingSessionService:
 
     # --- reads ---------------------------------------------------------------------------------------------------
 
-    async def get(self, session_id: str) -> TeachingSession:
-        return await self._load(session_id)
+    async def get(self, session_id: str, *, publish: bool = True) -> TeachingSession:
+        """The session. `publish`: first publish what a crash left in its outbox (a writer's read); a read for a GET
+        passes False and publishes nothing (issue #66 PR 3)."""
+        return await self._load(session_id, publish=publish)
+
+    async def publish_pending(self, session_id: str) -> bool:
+        """Publish what a crash left in the session's outbox (the sweeper's recovery; issue #66 PR 3). Idempotent:
+        every item has a stable id and is marked published once. True when something was pending."""
+        session = self._repo.get(session_id)
+        if session is None or not self._repo.pending_outbox(session_id):
+            return False
+        with learner_writes(session.learner_id, session.task_id):  # refused once the learner is deleted
+            await self._publish(session)
+        return True
 
     def sessions(self, learner_id: str) -> list[TeachingSession]:
         return self._repo.for_learner(learner_id)
@@ -403,7 +415,8 @@ class TeachingSessionService:
         return self._repo.evidence(session_id)
 
     async def view(self, session_id: str) -> TeachingSessionView:
-        session = await self._load(session_id)
+        """The learner's view, read-only (issue #66 PR 3): a pending outbox is left to its writer and the sweeper."""
+        session = await self._load(session_id, publish=False)
         st = session.state
         public = PublicState(
             objective_id=st.objective_id, objective_description=st.objective_description, concept_id=st.concept_id,
@@ -460,13 +473,13 @@ class TeachingSessionService:
         return PublicQuestion(turn_id=q.turn_id, kind=q.kind, prompt=q.prompt, choices=q.choices,
                               difficulty=q.difficulty, hint_level=q.hint_level)
 
-    async def _load(self, session_id: str, *, missing_ok: bool = False) -> TeachingSession:
+    async def _load(self, session_id: str, *, missing_ok: bool = False, publish: bool = True) -> TeachingSession:
         session = self._repo.get(session_id)
         if session is None:
             if missing_ok:
                 return None  # type: ignore[return-value]
             raise TeachingSessionNotFound(f"teaching session {session_id} not found")
-        if self._repo.pending_outbox(session_id):
+        if publish and self._repo.pending_outbox(session_id):
             await self._publish(session)  # what a crash left unpublished
             session = self._repo.get(session_id) or session
         return session

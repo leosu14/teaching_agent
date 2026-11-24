@@ -65,9 +65,9 @@ def test_a_teacher_reads_every_learner_route_as_the_learner_does(world) -> None:
 
 
 def test_a_teacher_cannot_choose_the_time_of_their_learners_next_action(world) -> None:
-    """Selecting the next action stores the curriculum's progress as of `as_of`. The teacher's read is as of now;
-    a teacher's `as_of` would write a snapshot at a time of their choosing, so it is a change (403) and stores
-    nothing. The learner's own scope still chooses the time."""
+    """The teacher's read is as of now; a teacher's `as_of` is refused (403), as before. Since issue #66 PR 3 the
+    next action stores nothing at any time (A1: `as_of` is a read-only what-if), so the learner's own `as_of` answers
+    for that time and leaves the stored progress as it was too."""
     env, ids, auth = world
     lid, goal = ids["learner"], ids["goal"]
     stored = env.container.curriculum_service._engine.repository
@@ -89,7 +89,7 @@ def test_a_teacher_cannot_choose_the_time_of_their_learners_next_action(world) -
         assert (r.status_code, r.json()) == (404, NOT_FOUND)
         mine = a.get(f"/learners/{lid}/next-action", params={"as_of": "2099-01-01T00:00:00Z"})
         assert mine.status_code == 200, mine.text
-        assert snapshot_of_progress()["as_of"].startswith("2099-01-01")
+        assert snapshot_of_progress() == before  # a what-if (A1)
 
 def test_a_teacher_changes_nothing_of_their_learner(world) -> None:
     env, ids, auth = world

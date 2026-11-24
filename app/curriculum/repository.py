@@ -5,11 +5,13 @@ same pattern."""
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
 
 from app.schemas.curriculum import (
+    ANY_PROGRESS,
     CurriculumProgress,
     CurriculumRecord,
     CurriculumStatus,
@@ -19,6 +21,7 @@ from app.schemas.curriculum import (
 )
 from app.schemas.learner import GoalStatus
 from app.schemas.learning_cycle import (
+    ACTIVE_CYCLE_STATUSES,
     TERMINAL_CYCLE_STATUSES,
     CycleConflict,
     CycleLeaseLost,
@@ -56,7 +59,11 @@ class CurriculumRepository(Protocol):
         """Oldest first."""
         ...
 
-    def save_progress(self, progress: CurriculumProgress) -> None: ...
+    def save_progress(self, progress: CurriculumProgress, *, expected: CurriculumProgress | None | object = ANY_PROGRESS) -> bool:
+        """Store the snapshot. With `expected` (the snapshot the caller read, None for none), only if the stored one
+        is still that: False when a concurrent refresh stored another first (issue #66 PR 3: the transitions computed
+        against the old snapshot are that refresh's to report, once)."""
+        ...
 
     def progress(self, curriculum_id: str) -> CurriculumProgress | None: ...
 
@@ -71,6 +78,7 @@ class InMemoryCurriculumRepository:
         self._records: dict[str, CurriculumRecord] = {}
         self._versions: dict[str, CurriculumVersion] = {}
         self._progress: dict[str, CurriculumProgress] = {}
+        self._lock = threading.Lock()
 
     def save_record(self, record: CurriculumRecord) -> None:
         self._records[record.curriculum_id] = record.model_copy(deep=True)
@@ -112,8 +120,12 @@ class InMemoryCurriculumRepository:
         return sorted((v.model_copy(deep=True) for v in self._versions.values() if v.curriculum_id == curriculum_id),
                       key=lambda v: v.version)
 
-    def save_progress(self, progress: CurriculumProgress) -> None:
-        self._progress[progress.curriculum_id] = progress.model_copy(deep=True)
+    def save_progress(self, progress: CurriculumProgress, *, expected: CurriculumProgress | None | object = ANY_PROGRESS) -> bool:
+        with self._lock:
+            if expected is not ANY_PROGRESS and self._progress.get(progress.curriculum_id) != expected:
+                return False
+            self._progress[progress.curriculum_id] = progress.model_copy(deep=True)
+            return True
 
     def progress(self, curriculum_id: str) -> CurriculumProgress | None:
         found = self._progress.get(curriculum_id)
@@ -148,6 +160,11 @@ class LearningCycleRepository(Protocol):
 
     def for_learner(self, learner_id: str) -> list[LearningCycle]:
         """Newest first."""
+        ...
+
+    def active_ids(self, after: str | None, limit: int) -> list[str]:
+        """Cycles after `after` (in id order), at most `limit`, for the sweeper to reconcile: the active ones and any
+        with events a crash left unpublished."""
         ...
 
     def request(self, cycle_id: str, client_response_id: str) -> CycleRequestRecord | None: ...
@@ -208,6 +225,11 @@ class InMemoryLearningCycleRepository:
     def for_learner(self, learner_id: str) -> list[LearningCycle]:
         return sorted((c.model_copy(deep=True) for c in self._cycles.values() if c.learner_id == learner_id),
                       key=lambda c: (c.created_at, c.cycle_id), reverse=True)
+
+    def active_ids(self, after: str | None, limit: int) -> list[str]:
+        return sorted(c.cycle_id for c in self._cycles.values()
+                      if (c.status in ACTIVE_CYCLE_STATUSES or c.pending_events)
+                      and (after is None or c.cycle_id > after))[:limit]
 
     def request(self, cycle_id: str, client_response_id: str) -> CycleRequestRecord | None:
         found = self._requests.get((cycle_id, client_response_id))

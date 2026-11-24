@@ -109,7 +109,10 @@ artifacts, results, grades, learner memory or curricula (`app/schemas/lease.py`,
   redoes the whole change on a fresh read (`LearnerMemoryService._changing`; every change is idempotent, so redoing
   is safe); a curriculum status change is redone the same way, and a commit whose base version moved meanwhile is a
   `CurriculumConflict` (rebuild the plan), as when the base had already moved at planning time. The progress
-  snapshot stays last-write-wins: it only decides which transitions are reported.
+  snapshot only decides which transitions are reported, so it is stored only over the snapshot its refresh read
+  (a compare-and-set; issue #66 PR 3): of two refreshes that read the same one (sweepers on two workers, an evidence
+  write racing a sweep), the first store reports the transitions and the other none. `goal.completed` is reported by
+  the refresh whose update stored the completion (under the goal's row lock), so once too.
 - **A curriculum's status follows its goal (#65).** ACTIVE for an active or paused goal, COMPLETED for a completed
   one, ARCHIVED for a cancelled one (`curriculum_status_for`). It is never derived from a copy of the goal: every
   writer that changes a goal's status (a PATCH, an assignment's cancellation, a refresh completing it) then calls
@@ -192,12 +195,46 @@ fencing and checkpoints above still apply unchanged.
   FAILED is left for a manual resume; one active job per task makes concurrent sweepers harmless. Each pass also fails
   exhausted jobs whose worker died. Recovery still waits for the killed worker's lease to run out (up to
   `TASK_LEASE`): telling a dead worker from a slow one sooner needs worker liveness, a later item.
+- **Learning sweeper** (`LearningSweeper`, same file; issue #66 PR 3). It runs with every sweep and owns the writes
+  GET routes used to make (below, "GET routes write nothing"): it refreshes the curricula of every learner with an
+  active goal that has one (progress, transitions, completion with D11's `completed_at`, the curriculum following
+  the goal: what time alone changes, such as reviews falling due, and an evidence write's refresh a crash lost),
+  reconciles every active learning cycle with its children (and publishes any cycle's events a crash left), and
+  publishes every teaching outbox a crash left. Each kind takes at most `TA_SWEEP_BATCH` ids per pass, round robin
+  from a cursor kept in the process, so a pass is bounded and every id is reached within ceil(N / batch) passes;
+  `--sweep` walks every id, a batch at a time. Every action is idempotent (stable ids, version-checked or fenced
+  writes, transitions reported once), so concurrent sweepers on several workers change nothing twice; one id's
+  failure is logged and counted and never stops the pass, an id deleted meanwhile is skipped, and each pass logs one
+  summary line. Production refuses to start without it (docs/deployment.md, "The sweeper").
+- **The cycle hook.** After each job the worker calls `LearningCycleService.child_settled(task_id)`: when the task is
+  a learning cycle's child, the cycle stores what the child did (`reconcile`, under the learner's deletion lock), so
+  a lesson answered through the task API moves its cycle on without anyone reading it. A failed or lost hook (the
+  worker died after the job) is only logged; the sweeper reconciles the cycle.
 - **Scope.** This is the pilot setup: one API replica and one worker. Learner-memory and curriculum writes are fenced
   and versioned (above), so the worker and the API can write the same learner safely, and more worker processes on
   one database are correct, with leases judged by the database's clock (above, "Time"); learning cycles still run
   their child tasks inline in the request. Rate limits, the research cache and the stream caps are shared by every
-  process on PostgreSQL (issue #66 PR 2; "Shared state" in docs/deployment.md); GET routes that still write are the
-  remaining multi-replica item (PR 3).
+  process on PostgreSQL (issue #66 PR 2; "Shared state" in docs/deployment.md), and GET routes write nothing but
+  that bookkeeping (PR 3, below).
+
+### GET routes write nothing (issue #66 PR 3)
+
+No GET route writes a domain table or emits an event, on any replica; the only writes a GET makes are decision A3's
+bookkeeping (rate-limit rows, stream slots). `tests/e2e/test_get_purity.py` sends every GET of the API, as the learner
+and as the teacher, both streams included, in a state with work owed, and fails on any other INSERT, UPDATE or
+DELETE. Where each write the reads used to make happens now:
+
+| Was written by | Now |
+| --- | --- |
+| `GET /learners/{id}/next-action`: the curricula's progress snapshot, objective transitions, a replan, a goal's completion, the curriculum following it, `learning_action.selected` | Computed in memory (`CurriculumService.peek_next_action`, `CurriculumTracker.peek`), stored by nothing. The refresh runs in the evidence writers instead: an assessment attempt and a teaching session's integration (`next_action`, as before), a teacher's grade override, the lesson workflow's diagnostic and lesson evidence (`learner.record_lesson`, `learner.record_diagnostic`), the evaluation's `curriculum.track`; and in the sweeper, for what time alone changes. `CurriculumService.next_action` (writing) is what those POST paths call. |
+| `?as_of=` on it (a learner's): a snapshot as of that time | A1: a what-if. It answers for that time and stores nothing. A teacher's `as_of` is still refused (403). |
+| `GET /learning-cycles/{id}` and its stream: the observation of the cycle's children, the events it implies, a crash's unpublished cycle events | Folded into the view only (`read` returns the stored `version`); stored by the cycle's own POSTs (responses, resume, cancel, start), the worker's cycle hook and the sweeper. |
+| `GET /teaching-sessions/{id}` and the cycle's read of its session: a crash's unpublished outbox (events, artifacts, the finalize that integrates the session into learner memory and curricula) | Left owed; published by the session's next write (an answer, pause, resume, cancel) and by the sweeper. |
+
+A goal whose completion rule holds but that no write has completed shows as complete in every read (the next
+action's COMPLETE, the assignment views' COMPLETED with D11's time computed read-only) until a writer stores it.
+`LearnerService.record_evidence` (used by scripts and tests; no route) records evidence without a refresh: the
+sweeper refreshes after it.
 
 ## Workflow engine
 
@@ -792,7 +829,7 @@ it lives in `AgentContext`; its state is a serializable `SessionState` stored wi
   items); `TeachingRepository.apply` writes it in one transaction.
 - **Two phases.** A learner answer is first recorded and graded deterministically (the session stays ACTIVE with the
   teacher turns it owes planned in its state), then each owed teacher turn is generated and committed. If the model
-  fails, nothing is lost: the session stays ACTIVE, and a resume, a read or the replayed request generates the turns.
+  fails, nothing is lost: the session stays ACTIVE, and a resume or the replayed request generates the turns.
 - **Difficulty.** `increase_after_successes` consecutive correct answers raise it, `decrease_after_failures`
   consecutive misses lower it; a correct answer after a hint keeps it; an incorrect answer after a recorded
   misconception (`reteach_after_misconceptions`) reteaches. Every change is a DIFFICULTY change with its reason.
@@ -813,8 +850,9 @@ it lives in `AgentContext`; its state is a serializable `SessionState` stored wi
   the last `recent_turns` turns, this question and answer, and grounding passages. No learner, session, task or goal
   ids, no learner history, profile or other sessions.
 - **Persistence and resume.** Sessions, turns (unique `(session_id, sequence)`), interaction evidence, request records
-  and the outbox are SQL tables. A new process reads the session back and continues where it was; the outbox
-  publishes events (stable ids, so never twice) and artifacts (deduplicated by content) that a crash left behind.
+  and the outbox are SQL tables. A new process reads the session back and continues where it was; the session's
+  next write, or the sweeper, publishes the outbox's events (stable ids, so never twice) and artifacts (deduplicated
+  by content) that a crash left behind. A read never publishes them.
 - **Idempotency and concurrency.** An answer carries a `client_turn_id`: the same id with the same answer replays the
   stored result, with a different answer is a 409. Starting a session is idempotent per `idempotency_key`. Every
   write is an optimistic-locking update (`version`); a concurrent answer gets a 409 conflict and is never silently
@@ -962,8 +1000,9 @@ drives it; the state machine is pure (`app/curriculum/cycle.py`); the schemas ar
   the transition that receives it (`client_response_id`, request hash); the same id and body replay, another body is
   a 409, and the child gets it with an idempotency key derived from the cycle and response id. Artifacts reuse
   identical content; events have ids derived from the cycle, type and version and the event store keeps one per id.
-- **Resume.** WAITING returns to the caller; nothing polls. A response, a read (`GET`, which only observes) or
-  `resume` reconciles the cycle with its child. `resume` retries a BLOCKED step through the child's own recovery
+- **Resume.** WAITING returns to the caller; nothing polls. A response or `resume` reconciles the cycle with its
+  child, and so do the worker once a child's job ends and the sweeper; a read (`GET`) shows the reconciled cycle
+  and stores nothing. `resume` retries a BLOCKED step through the child's own recovery
   (`TaskService.resume` from the workflow checkpoint, `TeachingSessionService.resume`); completed side effects are
   never repeated.
 - **Failures.** VALIDATION (a stale or invalid action, an unmet completion rule, a configuration error: FAILED),
@@ -1092,7 +1131,8 @@ events, then a fresh `status`.
 read-only. Every stored change goes through one transition that copies the record and adds 1 (`_next` in
 `app/curriculum/cycle.py`) and a version-checked write, so it strictly increases: status, the current step, a child
 attached, the drive lease (claim, renew, release, takeover), the waiting prompt, failure and outcome all advance it.
-A child's own progress advances it once a read folds it in; the termination rule also reads the current child's
+A child's own progress advances it once a writer stores it (the cycle's own POSTs, the worker's cycle hook, the
+sweeper; a read folds it into the view only); the termination rule also reads the current child's
 status and job directly. `after_version` (query parameter, cycle stream only) is set by the client to the `version`
 of the view it showed when it sent a POST, and only decides whether WAITING or BLOCKED may send `end`. The cursor
 orders event rows by `seq`; the version orders cycle states. Neither is encoded in or compared with the other.

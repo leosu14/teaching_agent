@@ -73,12 +73,12 @@ def list_goals(learner_id: str, c: Container = Depends(container)) -> list[Learn
             dependencies=[Depends(require_learner)])
 async def next_action(learner_id: str, as_of: datetime | None = None, p: Principal = Depends(principal),
                       c: Container = Depends(container)) -> NextLearningAction:
-    """The next learning action. Selecting it refreshes and stores the learner's curriculum progress as of `as_of`
-    (default: now), so only the learner's own scope may choose the time: a teacher reading a learner on their roster
-    gets the action as of now, and `as_of` from them is a change (403)."""
+    """The next learning action, read-only (issue #66 PR 3): computed from the stored state as of `as_of` (default:
+    now) and never stored, so `as_of` is a what-if (A1). Only the learner's own scope may ask one: a teacher reading a
+    learner on their roster gets the action as of now, and `as_of` from them is refused (403), as before."""
     if as_of is not None and not p.may_access(learner_id):
         raise Forbidden("a teacher may read the learners of their classes but not act for them")
-    return await c.curriculum_service.next_action(learner_id, as_of=as_of)
+    return await c.curriculum_service.peek_next_action(learner_id, as_of=as_of)
 
 
 @router.get("/goals/{goal_id}", response_model=LearningGoal, dependencies=[Depends(owned_goal)])

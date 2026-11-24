@@ -480,8 +480,11 @@ async def test_a_crash_before_events_are_published_publishes_them_once(cycle_env
     assert env.cycles.repository.get(cid).status == CycleStatus.COMPLETED
     assert cycle_events(env, cid)["learning_cycle.completed"] == 0
     env = restart(env, monkeypatch)
+    await env.cycles.get(cid)  # a read publishes nothing (issue #66 PR 3): the sweeper recovers what was left
+    assert cycle_events(env, cid)["learning_cycle.completed"] == 0
     for _ in range(3):
-        await env.cycles.get(cid)
+        report = await env.container.task_worker.sweep_learning(full=True)
+        assert report.errors == 0, report.summary()
     types = [e.type for e in env.cycles.events(cid) if e.type.startswith("learning_cycle.")]
     assert types[-2:] == ["learning_cycle.action_completed", "learning_cycle.completed"]  # in order
     ran_once(env, cid)

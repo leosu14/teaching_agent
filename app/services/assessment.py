@@ -391,6 +391,8 @@ class AssessmentService:
                               event_id=stable_id("aevt", attempt_id, "overridden"), attempt_id=attempt_id,
                               assessment_item_id=item.assessment_item_id, grade_id=grade.grade_id,
                               concept_id=item.concept_id, outcome=stored.outcome, class_id=stored.class_id)
+            # The override's evidence may complete a goal: stored by this write, never left to a read (#66 PR 3).
+            await self._curriculum.tracked(attempt.learner_id)
         return OverrideResult(attempt_id=attempt_id, replayed=not created, evidence_ids=[stored.evidence_id],
                               override=OverrideView(outcome=stored.outcome, note=stored.note,
                                                     created_at=stored.created_at),

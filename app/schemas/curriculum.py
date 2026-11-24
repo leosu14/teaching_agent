@@ -408,6 +408,10 @@ class ReplanTrigger(Schema):
     detail: str
 
 
+# `CurriculumRepository.save_progress(expected=ANY_PROGRESS)`: store the snapshot whatever is stored now.
+ANY_PROGRESS = object()
+
+
 class CurriculumProgress(Schema):
     """Progress of one curriculum version, derived from the learner model by code. Deterministic for the same
     learner state, version and `as_of`."""

@@ -25,7 +25,7 @@ import argparse
 import asyncio
 import logging
 import signal
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
 from app.observability.redaction import redact_text
@@ -34,7 +34,7 @@ from app.runtime.tasks.state_machine import InvalidTransition
 from app.schemas.common import new_id, utcnow
 from app.schemas.job import JobErrorCategory, JobKind, JobStatus, TaskJob
 from app.schemas.task import Task, TaskStatus
-from app.services.sweeper import STRANDED, TaskSweeper
+from app.services.sweeper import STRANDED, LearningSweeper, LearningSweepReport, TaskSweeper
 from app.services.tasks import TaskService
 from app.storage.repositories import NotFound, SqlTaskJobRepository
 
@@ -74,6 +74,12 @@ class TaskWorker:
         self.worker_id = worker_id or new_id("worker")
         self._sweeper = sweeper
         self._sweep_seconds = sweep_seconds
+        # Called with the task id after each job of a task ends (set by the container): a learning cycle whose child
+        # task this was stores what the child did (issue #66 PR 3), so no read has to. Its failure is only logged:
+        # the sweeper reconciles what it missed.
+        self.on_settled: Callable[[str], Awaitable[object]] | None = None
+        # The learning sweeper (app/services/sweeper.py, issue #66 PR 3; set by the container): run with every sweep.
+        self.learning_sweeper: LearningSweeper | None = None
 
     # --- loops ------------------------------------------------------------------------------------------------------
 
@@ -96,8 +102,13 @@ class TaskWorker:
         return done
 
     def sweep(self):
-        """One sweeper pass (app/services/sweeper.py), or None without a sweeper."""
+        """One sweeper pass over tasks, jobs and shared state (app/services/sweeper.py), or None without a sweeper."""
         return self._sweeper.sweep() if self._sweeper is not None else None
+
+    async def sweep_learning(self, *, full: bool = False) -> LearningSweepReport | None:
+        """One learning-sweeper pass (curricula, cycles, outboxes), or None without one. `full`: every id, `batch` at
+        a time (the cron entry point); else one round-robin batch of each kind."""
+        return await self.learning_sweeper.sweep(full=full) if self.learning_sweeper is not None else None
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         """Poll for jobs until `stop` is set. A job that is running when `stop` is set finishes first. With a sweeper,
@@ -112,6 +123,10 @@ class TaskWorker:
                     self._sweeper.sweep()
                 except Exception:  # e.g. the database is down: the next pass tries again
                     logger.exception("task worker %s: sweeping stranded work failed", self.worker_id)
+                try:
+                    await self.sweep_learning()
+                except Exception:  # as above
+                    logger.exception("task worker %s: the learning sweep failed", self.worker_id)
             try:
                 job = await self.run_once()
             except Exception:  # the queue itself failed (e.g. the database is down): wait and try again
@@ -133,6 +148,12 @@ class TaskWorker:
         finally:
             if beat is not None:
                 beat.cancel()
+        if self.on_settled is not None:
+            try:
+                await self.on_settled(job.task_id)
+            except Exception:  # noqa: BLE001 - the sweeper reconciles it later
+                logger.exception("job %s: storing the outcome of task %s for its learning cycle failed", job.job_id,
+                                 job.task_id)
 
     async def _attempt(self, job: TaskJob) -> None:
         try:
@@ -229,6 +250,22 @@ class TaskWorker:
                 return
 
 
+def sweep_once(worker: TaskWorker) -> int:
+    """`--sweep`: one pass of both sweepers (the learning one over every id, `TA_SWEEP_BATCH` at a time), its counts
+    printed. The exit code is the monitoring signal (docs/deployment.md): 1 when any learning id failed (each is
+    logged; the next pass retries it), else 0."""
+    report = worker.sweep()
+    if report is not None:
+        print(f"failed jobs: {report.failed_jobs}; recovered tasks: {len(report.recovered)}; "
+              f"left failed: {len(report.left_failed)}")
+    learning = asyncio.run(worker.sweep_learning(full=True))
+    if learning is not None:
+        print(f"learning: {learning.summary()}")
+        if learning.errors:
+            return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process entry point
     from app.config.settings import Settings
     from app.observability.logging import configure_logging
@@ -237,7 +274,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process en
     parser = argparse.ArgumentParser(description="Run the task worker: execute queued lesson and evaluation tasks.")
     parser.add_argument("--drain", action="store_true", help="run every available job, then exit")
     parser.add_argument("--sweep", action="store_true",
-                        help="queue the continuation of work killed workers left mid-run (one pass), then exit")
+                        help="one sweeper pass, then exit: queue the continuation of work killed workers left "
+                             "mid-run, and refresh curricula, reconcile cycles and publish teaching outboxes; exit "
+                             "code 1 when any of those failed")
     args = parser.parse_args(argv)
     from app.config.secrets import load_secret_files
 
@@ -247,10 +286,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process en
     container = build_container(settings)
     try:
         if args.sweep:
-            report = container.task_worker.sweep()
-            print(f"failed jobs: {report.failed_jobs}; recovered tasks: {len(report.recovered)}; "
-                  f"left failed: {len(report.left_failed)}")
-            return 0
+            return sweep_once(container.task_worker)
         if args.drain:
             asyncio.run(container.task_worker.drain())
             return 0

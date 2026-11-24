@@ -43,6 +43,7 @@ bucket). The checks:
 | The S3 object store | `TA_OBJECT_STORE=s3` and `TA_S3_*` |
 | The signed gateway identity | `TA_AUTH_MODE=gateway`, `TA_AUTH_GATEWAY_SECRET` of 32 characters or more |
 | The worker is its own process | `TA_WORKER_EMBEDDED=false` |
+| The sweeper runs | `TA_WORKER_SWEEP_SECONDS` above 0 (default 60), or `0` with `TA_SWEEP_EXTERNAL=true` and cron running `--sweep` ([The sweeper](#the-sweeper)) |
 | Daily caps on, per learner and overall | `TA_BUDGET_{LEARNER,GLOBAL}_DAILY_MAX_LLM_REQUESTS` and `..._MAX_LLM_TOKENS`, or `..._MAX_COST_USD` with LLM pricing configured |
 | A hard cap at every real vendor in use | `TA_VENDOR_CAPS=openai=200,tavily=30` (USD per month) |
 
@@ -287,10 +288,40 @@ above 1; a production deployment (`TA_DEPLOYMENT=production`, an API and a worke
 cannot see `uvicorn --workers` or a second process started by hand with the same declaration: do not declare
 `TA_SINGLE_PROCESS` for those.
 
+## The sweeper
+
+The sweeper is required in production (issue #66, A5). GET routes write nothing (PR 3), so the writes they used to
+make belong to the writers and to the sweeper: refreshing each learner's curricula (reviews falling due, mastery
+decay, completion of a mastered goal with D11's time, the curriculum following its goal), reconciling active
+learning cycles with their children, and publishing what a crash left in a cycle's events or a teaching session's
+outbox. It also queues the recovery of tasks a killed worker left mid-run, fails exhausted jobs and deletes expired
+shared-state rows ([Shared state](#shared-state)).
+
+- **Startup.** The worker sweeps every `TA_WORKER_SWEEP_SECONDS` (default 60). With `TA_DEPLOYMENT=production` the
+  API and the worker refuse to start with `TA_WORKER_SWEEP_SECONDS=0` unless `TA_SWEEP_EXTERNAL=true` declares that
+  cron runs `python -m app.services.worker --sweep` instead (for example every minute; one at a time is enough, and
+  overlapping runs are harmless). `check` names the problem.
+- **Bounded batches.** Each pass in the worker refreshes at most `TA_SWEEP_BATCH` (default 100) learners, reconciles
+  as many cycles and publishes as many outboxes, continuing where the previous pass stopped (round robin), so a pass
+  takes about the same time whatever the number of learners, and every learner is refreshed within
+  ceil(N / `TA_SWEEP_BATCH`) intervals: with 1,000 learners, the defaults reach each one every 10 minutes. Raise the
+  batch or shorten the interval for a tighter bound. `--sweep` walks every id, `TA_SWEEP_BATCH` at a time.
+- **Idempotent.** Every action can repeat or run on several workers at once: events and artifacts have stable ids,
+  writes are version-checked or fenced, objective transitions and `goal.completed` are reported once, and a goal's
+  completion time is the evidence's, not the sweep's. A learner deleted during a pass is skipped.
+- **Monitoring.** Each pass logs one line, `sweeper: learning pass: curricula: N done, F failed; cycles: ...;
+  outboxes: ...`, at INFO, or at WARNING when anything failed; each failure is logged with its traceback (never with a
+  learner id) and retried on the next pass. `--sweep` prints the same counts and exits 1 when anything failed, 0
+  otherwise: alert on a non-zero exit, or on WARNING lines from the worker.
+- **Recovery.** Nothing to do by hand for a failure that clears (a database blip): the next pass retries every id.
+  A failure that persists keeps its WARNING line and traceback until fixed; after the fix, the next pass (or a manual
+  `python -m app.services.worker --sweep`) catches up on everything owed. A stopped worker leaves the work owed, not
+  lost: it is done once the worker (or the cron sweep) runs again.
+
 ## Known limits
 
-- One API replica (one Uvicorn process) and one worker: the last multi-replica item (GET routes that do not write;
-  issue #66 PR 3) comes next. Database-time leases, the teaching-turn lease (PR 1), and the shared rate limiter,
-  stream caps and research cache (PR 2) are in place.
+- One API replica (one Uvicorn process) and one worker, as piloted. Issue #66's multi-replica items are in place:
+  database-time leases and the teaching-turn lease (PR 1), the shared rate limiter, stream caps and research cache
+  (PR 2), and GET routes that write nothing with the required sweeper (PR 3).
 - No metrics or alerting yet; `/health` and `check` are the readiness signals.
 - The login proxy is the deployment's choice and is not part of the image.

@@ -29,15 +29,17 @@ writes (task, events, artifacts, grades, learner memory, curricula) is refused a
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 
+from app.curriculum.cycle import CycleNotFound
 from app.runtime.orchestrator.orchestrator import TASK_LEASE
 from app.schemas.job import JobStatus
 from app.schemas.task import TaskStatus
 from app.services.tasks import TaskService
 from app.schemas.lease import LearnerDataGone
+from app.teaching.errors import TeachingSessionNotFound
 from app.storage.repositories import NotFound, ObjectPurge, SqlTaskJobRepository, SqlTaskRepository
 
 logger = logging.getLogger(__name__)
@@ -94,4 +96,94 @@ class TaskSweeper:
             report.objects_deleted, report.objects_pending = purged.deleted, purged.pending
         if self._shared_state is not None:
             report.shared_state = self._shared_state()
+        return report
+
+
+# --- the learning sweeper (issue #66 PR 3) ---------------------------------------------------------------------------
+
+LearnerRefresh = Callable[[str], Awaitable[object]]  # learner id -> its curricula refreshed and stored
+IdBatch = Callable[[str | None, int], list[str]]  # (after, limit) -> ids in id order
+
+
+@dataclass
+class _Pass:
+    """One kind of sweep: which ids to look at (in id order, from a cursor) and what to do with each one."""
+
+    name: str
+    ids: IdBatch
+    act: Callable[[str], Awaitable[object]]
+    cursor: str | None = None
+    log_ids: bool = True  # False for learner ids: a log line never names a learner (as the deletion's does not)
+
+
+@dataclass
+class LearningSweepReport:
+    """Counts of one learning-sweeper pass, by kind ("curricula", "cycles", "outboxes")."""
+
+    done: dict[str, int] = field(default_factory=dict)  # ids handled (refreshed, reconciled, published)
+    failed: dict[str, int] = field(default_factory=dict)  # ids whose action raised (logged; retried next round)
+    wrapped: dict[str, bool] = field(default_factory=dict)  # this pass reached the end of the ids: the next starts over
+
+    @property
+    def errors(self) -> int:
+        return sum(self.failed.values())
+
+    def summary(self) -> str:
+        return "; ".join(f"{k}: {self.done.get(k, 0)} done, {self.failed.get(k, 0)} failed" for k in self.done)
+
+
+class LearningSweeper:
+    """The writes no read makes any more (issue #66 PR 3), recovered in bounded batches:
+
+    - **curricula**: every learner with an ACTIVE goal that has a curriculum gets its curricula refreshed and stored
+      (progress, transitions once, completion with D11's `completed_at`, the curriculum status following the goal):
+      what time alone changes (review due dates, mastery decay), and an evidence write's refresh a crash lost;
+    - **cycles**: every active learning cycle stores what its children did (`reconcile`): a child a worker finished
+      whose hook was lost; and a cycle of any status whose events a crash left unpublished has them published;
+    - **outboxes**: every teaching session with unpublished outbox items has them published (events, artifacts, the
+      completed session's integration into learner memory and curricula).
+
+    Each kind takes at most `batch` ids per pass, round-robin from a cursor kept in this process, so a pass is bounded
+    whatever the number of learners: each one is visited within ceil(N / batch) passes. `full` (the cron entry
+    point, a process that runs one pass) walks every id, still `batch` at a time. Every action is idempotent (stable
+    ids, version-checked or fenced writes, transitions reported once), so a repeated or concurrent pass on another
+    process changes nothing more. One id's failure is logged and counted, and never stops the pass; a learner deleted
+    meanwhile is skipped."""
+
+    def __init__(self, passes: list[_Pass], *, batch: int = 100) -> None:
+        if batch < 1:
+            raise ValueError("batch must be at least 1")
+        self._passes = passes
+        self._batch = batch
+
+    @classmethod
+    def of(cls, *, learners: IdBatch, refresh: LearnerRefresh, cycles: IdBatch,
+           reconcile: Callable[[str], Awaitable[object]], outboxes: IdBatch,
+           publish: Callable[[str], Awaitable[object]], batch: int = 100) -> LearningSweeper:
+        return cls([_Pass("curricula", learners, refresh, log_ids=False), _Pass("cycles", cycles, reconcile),
+                    _Pass("outboxes", outboxes, publish)], batch=batch)
+
+    async def sweep(self, *, full: bool = False) -> LearningSweepReport:
+        report = LearningSweepReport()
+        for p in self._passes:
+            report.done[p.name] = report.failed[p.name] = 0
+            if full:
+                p.cursor = None  # every id, from the first
+            while True:
+                ids = p.ids(p.cursor, self._batch)
+                for item in ids:
+                    try:
+                        await p.act(item)
+                        report.done[p.name] += 1
+                    except (NotFound, LearnerDataGone, CycleNotFound, TeachingSessionNotFound):  # deleted meanwhile
+                        continue
+                    except Exception:  # noqa: BLE001 - logged; the next round tries again
+                        report.failed[p.name] += 1
+                        logger.exception("sweeper: %s %s failed", p.name, item if p.log_ids else "(a learner)")
+                p.cursor = ids[-1] if len(ids) == self._batch else None
+                report.wrapped[p.name] = p.cursor is None
+                if not full or p.cursor is None:
+                    break
+        level = logging.WARNING if report.errors else logging.INFO
+        logger.log(level, "sweeper: learning pass: %s", report.summary())
         return report

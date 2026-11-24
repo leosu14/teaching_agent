@@ -40,6 +40,7 @@ from app.observability.events import EventBus
 from app.observability.logging import log_event
 from app.observability.redaction import register_secret
 from app.observability.spend import TOTAL_SCOPE, SpendStore
+from app.observability.scope import ExecutionScope
 from app.providers.core.http import HttpClient
 from app.providers.core.invoker import ProviderInvoker
 from app.providers.core.registry import ProviderRegistry
@@ -115,7 +116,7 @@ from app.storage.shared_state import SharedStateSweeper, SqlRateLimits, SqlResea
 from app.providers.core.ratelimit import SharedRateLimiter
 from app.services.production import ProductionService
 from app.services.tasks import TaskService
-from app.services.sweeper import TaskSweeper
+from app.services.sweeper import LearningSweeper, TaskSweeper
 from app.services.worker import TaskWorker
 from app.services.assessment import AssessmentService
 from app.services.learning_cycles import LearningCycleService
@@ -554,6 +555,16 @@ def build_container(
         video_normalizer or VIDEO_NORMALIZER_FACTORIES[settings.video_composer](settings), scratch,
         settings.generated_video_config())
     assessment_port = _AssessmentPort()  # bound to the AssessmentService once it exists (it needs the task service)
+    evidence_tracker, evidence_knowledge = CurriculumTracker(memory, curriculum), RetrieverKnowledgeBase(retriever)
+
+    async def refresh_curricula(learner_id: str, subject: str, scope: ExecutionScope) -> None:
+        """A lesson task's diagnostic and lesson evidence: the learner's curricula in the subject refreshed in the
+        task's own (fenced) writes, so a goal its evidence completes is COMPLETED without any read (#66 PR 3)."""
+        if not memory.goals(learner_id, subject):  # no goal in the subject: nothing to refresh, no graph to load
+            return
+        graph = await evidence_knowledge.graph(subject)
+        evidence_tracker.tracked(learner_id, curriculum.now(), graphs={subject: graph}, domain=subject, replan=False,
+                                 task_id=scope.task_id, scope=scope)
     registry = ToolRegistry()
     for tool in (
         SearchTool(search, cache=research_cache,
@@ -566,9 +577,9 @@ def build_container(
         AssessmentGradeTool(assessment_port),
         LearnerSummaryTool(memory),
         LearnerSnapshotTool(memory),
-        RecordLessonTool(memory),
+        RecordLessonTool(memory, refresh_curricula),
         RecordEvaluationTool(memory),
-        RecordDiagnosticTool(memory),
+        RecordDiagnosticTool(memory, refresh_curricula),
         LearnerModelTool(memory),
         LearningGoalTool(memory),
         KnowledgeConceptsTool(RetrieverKnowledgeBase(retriever)),
@@ -686,6 +697,12 @@ def build_container(
         SqlLearningCycleRepository(sessions, clock), curriculum=curriculum_service, tasks=task_service,
         teaching=teaching_service, memory=memory, artifacts=artifacts, events=events, event_log=event_repo,
         clock=clock)
+    task_worker.on_settled = learning_cycle_service.child_settled  # a cycle child's job stores its cycle (#66 PR 3)
+    task_worker.learning_sweeper = LearningSweeper.of(
+        learners=curriculum.repository.learners_to_refresh, refresh=curriculum_service.tracked,
+        cycles=learning_cycle_service.repository.active_ids, reconcile=learning_cycle_service.reconcile,
+        outboxes=teaching_service.repository.with_pending_outbox, publish=teaching_service.publish_pending,
+        batch=settings.sweep_batch)
     artifact_content = ArtifactContentService(artifacts)
     classes = ClassService(class_repo, memory, clock)
     assignments = AssignmentService(SqlAssignmentRepository(sessions, clock), class_repo, memory, curriculum_service,

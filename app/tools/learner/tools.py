@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from pydantic import Field
 
 from app.learner.memory import LearnerMemoryService, UnknownGoal
@@ -13,6 +15,11 @@ from app.schemas.learner import LearnerSnapshot, LearnerSummary, LearningGoal, M
 from app.schemas.lesson import DiagnosticOutcome, LessonOutcome
 from app.schemas.pedagogy import LearnerModel
 from app.tools.base import Tool, ToolError
+
+# Refreshes the learner's curricula in a subject after evidence was recorded, in the recording task's own writes
+# (issue #66 PR 3: progress, transitions and a goal's completion are stored by the write that reaches them, never by a
+# read). (learner_id, subject, scope) -> None. None: no curricula to refresh.
+CurriculumRefresh = Callable[[str, str, ExecutionScope], Awaitable[None]]
 
 
 class LearnerRef(Schema):
@@ -78,11 +85,15 @@ class RecordLessonTool(Tool[LessonOutcome, MasteryUpdate]):
     output_model = MasteryUpdate
     permissions = frozenset({"learner:write"})
 
-    def __init__(self, memory: LearnerMemoryService) -> None:
+    def __init__(self, memory: LearnerMemoryService, refresh: CurriculumRefresh | None = None) -> None:
         self._memory = memory
+        self._refresh = refresh
 
     async def run(self, data: LessonOutcome, scope: ExecutionScope) -> MasteryUpdate:
-        return self._memory.record_lesson(data, scope)
+        update = self._memory.record_lesson(data, scope)
+        if self._refresh is not None:  # completion is stored by the evidence write that reaches it (#66 PR 3)
+            await self._refresh(data.learner_id, data.request.subject, scope)
+        return update
 
 
 class RecordEvaluationTool(Tool[EvaluationOutcome, MasteryUpdate]):
@@ -106,11 +117,15 @@ class RecordDiagnosticTool(Tool[DiagnosticOutcome, MasteryUpdate]):
     output_model = MasteryUpdate
     permissions = frozenset({"learner:write"})
 
-    def __init__(self, memory: LearnerMemoryService) -> None:
+    def __init__(self, memory: LearnerMemoryService, refresh: CurriculumRefresh | None = None) -> None:
         self._memory = memory
+        self._refresh = refresh
 
     async def run(self, data: DiagnosticOutcome, scope: ExecutionScope) -> MasteryUpdate:
-        return self._memory.record_diagnostic(data, scope)
+        update = self._memory.record_diagnostic(data, scope)
+        if self._refresh is not None:  # completion is stored by the evidence write that reaches it (#66 PR 3)
+            await self._refresh(data.learner_id, data.request.subject, scope)
+        return update
 
 
 class LearnerModelTool(Tool[LearnerModelQuery, LearnerModel]):

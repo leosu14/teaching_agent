@@ -75,7 +75,7 @@ from app.services.teaching import (
     TeachingSessionService,
     TeachingTurnBusy,
 )
-from app.storage.repositories import SqlEventRepository
+from app.storage.repositories import NotFound, SqlEventRepository
 
 __all__ = ["CycleConflict", "CycleNotFound", "InvalidCycleRequest", "InvalidCycleTransition", "LearningCycleService"]
 
@@ -343,13 +343,38 @@ class LearningCycleService:
         return cycle.learner_id
 
     async def get(self, cycle_id: str) -> LearningCycleView:
-        """The cycle, reconciled with its children (no child is driven by a read)."""
+        """The cycle, reconciled with its children in memory (issue #66 PR 3: a read stores nothing and publishes
+        nothing, and no child is driven). The view's `version` is the stored one: it moves only on stored changes."""
         return (await self.read(cycle_id))[1]
 
     async def read(self, cycle_id: str) -> tuple[LearningCycle, LearningCycleView]:
         """`get`, with the record its view was built from (the progress stream reads its lease and steps)."""
-        cycle = await self._advance(cycle_id, token=None)
-        return cycle, await self._view(cycle)
+        stored = self.cycle(cycle_id)
+        cycle = await self._advance(cycle_id, token=None, store=False)
+        view = await self._view(cycle)
+        return cycle, view.model_copy(update={"version": stored.version})
+
+    async def child_settled(self, task_id: str) -> LearningCycle | None:
+        """A job of `task_id` ended in the worker: when the task is a learning cycle's child, store what it did in
+        the cycle (`reconcile`). None for any other task, or a cycle no longer active."""
+        try:
+            cycle_id = self._tasks.get(task_id).metadata.get(CYCLE_KEY)
+        except NotFound:
+            return None
+        if not cycle_id:
+            return None
+        cycle = self._repo.get(cycle_id)
+        if cycle is None or cycle.status not in ACTIVE_CYCLE_STATUSES:
+            return None
+        return await self.reconcile(cycle_id)
+
+    async def reconcile(self, cycle_id: str) -> LearningCycle:
+        """Store what the cycle's children did since its last stored change (an observation, the events it implies)
+        without driving any child: the stored half of a read, for the writers that own it (issue #66 PR 3): the
+        worker once a cycle child's job finished, and the sweeper for what a crash or a lost hook left behind.
+        Idempotent: a reconciled cycle stores nothing more."""
+        with learner_writes(self._learner_of(cycle_id)):  # as in `start`
+            return await self._advance(cycle_id, token=None)
 
     def lease_live(self, cycle: LearningCycle) -> bool:
         """A drive lease that has not run out (in database time), whatever the cycle's status."""
@@ -435,13 +460,14 @@ class LearningCycleService:
                 continue
         return await self._load(cycle_id)
 
-    async def _advance(self, cycle_id: str, *, token: str | None) -> LearningCycle:
+    async def _advance(self, cycle_id: str, *, token: str | None, store: bool = True) -> LearningCycle:
         """Fold the children's state into the cycle and, under the lease `token`, do the work it owes: record its
         artifact, start the next step's child, run or resume a child, finish. Without the lease it only observes.
         Returns when the learner is needed, the cycle ended or blocked, or (without the lease) when only driving could
         change it. A write that lost to a concurrent one is recomputed from the stored cycle: every step is derived
-        from the record and the children, and children are found by key, so recomputing never repeats work."""
-        cycle = await self._load(cycle_id)
+        from the record and the children, and children are found by key, so recomputing never repeats work. Without
+        `store` (a read) nothing is written or published: each observation is folded into the returned copy only."""
+        cycle = await self._load(cycle_id, publish=store)
         drive = token is not None
         for _ in range(MAX_TRANSITIONS):
             now = self._lease_now() if drive else None
@@ -452,15 +478,16 @@ class LearningCycleService:
             try:
                 if drive and now is not None and cycle.lease is not None and cycle.lease.until - now < self._lease / 2:
                     cycle = await self._commit(cycle, engine.renew(cycle, token, now, now + self._lease), token)
-                cycle, more = await self._step(cycle, token=token if drive else None)
+                cycle, more = await self._step(cycle, token=token if drive else None, store=store)
             except CycleConflict:  # a newer version (reload and recompute), or the lease was lost (stop driving)
-                cycle = await self._load(cycle_id)
+                cycle = await self._load(cycle_id, publish=store)
                 continue
             if not more:
                 break
         return cycle
 
-    async def _step(self, cycle: LearningCycle, *, token: str | None) -> tuple[LearningCycle, bool]:
+    async def _step(self, cycle: LearningCycle, *, token: str | None,
+                    store: bool = True) -> tuple[LearningCycle, bool]:
         """One transition of the driver; (cycle, False) when nothing more can happen in this request. With the lease
         `token` every commit of the cycle record is fenced by it; the cycle's own artifacts (`_store`) are not."""
         drive = token is not None
@@ -491,6 +518,8 @@ class LearningCycleService:
         change = engine.observe(cycle, step.step_id, obs, self._clock())
         if change is None:
             return cycle, False
+        if not store:  # a read: folded into the copy only (`drive` is False here: a read holds no lease)
+            return change, True
         return await self._commit(cycle, change, token), True
 
     async def _action_problem(self, cycle: LearningCycle) -> str | None:
@@ -570,7 +599,7 @@ class LearningCycleService:
         owed) is run or resumed first."""
         assert step.child_id is not None
         if step.kind == StepKind.TEACHING_SESSION:
-            session = await self._teaching.get(step.child_id)
+            session = await self._teaching.get(step.child_id, publish=drive)  # a read publishes nothing
             if session.learner_id != cycle.learner_id:
                 return self._failed(FailureKind.VALIDATION, False, "the session belongs to another learner", step)
             if drive and (session.status == Session.ACTIVE
@@ -740,10 +769,10 @@ class LearningCycleService:
 
     # --- persistence and the outbox ------------------------------------------------------------------------------
 
-    async def _load(self, cycle_id: str) -> LearningCycle:
+    async def _load(self, cycle_id: str, *, publish: bool = True) -> LearningCycle:
         cycle = self.cycle(cycle_id)
-        if cycle.pending_events:
-            cycle = await self._publish(cycle)  # what a crash left unpublished
+        if publish and cycle.pending_events:
+            cycle = await self._publish(cycle)  # what a crash left unpublished (a read leaves it to the writers)
         return cycle
 
     async def _commit(self, cycle: LearningCycle, change: LearningCycle | None,

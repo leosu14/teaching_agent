@@ -66,6 +66,7 @@ def test_a_complete_deployment_has_no_problems() -> None:
     ({"auth_mode": "static"}, "TA_AUTH_MODE"),
     ({"auth_gateway_secret": "short"}, "TA_AUTH_GATEWAY_SECRET"),
     ({"worker_embedded": True}, "TA_WORKER_EMBEDDED"),
+    ({"worker_sweep_seconds": 0}, "TA_WORKER_SWEEP_SECONDS"),  # the sweeper is required (issue #66 PR 3)
     ({"budget_learner_daily_max_llm_requests": None}, "TA_BUDGET_LEARNER_DAILY_"),
     ({"budget_global_daily_max_llm_tokens": None}, "TA_BUDGET_GLOBAL_DAILY_"),
     ({"vendor_caps": "openai=lots"}, "TA_VENDOR_CAPS"),
@@ -73,6 +74,21 @@ def test_a_complete_deployment_has_no_problems() -> None:
 def test_each_missing_piece_is_named(overrides, expected) -> None:
     problems = production(**overrides).deployment_problems()
     assert len(problems) == 1 and expected in problems[0], problems
+
+
+def test_the_sweeper_may_be_off_in_the_worker_only_when_cron_runs_it() -> None:
+    """Issue #66 PR 3 (A5): the sweeper is required in production. Off in the serving worker is accepted only with
+    TA_SWEEP_EXTERNAL=true, which declares that `python -m app.services.worker --sweep` runs from cron instead."""
+    assert production(worker_sweep_seconds=0, sweep_external=True).deployment_problems() == []
+    assert production(worker_sweep_seconds=300).deployment_problems() == []  # any interval is the operator's
+    [problem] = production(worker_sweep_seconds=0).deployment_problems()
+    assert "TA_SWEEP_EXTERNAL" in problem and "--sweep" in problem
+
+
+def test_a_production_worker_without_its_sweeper_does_not_start(tmp_path) -> None:
+    with pytest.raises(ConfigError, match="not a production deployment.*TA_WORKER_SWEEP_SECONDS"):
+        build_container(production(worker_sweep_seconds=0, data_dir=tmp_path))
+    assert any("TA_SWEEP_EXTERNAL" in p for p in check(production(worker_sweep_seconds=0)).problems)
 
 
 def test_daily_caps_by_cost_alone_need_llm_pricing(monkeypatch) -> None:

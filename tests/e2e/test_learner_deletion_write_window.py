@@ -8,8 +8,9 @@ The second review's probes, kept as regression tests:
   the routes whose late writes survived. Whatever the route answers, it is never a server error, and after a second
   deletion no erased table holds any id that led back to A: a late write was refused, not left where no deletion can
   reach it. The profile is not re-created.
-- the next action with the deletion between its goal read and its progress refresh, and between the refresh and the
-  `learning_action.selected` event: no 500, no event naming the deleted goal.
+- the next action with the deletion between its goal reads and the `learning_action.selected` event, and the
+  sweeper's progress refresh (the next action's old write, issue #66 PR 3) with the deletion just before it: no 500, no
+  error, no event naming the deleted goal.
 - a lesson queued for a learner who never sent their profile (no learner row) is accepted, as before the deletion
   feature, and is deleted with the rest of their data."""
 
@@ -128,8 +129,33 @@ def test_a_deletion_during_the_next_actions_graph_load(world) -> None:
 
 
 def test_a_deletion_between_the_goal_read_and_the_progress_refresh(world) -> None:
-    c = world[0].container
-    assert _next_action_racing_the_deletion(world, c.curriculum_service._tracker.engine, "refresh") == 404
+    """The progress refresh moved from GET next-action to the writers and the sweeper (issue #66 PR 3): the GET does
+    not reach it (`_next_action_racing_the_deletion` would never fire), so the sweeper's refresh races the deletion:
+    it skips the deleted learner (no error) and writes nothing after the deletion."""
+    import asyncio
+
+    env, ids, auth = world
+    c = env.container
+    engine = c.curriculum_service._tracker.engine
+    a_ids = learner_ids(c._sessions, LEARNER)
+    real, receipts = engine.refresh, []
+
+    def after_a_deletion(*args, **kwargs):
+        if not receipts:
+            receipts.append(c.learner_deletion.delete(LEARNER))
+        return real(*args, **kwargs)
+
+    engine.refresh = after_a_deletion
+    try:
+        report = asyncio.run(c.task_worker.sweep_learning(full=True))
+    finally:
+        engine.refresh = real
+    assert receipts and receipts[0].records.get("learners") == 1
+    assert report is not None and report.errors == 0, report.summary()
+    assert c.learner_deletion.delete(LEARNER).records == {}  # nothing was written after it
+    assert sorted(set(db_residue(c._sessions, a_ids))) == []
+    with c._sessions() as s:
+        assert not [e.type for e in s.scalars(select(EventRow)) if ids["goal"] in e.body]
 
 
 def test_a_deletion_between_the_progress_refresh_and_the_selected_event(world) -> None:
