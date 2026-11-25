@@ -160,6 +160,44 @@ VIDEO's bytes to a learner, since it is rendered from a deck that can hold answe
 refusal and that a servable image is served), one teaching-session answer graded, then the learner's data
 deleted. It runs `deploy/live_smoke.py`, which reuses `deploy/smoke.py`'s identity provider and checks.
 
+**The teacher's approval.** Before the lesson is requested, a teacher creates a class, turns on lesson approval, and
+the learner joins it with its code. The one lesson is then held: the learner's reading, its images and a teaching
+session answer 409. The class's teacher lists it (`GET /classes/{id}/lessons?status=PENDING`), previews it, fetches
+its images and approves it (`POST .../approve`), all through the gateway with the teacher's token; another teacher
+gets 404 and the learner cannot preview. A reject after the approval is a 409 (the decision is final). Only then
+does the learner read the lesson, start the session and fetch an image. It is the same lesson throughout: the
+class setup and the review make no paid call (the run counts the ledger's attempts before and after each, and fails
+if they changed), so the run's spend is that of the lesson and the graded answer, as before. Afterwards the
+learner's progress and the class dashboard must show the lesson. The approval is the teacher route under the
+run's own teacher identity, not a person: the person's decision is the human review below.
+
+**The human review.** The repository is public, so a workflow artifact can be downloaded by anyone signed in to
+GitHub; the lesson is therefore kept *sealed*. The teacher's preview, the learner's reading after approval, the
+release decision (without the learner's id or name), the images as the teacher fetched them and a `REVIEW.md` (the
+lesson as text, the stage times, the lesson's cost and a blank scoring rubric) are zipped and encrypted to the
+reviewer's RSA public key (`REVIEW_PUBLIC_KEY`, a `staging` variable: AES-256-GCM, key wrapped with RSA-OAEP
+SHA-256; `deploy/review_bundle.py`). The plaintext is scanned for the provider keys and never written on the runner.
+The workflow uploads `live-smoke-review.enc.json` as the `live-smoke-review` artifact, kept 14 days; it is written
+right after the approval, so a later failure still keeps it. The reviewer, on their own machine:
+
+    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out ~/review.pem   # once; keep it there
+    openssl pkey -in ~/review.pem -pubout                                            # paste as REVIEW_PUBLIC_KEY
+    pip install "cryptography>=42"
+    python deploy/review_bundle.py open live-smoke-review.enc.json --private-key ~/review.pem --out ./review
+
+then scores `review/REVIEW.md`, records the result, deletes the `review` folder (the only plaintext copy) and, if it
+is no longer needed, the artifact from the run's page (it expires by itself after 14 days). Everything else of the
+run (the class, the learner, the lesson in the database and the bucket) is deleted with the stack at the end of the
+run, as before.
+
+**The report.** `live-smoke-report.json` (public, ids and numbers only) gives each stage's start, end and duration
+(`stages`: `stack`, `stack_ready`, `class_setup`, `generation`, `review`, `grade`), the worker's own duration of the
+lesson (`generation_server_seconds`), and `lesson_cost` from the ledger: the lesson task's attempts outside any
+session (`generation`) and its teaching session's (`teaching_session`), each split into `measured_usd` (from the
+usage the provider returned, at the configured prices, or a cost the provider reported) and `estimate_usd` (charged
+at the pre-send reservation because no usable usage came back). Neither is the vendor's invoice; compare it with
+the OpenAI and Tavily usage pages by hand.
+
 **When it runs.** Only when started by hand (Actions, `live-smoke`, Run workflow, branch `main`), with the input
 `max_cost_usd` (default `1.00`, at most `5.00`). Its job runs only on `main` and inside the `staging` environment; it
 has no push, pull-request or schedule trigger and is not a required check.
@@ -190,18 +228,22 @@ by-label fallback) and the key files and generated key set are removed, on succe
 30-minute deadline and SIGINT or SIGTERM (a cancelled run; a further signal during the cleanup does not stop it).
 The step's 35-minute timeout is under the job's 45, and `if: always()` steps repeat the teardown
 (`live_smoke.py teardown`) and fail the job if any container, volume or network of `ta-live`, or a key file, is left
-(`live_smoke.py verify-clean`).
+(`live_smoke.py verify-clean`). Both leave the sealed review bundle, which holds no key and opens only for the
+reviewer, for the upload step that follows them.
 
 **The rehearsal.** The required `deploy` job runs the same script with `--mock`: the offline mock providers, fake
 values in the key files (no real credential is reachable from that job), the mock TTS, images and search priced,
-and the same cap, scans and cleanup; then once more with `--fail-after lesson`, which must fail and leave nothing.
+and the same cap, scans and cleanup, the teacher's approval and a sealed bundle it opens again with its own
+throwaway key; then once more with `--fail-after review`, which must fail and leave nothing but the sealed bundle.
+`tests/e2e/test_live_smoke_flow.py` runs the same script in process against the API on every test run.
 
 **Setting up `staging` (once, by the repository owner):** Settings, Environments, New environment `staging`;
 deployment branches: `main` only (a required reviewer is optional). Secrets: `OPENAI_API_KEY`, `TAVILY_API_KEY`.
-Variables: the models and billing parameters, their prices (below), and `TA_VENDOR_CAPS` (for example
-`openai=20,tavily=10`, the hard caps set in each vendor's console). A missing or invalid price, model, parameter or
-vendor cap stops the run before anything starts (exit code 2), and a combination the prices cannot bound stops the
-API and the worker at startup (`check` names it).
+Variables: the models and billing parameters, their prices (below), `TA_VENDOR_CAPS` (for example
+`openai=20,tavily=10`, the hard caps set in each vendor's console) and `REVIEW_PUBLIC_KEY` (the reviewer's RSA
+public key, PEM, at least 3072 bits; see "The human review"). A missing or invalid price, model, parameter, vendor
+cap or review key stops the run before anything starts (exit code 2), and a combination the prices cannot bound
+stops the API and the worker at startup (`check` names it).
 
 **Prices.** Every price is USD, copied from the vendor's own price list for exactly the model and parameters below
 (OpenAI: https://openai.com/api/pricing, "Text tokens", "Audio" and "Image generation"; Tavily:

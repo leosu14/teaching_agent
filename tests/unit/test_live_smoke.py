@@ -32,6 +32,19 @@ def load():
 
 live = load()
 smoke = live.smoke
+bundle = live.review_bundle
+
+
+def reviewer():
+    """A reviewer's key pair (3072-bit RSA, the smallest REVIEW_PUBLIC_KEY accepts), made once per test session."""
+    global _REVIEWER
+    if _REVIEWER is None:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        _REVIEWER = rsa.generate_private_key(public_exponent=65537, key_size=bundle.MIN_KEY_BITS)
+    return _REVIEWER
+
+
+_REVIEWER = None
 REAL_CLIENT = smoke.httpx.Client  # before any fixture replaces it
 
 
@@ -46,6 +59,7 @@ def isolated(tmp_path, monkeypatch):
         monkeypatch.setattr(module, "SECRETS", secrets_dir)
     monkeypatch.setattr(smoke, "GATEWAY_CONFIG", gateway)
     monkeypatch.setattr(live, "REPORT", tmp_path / "report.json")
+    monkeypatch.setattr(live, "REVIEW_BUNDLE", tmp_path / "live-smoke-review.enc.json")
     calls: list[tuple[str, ...]] = []
 
     class Done:
@@ -86,7 +100,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(live.subprocess, "run", run_docker)
     saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGALRM)}
     yield type("Env", (), {"calls": calls, "deletes": deletes, "docker": docker, "secrets": secrets_dir, "gateway": gateway,
-                           "report": tmp_path / "report.json",
+                           "report": tmp_path / "report.json", "bundle": tmp_path / "live-smoke-review.enc.json",
                            "use": staticmethod(lambda flow: monkeypatch.setattr(live, "flow", flow))})
     signal.alarm(0)
     for s, handler in saved.items():
@@ -379,6 +393,9 @@ class Gateway:
         self.deleted = False
         self.rejected: list[str] = []
         self.subjects: dict[str, int] = {}
+        self.approval = self.joined = False
+        self.release: str | None = None  # the lesson's release: PENDING once requested in the approving class
+        self.order: list[str] = []  # the lesson's surfaces in the order they were reached
 
     def subject(self, request) -> str | None:
         import jwt
@@ -402,7 +419,8 @@ class Gateway:
         if self.phase == "RUNNING_2" and self.clock.now >= self.until:
             self.phase = "COMPLETED"
         status = {"RUNNING_1": "RUNNING", "RUNNING_2": "RUNNING"}.get(self.phase, self.phase)
-        body = {"task_id": "task_1", "status": status,
+        body = {"task_id": "task_1", "status": status, "release": self.release,
+                "created_at": "2027-01-15T08:00:00Z", "updated_at": "2027-01-15T08:35:00Z",
                 "job": {"status": "RUNNING" if status == "RUNNING" else "SUCCEEDED"}}
         if status == "WAITING":
             body["waiting"] = {"prompt": {"questions": [{"question_id": "q1", "prompt": "¿Cómo te llamas?"}]}}
@@ -418,6 +436,47 @@ class Gateway:
         if sub is None:
             return answer(401, {"detail": "unauthenticated"})
         me = sub == self.lid
+        held = self.release == "PENDING"
+        teacher = sub == "teacher-1"
+        reading = {"lesson_id": "art_l", "task_id": "task_1", "title": "Saludos", "level": "A1",
+                   "sections": [{"section_id": "s1", "purpose": "explanation", "paragraphs": ["Hola means hello."],
+                                 "images": [{"artifact_id": "art_i"}]}], "withheld": 1}
+        if method == "POST" and path == "/classes" and teacher:
+            return answer(201, {"class_id": "cls_1", "join_code": "JOIN-1", "lesson_approval": False})
+        if method == "PATCH" and path == "/classes/cls_1" and teacher:
+            self.approval = True
+            return answer(200, {"class_id": "cls_1", "lesson_approval": True})
+        if method == "POST" and path == f"/learners/{self.lid}/classes" and me:
+            self.joined = True
+            return answer(201, {"class_id": "cls_1", "learner_id": self.lid})
+        if path == "/classes/cls_1/lessons" and teacher:
+            return answer(200, [{"task_id": "task_1", "status": self.release}] if held else [])
+        if path == "/classes/cls_1/lessons/task_1/preview":
+            if not teacher:
+                return answer(404 if sub == "teacher-2" else 403)
+            self.order.append("preview")
+            return answer(200, reading)
+        if method == "POST" and path == "/classes/cls_1/lessons/task_1/approve" and teacher and held:
+            self.release = "APPROVED"
+            self.order.append("approve")
+            return answer(200, {"task_id": "task_1", "lesson_id": "art_l", "learner_id": self.lid,
+                                "display_name": "Live smoke learner", "status": "APPROVED",
+                                "decided_at": "2027-01-15T08:36:00Z", "note": "ok"})
+        if method == "POST" and path == "/classes/cls_1/lessons/task_1/reject":
+            return answer(409)
+        if path == "/lessons/task_1/reading" and me:
+            if held:
+                return answer(409)
+            self.order.append("reading")
+            return answer(200, reading)
+        if path == f"/learners/{self.lid}/progress" and me:
+            return answer(200, {"lessons_completed": 1})
+        if path == "/classes/cls_1/dashboard" and teacher:
+            return answer(200, {"learners": [{"learner_id": self.lid}]})
+        if method == "GET" and path == "/artifacts/art_i/content" and teacher:
+            return httpx.Response(200, content=b"png", headers={"content-type": "image/png"})
+        if held and path in ("/artifacts/art_i/content", "/lessons/task_1/teaching-session"):
+            return answer(409)
         if method == "PUT" and path.startswith("/learners/"):
             self.lid = path.rsplit("/", 1)[1]
             return answer(200, {"learner_id": self.lid})
@@ -425,6 +484,7 @@ class Gateway:
             return answer(200 if me and not self.deleted else 404)
         if method == "POST" and path == "/tasks":
             self.phase, self.until = "RUNNING_1", self.clock.now + 20 * 60
+            self.release = "PENDING" if self.approval and self.joined else None
             return answer(202, {"task_id": "task_1", "status": "QUEUED", "job": {"status": "QUEUED"}})
         if method == "POST" and path == "/tasks/task_1/answers":
             self.phase, self.until = "RUNNING_2", self.clock.now + 15 * 60
@@ -483,7 +543,8 @@ def long_lesson(isolated, monkeypatch):
         return Done()
 
     monkeypatch.setattr(smoke, "compose", compose)
-    monkeypatch.setattr(smoke, "sql", lambda q: ["task_1"] if "SELECT task_id" in q else [])
+    monkeypatch.setattr(smoke, "sql", lambda q: ["task_1"] if "SELECT task_id" in q else
+                        ["0"] if "count(*)" in q and "GROUP BY" not in q else [])
     monkeypatch.setattr(smoke, "rows_naming", lambda ids: {})
     monkeypatch.setattr(smoke, "bucket_keys", lambda: set())
     monkeypatch.setattr(live, "video_duration", lambda artifact_id: 100.0)
@@ -496,18 +557,28 @@ def long_lesson(isolated, monkeypatch):
 def test_a_lesson_longer_than_a_token_completes_with_every_request_authenticated(long_lesson) -> None:
     clock, gateway = long_lesson
     start = clock.now
-    run = live.Run(mock=False, max_cost=1.0, build=False, keys=live.Keys({"OPENAI_API_KEY": KEY}))
+    run = live.Run(mock=False, max_cost=1.0, build=False, keys=live.Keys({"OPENAI_API_KEY": KEY}),
+                   review_key=reviewer().public_key())
     live.flow(run, {})
     assert clock.now - start > 40 * 60  # the run outlived four token lifetimes
     assert gateway.rejected == []  # no request carried an expired token
     assert run.deleted and gateway.deleted  # the deletion through the API still worked at the end
     assert run.report["status"] == "PASSED" and run.report["graded_outcome"] == "correct"
     assert gateway.subjects[gateway.lid] > 100  # every poll signed its own token
+    # the lesson was held, previewed and approved by its teacher before the learner read it
+    assert gateway.order == ["preview", "approve", "reading"] and gateway.release == "APPROVED"
+    assert gateway.subjects["teacher-1"] >= 5 and gateway.subjects["teacher-2"] == 1  # refused another teacher
+    stages = run.report["stages"]
+    assert stages["generation"]["seconds"] >= 35 * 60  # the fake lesson's 35 minutes, on the run's clock
+    assert stages["grade"]["seconds"] >= 8 * 60 and stages["review"]["seconds"] >= 0
+    assert run.report["generation_server_seconds"] == 35 * 60  # created_at to updated_at of the completed task
+    assert run.bundle == "live-smoke-review.enc.json"
 
 
 def test_cleanup_deletes_the_learner_with_a_fresh_token_long_after_the_lesson_began(long_lesson) -> None:
     clock, gateway = long_lesson
-    run = live.Run(mock=False, max_cost=1.0, build=False, keys=live.Keys({"OPENAI_API_KEY": KEY}))
+    run = live.Run(mock=False, max_cost=1.0, build=False, keys=live.Keys({"OPENAI_API_KEY": KEY}),
+                   review_key=reviewer().public_key())
     run.fail_after = "lesson"
     with pytest.raises(RuntimeError, match="forced failure"):
         live.flow(run, {})
@@ -531,3 +602,150 @@ def test_the_fake_gateway_refuses_a_token_minted_once_as_before(long_lesson) -> 
         assert c.get("/learners/live-x", headers=live.Bearer(key, "live-x")).status_code == 200
     assert gateway.rejected == ["GET /learners/live-x"]
     assert isinstance(httpx.Headers(live.Bearer(key, "a")), httpx.Headers)
+
+
+# --- the review bundle: the lesson, sealed for the human reviewer ---------------------------------------------------
+
+
+def pem(public_key) -> str:
+    from cryptography.hazmat.primitives import serialization
+    return public_key.public_bytes(serialization.Encoding.PEM,
+                                   serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+
+
+def test_the_live_run_needs_the_reviewers_rsa_public_key_and_checks_it_before_anything_starts() -> None:
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+    public, private = live.review_recipient(mock=False, environ={"REVIEW_PUBLIC_KEY": pem(reviewer().public_key())})
+    assert private is None and bundle.fingerprint(public) == bundle.fingerprint(reviewer().public_key())
+    escaped = pem(reviewer().public_key()).replace("\n", "\\n")  # a one-line variable
+    assert live.review_recipient(mock=False, environ={"REVIEW_PUBLIC_KEY": escaped})[0].key_size == 3072
+    weak = rsa.generate_private_key(public_exponent=65537, key_size=2048).public_key()
+    curve = ec.generate_private_key(ec.SECP256R1()).public_key()
+    for environ, problem in (({}, "REVIEW_PUBLIC_KEY is not set"),
+                             ({"REVIEW_PUBLIC_KEY": "not a key"}, "not a PEM public key"),
+                             ({"REVIEW_PUBLIC_KEY": pem(weak)}, "at least 3072 bits"),
+                             ({"REVIEW_PUBLIC_KEY": pem(curve)}, "must be an RSA public key")):
+        with pytest.raises(live.ConfigProblem, match=problem):
+            live.review_recipient(mock=False, environ=environ)
+    public, private = live.review_recipient(mock=True, environ={})  # the rehearsal's own throwaway pair
+    assert private is not None and bundle.fingerprint(private.public_key()) == bundle.fingerprint(public)
+
+
+def test_a_live_run_without_the_review_key_starts_nothing(isolated, monkeypatch) -> None:
+    prices = {"LLM_MODEL": "gpt-x", "LLM_INPUT_PRICE_PER_MTOK": "0.4", "LLM_OUTPUT_PRICE_PER_MTOK": "1.6",
+              "TTS_PRICE_PER_MCHAR": "15", "IMAGE_PRICE_PER_IMAGE": "0.005", "SEARCH_PRICE_PER_REQUEST": "0.008",
+              "TTS_MODEL": "tts-1", "IMAGE_MODEL": "gpt-image-1-mini", "IMAGE_QUALITY": "low",
+              "IMAGE_SIZE": "1024x1024", "IMAGE_INPUT_PRICE_PER_MTOK": "2", "TA_VENDOR_CAPS": "openai=5,tavily=5"}
+    for name, value in prices.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("REVIEW_PUBLIC_KEY", raising=False)
+    assert live.main(["--max-cost", "1.00"]) == 2
+    assert isolated.calls == [] and not isolated.bundle.exists()
+
+
+def test_a_sealed_bundle_opens_only_with_the_reviewers_key_and_unaltered() -> None:
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    files = {"REVIEW.md": "# Hola".encode(), "images/art_1.png": b"\x89PNG..."}
+    envelope = bundle.seal(files, reviewer().public_key())
+    assert bundle.unseal(envelope, reviewer()) == files
+    assert b"Hola" not in json.dumps(envelope).encode()
+    stranger = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+    with pytest.raises(bundle.BundleError, match="another key"):
+        bundle.unseal(envelope, stranger)
+    with pytest.raises(bundle.BundleError, match="cannot be decrypted"):  # relabelled for the stranger: refused
+        bundle.unseal({**envelope, "recipient_sha256": bundle.fingerprint(stranger.public_key())}, stranger)
+    flipped = base64.b64decode(envelope["ciphertext"])
+    flipped = base64.b64encode(flipped[:-1] + bytes([flipped[-1] ^ 1])).decode()
+    with pytest.raises(bundle.BundleError, match="cannot be decrypted"):
+        bundle.unseal({**envelope, "ciphertext": flipped}, reviewer())
+    with pytest.raises(bundle.BundleError, match="not a"):
+        bundle.unseal({**envelope, "format": "other"}, reviewer())
+    for name in ("../escape.md", "/abs.md", "C:/x.md"):
+        with pytest.raises(bundle.BundleError, match="unsafe file name"):
+            bundle.pack({name: b"x"})
+
+
+def test_the_reviewer_opens_the_bundle_into_an_empty_folder(tmp_path, capsys) -> None:
+    from cryptography.hazmat.primitives import serialization
+
+    key_file = tmp_path / "review.pem"
+    key_file.write_bytes(reviewer().private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                  serialization.NoEncryption()))
+    sealed = tmp_path / "live-smoke-review.enc.json"
+    sealed.write_text(json.dumps(bundle.seal({"REVIEW.md": b"# Hola", "images/a.png": b"png"},
+                                             reviewer().public_key())))
+    out = tmp_path / "review"
+    assert bundle.main(["open", str(sealed), "--private-key", str(key_file), "--out", str(out)]) == 0
+    assert (out / "REVIEW.md").read_bytes() == b"# Hola" and (out / "images" / "a.png").read_bytes() == b"png"
+    assert bundle.main(["open", str(sealed), "--private-key", str(key_file), "--out", str(out)]) == 1  # not empty
+    assert "not empty" in capsys.readouterr().err
+
+
+def test_a_provider_key_in_the_lesson_is_a_leak_and_no_bundle_is_written(isolated) -> None:
+    run = live.Run(mock=True, max_cost=1.0, keys=live.Keys({"OPENAI_API_KEY": KEY}),
+                   review_key=reviewer().public_key(), review_private_key=reviewer())
+    live.write_review_bundle(run, {"preview.json": json.dumps({"p": f"text {KEY}"}).encode()})
+    assert run.leaks == ["OPENAI_API_KEY in the review bundle file preview.json (not written)"]
+    assert run.bundle is None and not isolated.bundle.exists()
+    run.leaks = []
+    live.write_review_bundle(run, {"preview.json": b'{"p": "clean"}'})  # the rehearsal checks it opens again
+    assert run.bundle == isolated.bundle.name and isolated.bundle.exists()
+
+
+def test_teardown_and_verify_clean_keep_the_sealed_bundle_for_the_upload(isolated, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(live, "ROOT", isolated.bundle.parent)
+    isolated.bundle.write_text("{}", encoding="utf-8")
+    assert live.teardown() == 0 and isolated.bundle.exists()
+    assert live.verify_clean() == 0 and "left behind" not in capsys.readouterr().err
+
+
+def test_the_lessons_cost_is_split_into_measured_and_estimate_from_the_ledger(monkeypatch) -> None:
+    queries: list[str] = []
+
+    def sql(query: str) -> list[str]:
+        queries.append(query)
+        if "state = 'failed'" in query:
+            return ["1"]
+        if "task_id = 'task_1'" in query:
+            return ["estimate|1|20000", "priced|10|250000", "reported|1|5000"]
+        if "session_id = 'ts_1'" in query:
+            return ["priced|2|6000"]
+        return []
+
+    monkeypatch.setattr(smoke, "sql", sql)
+    cost = live.lesson_cost("task_1", "ts_1")
+    assert cost["generation"] == {"attempts": 12, "charged_usd": 0.275, "measured_usd": 0.255, "estimate_usd": 0.02,
+                                  "failed_attempts": 1, "sources": {"estimate": 1, "priced": 10, "reported": 1}}
+    assert cost["teaching_session"]["measured_usd"] == 0.006
+    assert (cost["charged_usd"], cost["measured_usd"], cost["estimate_usd"]) == (0.281, 0.261, 0.02)
+    assert "session_id IS NULL" in queries[0]  # the session's attempts are not counted twice
+    assert all("state IN ('settled', 'unknown')" in q or "state = 'failed'" in q for q in queries)
+
+
+# --- the workflows: the paid run only by hand, on main, in `staging`; CI never reaches a paid provider -------------
+
+
+def workflow(name: str) -> str:
+    return (REPO_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+
+
+def test_the_live_workflow_keeps_its_one_dollar_default_and_uploads_the_sealed_lesson() -> None:
+    text = workflow("live-smoke.yml")
+    trigger = text.split("on:", 1)[1].split("permissions:", 1)[0]
+    assert "workflow_dispatch:" in trigger and not any(t in trigger for t in ("push", "pull_request", "schedule"))
+    assert 'default: "1.00"' in text and "environment: staging" in text
+    assert "if: github.ref == 'refs/heads/main'" in text
+    assert "REVIEW_PUBLIC_KEY: ${{ vars.REVIEW_PUBLIC_KEY }}" in text  # a variable: a public key is not a secret
+    upload = text.split("name: live-smoke-review", 1)[1].split("\n      - ", 1)[0]
+    assert "path: live-smoke-review.enc.json" in upload and "retention-days: 14" in upload
+    assert text.index("live_smoke.py teardown") < text.index("name: live-smoke-review")
+    assert live.MAX_CEILING_USD == 5.00 and live.ceiling("1.00") == 1.0
+
+
+def test_ci_rehearses_the_review_stage_on_mock_providers_without_any_secret() -> None:
+    text = workflow("ci.yml")
+    assert "secrets." not in text and "environment:" not in text  # no provider key can reach a CI job
+    assert "live_smoke.py --mock --max-cost 2.00" in text
+    assert "--fail-after review" in text  # a failure after the teacher's approval is rehearsed, and cleaned up

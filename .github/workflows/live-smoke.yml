@@ -1,6 +1,9 @@
 # The live smoke run (MVP item 10, issue #52; docs/deployment.md, "Live smoke run"): one lesson and one graded
 # answer on the real providers (OpenAI and Tavily), through a temporary production-profile stack started on this
 # runner from `main`, under one run-wide dollar ceiling, then the learner's data deleted and everything torn down.
+# The lesson is generated in a class that requires lesson approval: it is held, previewed and approved through the
+# teacher routes before the learner reads it (no extra paid call), and the previewed lesson is sealed to the
+# reviewer's public key and kept as the `live-smoke-review` artifact for 14 days for a human review.
 #
 # It spends real money, so it runs only when started by hand, only on `main`, and only inside the protected `staging`
 # environment, whose secrets are released to `main` alone (set the environment's deployment branches to `main`).
@@ -12,7 +15,9 @@
 #              and their prices in each model's billing units (docs/deployment.md, "Prices"):
 #              LLM_INPUT_PRICE_PER_MTOK, LLM_OUTPUT_PRICE_PER_MTOK, TTS_PRICE_PER_MCHAR, IMAGE_PRICE_PER_IMAGE,
 #              IMAGE_INPUT_PRICE_PER_MTOK (GPT image models), SEARCH_PRICE_PER_REQUEST;
-#              TA_VENDOR_CAPS (e.g. openai=20,tavily=10: the hard caps set in each vendor's console)
+#              TA_VENDOR_CAPS (e.g. openai=20,tavily=10: the hard caps set in each vendor's console);
+#              REVIEW_PUBLIC_KEY (the human reviewer's RSA public key, PEM, at least 3072 bits: the review bundle is
+#              sealed to it; deploy/review_bundle.py says how to make one and how to open the bundle)
 name: live-smoke
 
 on:
@@ -86,6 +91,7 @@ jobs:
           TA_VENDOR_CAPS: ${{ vars.TA_VENDOR_CAPS }}
           TTS_MODEL: ${{ vars.TTS_MODEL }}
           IMAGE_MODEL: ${{ vars.IMAGE_MODEL }}
+          REVIEW_PUBLIC_KEY: ${{ vars.REVIEW_PUBLIC_KEY }}
         run: python deploy/live_smoke.py --max-cost "$MAX_COST_USD_INPUT" --deadline-minutes 30
       - name: Tear down the stack and remove the key files (always, also after a failure, timeout or cancel)
         if: always()
@@ -101,3 +107,14 @@ jobs:
           path: live-smoke-report.json
           if-no-files-found: ignore
           retention-days: 30
+      # The lesson the teacher previewed and approved, sealed to REVIEW_PUBLIC_KEY (deploy/review_bundle.py): the
+      # repository is public, so the artifact holds only ciphertext; only the reviewer's private key opens it. It
+      # expires after 14 days (delete it sooner from the run's page once the review is recorded).
+      - name: Upload the sealed lesson for the human review (ciphertext only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-review
+          path: live-smoke-review.enc.json
+          if-no-files-found: ignore
+          retention-days: 14

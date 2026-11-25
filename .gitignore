@@ -10,3 +10,4 @@ var/
 deploy/secrets/
 deploy/gateway/
 live-smoke-report.json
+live-smoke-review.enc.json
