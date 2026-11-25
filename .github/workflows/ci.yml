@@ -151,13 +151,17 @@ jobs:
         run: |
           python deploy/live_smoke.py --mock --max-cost 2.00 --no-build --deadline-minutes 25
           python deploy/live_smoke.py verify-clean
+      # It fails after the teacher's approval (--fail-after review): the class, the held lesson and its sealed review
+      # bundle exist by then, and the learner's data, the stack and the key files must still all go.
       - name: Live smoke rehearsal of a failed run (must fail, then leave nothing behind)
         timeout-minutes: 20
         run: |
-          if python deploy/live_smoke.py --mock --max-cost 2.00 --no-build --fail-after lesson --deadline-minutes 15
+          if python deploy/live_smoke.py --mock --max-cost 2.00 --no-build --fail-after review --deadline-minutes 15
           then
             echo "the forced failure did not fail"; exit 1
           fi
+          # the approved lesson was sealed before the failure (the run removes an earlier run's bundle first)
+          test -s live-smoke-review.enc.json || { echo "the failed run kept no review bundle"; exit 1; }
           python deploy/live_smoke.py verify-clean
       - name: Tear down whatever a rehearsal left (always)
         if: always()
