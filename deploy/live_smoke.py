@@ -692,11 +692,16 @@ def flow(run: Run, environment: dict[str, str]) -> None:
             assert c.get(preview_path, headers=other_teacher).status_code == 404  # not that teacher's class
             assert c.get(preview_path, headers=me).status_code in (403, 404)  # not a teacher
             pictures: dict[str, bytes] = {}
+            withheld_images = 0
             for artifact_id in images:  # #58: the preview page does not show them, but the teacher may fetch them
                 fetched = c.get(f"/artifacts/{artifact_id}/content", headers=teacher)
-                assert fetched.status_code == 200, f"the teacher cannot fetch the image {artifact_id}"
+                if fetched.status_code == 404:  # withheld by the content policy (e.g. its stored text names an
+                    withheld_images += 1        # answer): refused to everyone, the teacher included, by design
+                    continue
+                assert fetched.status_code == 200, f"the teacher's image fetch answered {fetched.status_code}"
                 kind = fetched.headers.get("content-type", "").split(";")[0].strip()
                 pictures[f"images/{artifact_id}.{IMAGE_SUFFIXES.get(kind, 'bin')}"] = fetched.content
+            assert pictures, "the teacher could fetch none of the lesson's images"
             approved = c.post(f"/classes/{class_id}/lessons/{task_id}/approve",
                               json={"note": "Approved by the live smoke run; human review follows"}, headers=teacher)
             assert approved.status_code == 200, run.keys.redact(approved.text)
@@ -711,6 +716,17 @@ def flow(run: Run, environment: dict[str, str]) -> None:
             assert reading["lesson_id"] == preview["lesson_id"], "the learner reads another lesson than was approved"
             assert paid_attempts() == paid, "the teacher's review made a paid provider call"
 
+        # The approved lesson is sealed for the human review now, so any later failure still leaves it.
+        run.report["lesson"] = {"task_id": task_id, "lesson_id": preview["lesson_id"], "release": "APPROVED",
+                                "images": len(images), "images_withheld": withheld_images}
+        sealed_release = {k: release.get(k) for k in ("task_id", "lesson_id", "status", "requested_at",
+                                                       "decided_at", "note", "topic", "subject", "task_status")}
+        bundle_files = {"preview.json": json.dumps(preview, indent=2).encode(),
+                        "reading.json": json.dumps(reading, indent=2).encode(),
+                        "release.json": json.dumps(sealed_release, indent=2).encode(),
+                        **pictures}
+        seal_lesson(run, bundle_files, preview, sealed_release)
+
         # Released: the learner's surfaces as before (the VIDEO is never served, an image is).
         # The VIDEO is rendered from the deck, which can hold answer slides, so the API never serves its bytes to a
         # learner (app/services/artifact_content.py, BLOCKED): its content route answers 404 as for any blocked type.
@@ -721,15 +737,7 @@ def flow(run: Run, environment: dict[str, str]) -> None:
         assert duration > 0, duration
         assert c.get(f"/tasks/{task_id}", headers=other).status_code == 404
         assert c.get(f"/artifacts/{served[0]}/content", headers=other).status_code == 404
-        run.report["lesson"] = {"task_id": task_id, "lesson_id": preview["lesson_id"], "release": "APPROVED",
-                                "images": len(images), "video_seconds": duration}
-        sealed_release = {k: release.get(k) for k in ("task_id", "lesson_id", "status", "requested_at",
-                                                       "decided_at", "note", "topic", "subject", "task_status")}
-        bundle_files = {"preview.json": json.dumps(preview, indent=2).encode(),
-                        "reading.json": json.dumps(reading, indent=2).encode(),
-                        "release.json": json.dumps(sealed_release, indent=2).encode(),
-                        **pictures}
-        seal_lesson(run, bundle_files, preview, sealed_release)  # kept now: a later failure still leaves it
+        run.report["lesson"]["video_seconds"] = duration
         stop_if(run, "review")
 
         # One teaching-session answer, graded (the interactive path: teacher turns and grading in the API process).
@@ -836,6 +844,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"live smoke: {exc}", file=sys.stderr)
             code = 2
             return code
+        REVIEW_BUNDLE.unlink(missing_ok=True)  # a bundle of an earlier run is never taken for this run's
         flow(run, environment)
         if run.leaks:
             raise Leak("; ".join(run.leaks))

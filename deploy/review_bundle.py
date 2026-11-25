@@ -36,6 +36,8 @@ from pathlib import Path
 FORMAT = "ta-live-smoke-review/1"
 MIN_KEY_BITS = 3072
 MAX_FILE_BYTES = 20 * 1024 * 1024  # what `open` accepts from one member (a lesson image is far smaller)
+MAX_FILES = 200
+MAX_TOTAL_BYTES = 100 * 1024 * 1024
 
 
 class BundleError(Exception):
@@ -124,12 +126,18 @@ def unseal(envelope: dict, private_key) -> dict[str, bytes]:
     except Exception:  # noqa: BLE001 - one uniform answer for a wrong key or an altered bundle
         raise BundleError("the bundle cannot be decrypted with this key (wrong key, or it was altered)") from None
     out: dict[str, bytes] = {}
-    with zipfile.ZipFile(io.BytesIO(plain)) as z:
-        for info in z.infolist():
-            _check_name(info.filename)
-            if info.file_size > MAX_FILE_BYTES:
-                raise BundleError(f"{info.filename} is larger than {MAX_FILE_BYTES} bytes")
-            out[info.filename] = z.read(info)
+    try:
+        with zipfile.ZipFile(io.BytesIO(plain)) as z:
+            infos = z.infolist()
+            if len(infos) > MAX_FILES or sum(i.file_size for i in infos) > MAX_TOTAL_BYTES:
+                raise BundleError(f"the bundle holds more than {MAX_FILES} files or {MAX_TOTAL_BYTES} bytes")
+            for info in infos:
+                _check_name(info.filename)
+                if info.file_size > MAX_FILE_BYTES:
+                    raise BundleError(f"{info.filename} is larger than {MAX_FILE_BYTES} bytes")
+                out[info.filename] = z.read(info)
+    except zipfile.BadZipFile:
+        raise BundleError("the bundle's content is not a readable zip") from None
     return out
 
 

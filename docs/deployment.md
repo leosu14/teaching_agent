@@ -163,7 +163,8 @@ deleted. It runs `deploy/live_smoke.py`, which reuses `deploy/smoke.py`'s identi
 **The teacher's approval.** Before the lesson is requested, a teacher creates a class, turns on lesson approval, and
 the learner joins it with its code. The one lesson is then held: the learner's reading, its images and a teaching
 session answer 409. The class's teacher lists it (`GET /classes/{id}/lessons?status=PENDING`), previews it, fetches
-its images and approves it (`POST .../approve`), all through the gateway with the teacher's token; another teacher
+its images (one the content policy withholds answers 404 to everyone and is counted, not fetched) and approves it
+(`POST .../approve`), all through the gateway with the teacher's token; another teacher
 gets 404 and the learner cannot preview. A reject after the approval is a 409 (the decision is final). Only then
 does the learner read the lesson, start the session and fetch an image. It is the same lesson throughout: the
 class setup and the review make no paid call (the run counts the ledger's attempts before and after each, and fails
@@ -191,8 +192,8 @@ run (the class, the learner, the lesson in the database and the bucket) is delet
 run, as before.
 
 **The report.** `live-smoke-report.json` (public, ids and numbers only) gives each stage's start, end and duration
-(`stages`: `stack`, `stack_ready`, `class_setup`, `generation`, `review`, `grade`), the worker's own duration of the
-lesson (`generation_server_seconds`), and `lesson_cost` from the ledger: the lesson task's attempts outside any
+(`stages`: `stack`, `stack_ready`, `class_setup`, `generation`, `review`, `grade`), the lesson task's time from its
+request to its completion, queue and diagnostic answers included (`generation_server_seconds`), and `lesson_cost` from the ledger: the lesson task's attempts outside any
 session (`generation`) and its teaching session's (`teaching_session`), each split into `measured_usd` (from the
 usage the provider returned, at the configured prices, or a cost the provider reported) and `estimate_usd` (charged
 at the pre-send reservation because no usable usage came back). Neither is the vendor's invoice; compare it with

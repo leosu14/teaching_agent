@@ -160,6 +160,8 @@ jobs:
           then
             echo "the forced failure did not fail"; exit 1
           fi
+          # the approved lesson was sealed before the failure (the run removes an earlier run's bundle first)
+          test -s live-smoke-review.enc.json || { echo "the failed run kept no review bundle"; exit 1; }
           python deploy/live_smoke.py verify-clean
       - name: Tear down whatever a rehearsal left (always)
         if: always()

@@ -493,7 +493,10 @@ class Gateway:
             return answer(200, self.task()) if me else answer(404)
         if method == "GET" and path == "/tasks/task_1/artifacts":
             return answer(200, [{"artifact_id": "art_v", "type": "VIDEO"},
-                                {"artifact_id": "art_i", "type": "IMAGE_ASSET"}])
+                                {"artifact_id": "art_i", "type": "IMAGE_ASSET"},
+                                {"artifact_id": "art_w", "type": "IMAGE_ASSET"}])  # withheld by the content policy
+        if path == "/artifacts/art_w/content":
+            return answer(409 if held and me else 404)  # refused to everyone, the teacher included
         if method == "GET" and path == "/artifacts/art_i/content":
             return httpx.Response(200 if me else 404, content=b"png")
         if method == "GET" and path == "/artifacts/art_v/content":
@@ -573,6 +576,8 @@ def test_a_lesson_longer_than_a_token_completes_with_every_request_authenticated
     assert stages["grade"]["seconds"] >= 8 * 60 and stages["review"]["seconds"] >= 0
     assert run.report["generation_server_seconds"] == 35 * 60  # created_at to updated_at of the completed task
     assert run.bundle == "live-smoke-review.enc.json"
+    # an image the content policy withholds (404 even for the teacher) is counted, not a failure
+    assert run.report["lesson"]["images"] == 2 and run.report["lesson"]["images_withheld"] == 1
 
 
 def test_cleanup_deletes_the_learner_with_a_fresh_token_long_after_the_lesson_began(long_lesson) -> None:
@@ -749,3 +754,23 @@ def test_ci_rehearses_the_review_stage_on_mock_providers_without_any_secret() ->
     assert "secrets." not in text and "environment:" not in text  # no provider key can reach a CI job
     assert "live_smoke.py --mock --max-cost 2.00" in text
     assert "--fail-after review" in text  # a failure after the teacher's approval is rehearsed, and cleaned up
+    assert "test -s live-smoke-review.enc.json" in text  # ... and must still have kept the sealed lesson
+
+
+@pytest.mark.parametrize("stage, at", [("class_setup", 1), ("review", 3)])
+def test_a_paid_call_during_the_class_setup_or_the_review_fails_the_run(long_lesson, monkeypatch, stage, at) -> None:
+    """The ledger's attempt count is read before and after each stage that must not pay: a change fails the run."""
+    reads = iter(range(100))
+    counts = []
+
+    def paid_attempts():
+        n = next(reads)
+        counts.append(n)
+        return 0 if n < at else 1  # an attempt appears between the stage's two reads
+
+    monkeypatch.setattr(live, "paid_attempts", paid_attempts)
+    run = live.Run(mock=False, max_cost=1.0, build=False, keys=live.Keys({"OPENAI_API_KEY": KEY}),
+                   review_key=reviewer().public_key())
+    with pytest.raises(AssertionError, match="made a paid provider call"):
+        live.flow(run, {})
+    assert stage in run.stages and "finished_at" not in run.stages[stage]

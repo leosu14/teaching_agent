@@ -191,7 +191,7 @@ def test_the_flow_holds_previews_approves_and_seals_the_same_lesson_without_a_pa
     files = bundle.unseal(envelope, private)
     assert {"REVIEW.md", "preview.json", "reading.json", "release.json"} <= set(files)
     images = [n for n in files if n.startswith("images/")]
-    assert len(images) == lesson["images"] and all(files[n] for n in images)
+    assert len(images) == lesson["images"] - lesson["images_withheld"] and all(files[n] for n in images)
     preview, reading = json.loads(files["preview.json"]), json.loads(files["reading.json"])
     release = json.loads(files["release.json"])
     assert preview["task_id"] == reading["task_id"] == release["task_id"] == lesson["task_id"]
