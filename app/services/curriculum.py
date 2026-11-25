@@ -288,14 +288,17 @@ class CurriculumService:
         if version is None or record is None:
             return None
         when = as_of or self._clock()
-        model = self._tracker.model(goal, [], when)
+        model = self._tracker.model(goal, [], when, create=False)  # a read: no profile is stored (#66 PR 3)
         counts = self._tracker.review_counts(model, {o.concept_id: o.evidence_required for o in version.objectives})
         progress = self._engine.progress(version, model, when, counts)
         objectives = [o.model_copy(update={"current_mastery": progress.of(o.objective_id).current_mastery,
                                            "status": progress.of(o.objective_id).status}) for o in version.objectives]
+        versions = len(self._engine.versions(record.curriculum_id))
+        if versions == 0:  # deleted with the learner's data since the version was read: no curriculum any more
+            return None
         return Curriculum(curriculum_id=record.curriculum_id, learner_id=record.learner_id, goal_id=record.goal_id,
                           title=record.title, objectives=objectives, version=version.version,
-                          version_id=version.version_id, versions=len(self._engine.versions(record.curriculum_id)),
+                          version_id=version.version_id, versions=versions,
                           status=record.status, created_at=record.created_at, updated_at=record.updated_at,
                           progress=progress, warnings=version.warnings)
 
@@ -322,12 +325,23 @@ class CurriculumService:
             return self._tracker.tracked(learner_id, when, graphs=graphs, replan=False, scope=self._scope())
 
     async def next_action(self, learner_id: str, *, as_of: datetime | None = None) -> NextLearningAction:
-        """The learner's next action. A read that writes (the progress refresh, the action's events): each write is
-        refused once the learner is deleted, so a deletion racing it leaves nothing and the request answers 404."""
+        """The learner's next action after a stored refresh, for a write that just changed what the learner knows (an
+        answer, a grade, a finished cycle): the progress refresh and completion are stored and the selection is
+        emitted (`learning.action_selected`). Each write is refused once the learner is deleted, so a deletion racing
+        it leaves nothing and the request answers 404. A read uses `peek_next_action`."""
         self._memory.get(learner_id)  # unknown learners are rejected
         with learner_writes(learner_id):
             tracked = await self.tracked(learner_id, as_of=as_of)
             return self._tracker.next_action(learner_id, tracked, self._scope())
+
+    async def peek_next_action(self, learner_id: str, *, as_of: datetime | None = None) -> NextLearningAction:
+        """The learner's next action, read-only (issue #66 PR 3): computed in memory from the stored state as of
+        `as_of` (default now; A1: a what-if, never stored). Nothing is written: no progress, no completion, no
+        event. Completion is stored by the evidence write that reaches it, and by the sweeper."""
+        self._memory.get(learner_id)  # unknown learners are rejected
+        when = as_of or self._clock()
+        graphs = {d: await self._knowledge.graph(d) for d in sorted({g.domain for g in self._memory.goals(learner_id)})}
+        return self._tracker.next_action(learner_id, self._tracker.peek(learner_id, when, graphs=graphs))
 
     async def start_lesson(self, action: NextLearningAction, *, user_id: str) -> Task:
         """Start the lesson a LEARN / REVIEW / PRACTICE / EVALUATE action asks for, planned around its objective."""

@@ -309,6 +309,39 @@ def test_sql_repository_round_trip(tmp_path) -> None:
     assert [r.curriculum_id for r in repo.records_for_learner(LEARNER)] == [v1.curriculum_id]
 
 
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+def test_a_progress_snapshot_is_stored_only_over_the_one_its_refresh_read(tmp_path, kind) -> None:
+    """Issue #66 PR 3: two refreshes that read the same snapshot (sweepers on two workers) both compute the same
+    transitions; only the first store wins, so only it reports them. A first snapshot is inserted once too."""
+    from app.storage.db import create_db
+    from app.storage.repositories import SqlCurriculumRepository
+
+    memory, _, g = learner(SPEC)
+    repo = InMemoryCurriculumRepository() if kind == "memory" else \
+        SqlCurriculumRepository(create_db(f"sqlite:///{tmp_path / 'c.db'}"))
+    engine = CurriculumEngine(repo)
+    v1 = committed(engine, goal(C), model_of(memory, g), g)
+    first = engine.progress(v1, model_of(memory, g), NOW)
+    assert repo.save_progress(first, expected=None) is True
+    assert repo.save_progress(first, expected=None) is False  # another refresh inserted one first
+    later = engine.progress(v1, model_of(memory, g), NOW + timedelta(hours=1))
+    assert repo.save_progress(later, expected=first) is True
+    stale = engine.progress(v1, model_of(memory, g), NOW + timedelta(hours=2))
+    assert repo.save_progress(stale, expected=first) is False  # read before `later` was stored
+    assert repo.progress(v1.curriculum_id) == later
+    assert repo.save_progress(stale) is True  # unconditional, as before
+    assert repo.progress(v1.curriculum_id) == stale
+    if kind == "sql":  # a row serialised differently (another key order, an older schema) still compares as a model
+        from sqlalchemy import update as sql_update
+
+        from app.storage.orm import CurriculumProgressRow
+        import json
+        reordered = json.dumps(dict(reversed(list(json.loads(stale.model_dump_json()).items()))))
+        with repo._sessions.begin() as s:
+            s.execute(sql_update(CurriculumProgressRow).values(body=reordered))
+        assert repo.save_progress(later, expected=stale) is True
+
+
 # --- next learning action ------------------------------------------------------------------------------------------
 
 
@@ -463,7 +496,8 @@ def test_refresh_reports_transitions_once_and_completes_the_goal_once() -> None:
                            [c.ref() for c in g.concepts()])
     done = engine.refresh(gl, model_of(memory, g), NOW, scope=s)
     assert done.goal_completed and len(done.mastered) == 1
-    assert [e.type for e in events].count(EventType.GOAL_COMPLETED) == 1
+    # `goal.completed` is reported by the tracker once the completion is stored (issue #66 PR 3), not here
+    assert [e.type for e in events].count(EventType.GOAL_COMPLETED) == 0
     assert [e.type for e in events].count(EventType.OBJECTIVE_MASTERED) == 1
     # The engine reports the completion; the curriculum status follows the goal once the caller stored it (#65).
     assert engine.record(curriculum_id_for(gl.goal_id)).status.value == "ACTIVE"

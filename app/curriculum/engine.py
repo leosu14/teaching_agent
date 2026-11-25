@@ -185,8 +185,11 @@ class CurriculumEngine:
             if p.status == ObjectiveStatus.MASTERED and old != ObjectiveStatus.MASTERED:
                 mastered.append(p.objective_id)
         completed = progress.goal_complete and goal.is_active
-        self.repository.save_progress(progress)  # the status is the caller's: it follows the stored goal (#65)
-        if scope is not None:
+        # The status is the caller's: it follows the stored goal (#65). The snapshot is stored only over the one read
+        # above: a concurrent refresh (another worker's sweeper, an evidence write) that stored first reports the
+        # transitions, and this one reports none, so each is reported once (issue #66 PR 3).
+        reported = self.repository.save_progress(progress, expected=previous)
+        if scope is not None and reported:
             for oid in started:
                 o = version.objective(oid)
                 scope.emit(EventType.OBJECTIVE_STARTED, goal_id=goal.goal_id, curriculum_id=curriculum_id,
@@ -196,10 +199,7 @@ class CurriculumEngine:
                 scope.emit(EventType.OBJECTIVE_MASTERED, goal_id=goal.goal_id, curriculum_id=curriculum_id,
                            objective_id=oid, concept_id=o.concept_id, mastery=p.current_mastery,
                            evidence=p.evidence_count)
-            if completed:
-                scope.emit(EventType.GOAL_COMPLETED, goal_id=goal.goal_id, curriculum_id=curriculum_id,
-                           version=version.version, rule=self.config.completion_rule,
-                           objectives=progress.required)
+            # `goal.completed` is the tracker's to emit, once the goal's completion is stored (by that refresh)
         return ProgressUpdate(curriculum_id=curriculum_id, goal_id=goal.goal_id, progress=progress,
                               started=started, mastered=mastered, goal_completed=completed, replanned=replanned)
 

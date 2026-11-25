@@ -8,8 +8,9 @@ The second review's probes, kept as regression tests:
   the routes whose late writes survived. Whatever the route answers, it is never a server error, and after a second
   deletion no erased table holds any id that led back to A: a late write was refused, not left where no deletion can
   reach it. The profile is not re-created.
-- the next action with the deletion between its goal read and its progress refresh, and between the refresh and the
-  `learning_action.selected` event: no 500, no event naming the deleted goal.
+- the next action with the deletion between its goal reads and the `learning_action.selected` event, and the
+  sweeper's progress refresh (the next action's old write, issue #66 PR 3) with the deletion just before it: no 500, no
+  error, no event naming the deleted goal.
 - a lesson queued for a learner who never sent their profile (no learner row) is accepted, as before the deletion
   feature, and is deleted with the rest of their data."""
 
@@ -18,7 +19,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from app.api.auth import AUTHOR
+from app.api.auth import AUTHOR, TEACHER
 from app.storage.orm import EventRow
 from tests.auth import client_for
 from tests.conftest import LEARNER as ONBOARDING
@@ -105,6 +106,73 @@ def _next_action_racing_the_deletion(world, obj, attr) -> int:
     return status
 
 
+GET_ROUTES = [(m, p) for m, p in ROUTES if m == "GET"]
+
+
+@pytest.mark.parametrize("method,template", GET_ROUTES)
+def test_a_deletion_just_before_a_gets_profile_read_recreates_nothing(world, method, template) -> None:
+    """Issue #66 PR 3: a GET writes nothing, even racing the learner's deletion. The deletion commits just before the
+    request's first read of the learner's profile (where a learner model or a mastery lookup reads it): the GET
+    answers without a server error and never re-creates the profile (a read builds a blank model instead of storing
+    one), and nothing of the learner is left."""
+    env, ids, auth = world
+    c = env.container
+    a_ids = learner_ids(c._sessions, LEARNER)
+    m, path, body = concrete(method, template, ids)
+    repo = c.learner_service._memory._repo
+    real, state = repo.get, {"armed": False, "deleted": False}
+
+    def get_after_a_deletion(learner_id, *args, **kwargs):
+        if state["armed"] and not state["deleted"] and learner_id == LEARNER:
+            state["deleted"] = True
+            c.learner_deletion.delete(LEARNER)
+        return real(learner_id, *args, **kwargs)
+
+    repo.get = get_after_a_deletion
+    try:
+        with client_for(c, LEARNER, roles=(AUTHOR,), auth=auth) as a:
+            state["armed"] = True
+            headers = auth.headers(user_id=test_security_api.TEACHER_ID, roles=(TEACHER,)) \
+                if path.startswith("/classes") else None
+            status = a.request(m, path, json=body, headers=headers).status_code
+            state["armed"] = False
+    finally:
+        repo.get = real
+    if not state["deleted"]:
+        pytest.skip("the route reads no profile")
+    assert status < 500, (m, template, status)
+    assert real(LEARNER) is None, (m, template)  # not re-created
+    c.learner_deletion.delete(LEARNER)
+    assert sorted(set(db_residue(c._sessions, a_ids))) == []
+
+
+def test_a_deletion_just_before_the_next_actions_model_read_recreates_no_profile(world) -> None:
+    """Issue #66 PR 3 (the review's probe): the deletion commits after GET next-action read the goals and curricula,
+    just before it builds the learner model. The read never stores a profile (on main its write was refused under
+    the deletion lock; now nothing is written), so the learner stays deleted."""
+    env, ids, auth = world
+    c = env.container
+    a_ids = learner_ids(c._sessions, LEARNER)
+    tracker = c.curriculum_service._tracker
+    real, receipts = tracker.model, []
+
+    def after_a_deletion(*args, **kwargs):
+        if not receipts:
+            receipts.append(c.learner_deletion.delete(LEARNER))
+        return real(*args, **kwargs)
+
+    tracker.model = after_a_deletion
+    try:
+        with client_for(c, LEARNER, auth=auth) as a:
+            assert a.get(f"/learners/{LEARNER}/next-action").status_code < 500
+    finally:
+        tracker.model = real
+    assert receipts and receipts[0].records.get("learners") == 1
+    assert c.learner_service._memory._repo.get(LEARNER) is None  # not re-created
+    assert c.learner_deletion.delete(LEARNER).records == {}
+    assert sorted(set(db_residue(c._sessions, a_ids))) == []
+
+
 def test_a_deletion_during_the_next_actions_graph_load(world) -> None:
     c = world[0].container
     knowledge = c.curriculum_service._knowledge
@@ -128,8 +196,33 @@ def test_a_deletion_during_the_next_actions_graph_load(world) -> None:
 
 
 def test_a_deletion_between_the_goal_read_and_the_progress_refresh(world) -> None:
-    c = world[0].container
-    assert _next_action_racing_the_deletion(world, c.curriculum_service._tracker.engine, "refresh") == 404
+    """The progress refresh moved from GET next-action to the writers and the sweeper (issue #66 PR 3): the GET does
+    not reach it (`_next_action_racing_the_deletion` would never fire), so the sweeper's refresh races the deletion:
+    it skips the deleted learner (no error) and writes nothing after the deletion."""
+    import asyncio
+
+    env, ids, auth = world
+    c = env.container
+    engine = c.curriculum_service._tracker.engine
+    a_ids = learner_ids(c._sessions, LEARNER)
+    real, receipts = engine.refresh, []
+
+    def after_a_deletion(*args, **kwargs):
+        if not receipts:
+            receipts.append(c.learner_deletion.delete(LEARNER))
+        return real(*args, **kwargs)
+
+    engine.refresh = after_a_deletion
+    try:
+        report = asyncio.run(c.task_worker.sweep_learning(full=True))
+    finally:
+        engine.refresh = real
+    assert receipts and receipts[0].records.get("learners") == 1
+    assert report is not None and report.errors == 0, report.summary()
+    assert c.learner_deletion.delete(LEARNER).records == {}  # nothing was written after it
+    assert sorted(set(db_residue(c._sessions, a_ids))) == []
+    with c._sessions() as s:
+        assert not [e.type for e in s.scalars(select(EventRow)) if ids["goal"] in e.body]
 
 
 def test_a_deletion_between_the_progress_refresh_and_the_selected_event(world) -> None:

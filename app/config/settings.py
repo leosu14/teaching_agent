@@ -220,9 +220,17 @@ class Settings(BaseSettings):
     job_retry_backoff_seconds: float = Field(default=5.0, ge=0, le=3600)  # doubled per failed attempt
     job_retry_max_backoff_seconds: float = Field(default=300.0, ge=0, le=86400)
     job_busy_retry_seconds: float = Field(default=10.0, ge=0, le=3600)  # the task's lease was held by another worker
-    # How often a serving worker sweeps for tasks a killed worker left mid-run (app/services/sweeper.py); 0 turns it
-    # off (then run `python -m app.services.worker --sweep` from cron instead).
+    # How often a serving worker sweeps (app/services/sweeper.py): tasks a killed worker left mid-run, and the
+    # learning sweep below; 0 turns it off (then run `python -m app.services.worker --sweep` from cron instead, and
+    # declare it with TA_SWEEP_EXTERNAL in production).
     worker_sweep_seconds: float = Field(default=60.0, ge=0, le=86400)
+    # The learning sweep (issue #66 PR 3, docs/deployment.md "The sweeper"): each pass of a serving worker refreshes
+    # at most `sweep_batch` learners' curricula, reconciles as many cycles and publishes as many teaching outboxes,
+    # resuming where the previous pass stopped (round robin: every one is reached within ceil(N / batch) passes).
+    # `--sweep` (cron) walks all of them, `sweep_batch` at a time. Production refuses TA_WORKER_SWEEP_SECONDS=0 unless
+    # TA_SWEEP_EXTERNAL=true declares that cron runs `--sweep` instead.
+    sweep_batch: int = Field(default=100, ge=1, le=10000)
+    sweep_external: bool = False
 
     # The progress streams (GET /tasks/{id}/stream, GET /learning-cycles/{id}/stream; app/services/progress_stream.py).
     # A stream reads the database every `stream_poll_seconds`, delivers an event only once the table's highest `seq`
@@ -426,6 +434,11 @@ class Settings(BaseSettings):
             problems.append("TA_WORKER_EMBEDDED must be false: the worker runs as its own process")
         if self.dev_live_reload:
             problems.append("TA_DEV_LIVE_RELOAD must be false: live reload is for local development only")
+        if self.worker_sweep_seconds == 0 and not self.sweep_external:
+            problems.append("TA_WORKER_SWEEP_SECONDS=0 turns the worker's sweeper off; the sweeper is required (it "
+                            "recovers stranded tasks and refreshes curricula, cycles and teaching outboxes): keep it "
+                            "on, or run `python -m app.services.worker --sweep` from cron and set "
+                            "TA_SWEEP_EXTERNAL=true")
         priced = (self.providers.llm_input_price_per_mtok is not None
                   and self.providers.llm_output_price_per_mtok is not None)
         for scope in ("learner_daily", "global_daily"):

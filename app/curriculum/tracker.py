@@ -9,6 +9,7 @@ ignored: a learner without curricula keeps the adaptive lesson loop exactly as b
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -43,6 +44,12 @@ def _mastered(state, objective: CurriculumObjective) -> bool:
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+
+# The goals whose completion this refresh's `complete()` stored (`tracked` reads it to report `goal.completed` once).
+# A context variable, so `complete` keeps its signature (tests wrap it) and concurrent refreshes do not share it.
+_completions: ContextVar[set[str] | None] = ContextVar("curriculum_completions", default=None)
 
 
 @dataclass
@@ -85,9 +92,10 @@ class CurriculumTracker:
         return self.memory.framework_for(goal.learner_id, goal.domain,
                                          goal.metadata.get(FRAMEWORK_KEY) or DEFAULT_FRAMEWORK)
 
-    def model(self, goal: LearningGoal, universe: list[str], as_of: datetime) -> LearnerModel:
+    def model(self, goal: LearningGoal, universe: list[str], as_of: datetime, *, create: bool = True) -> LearnerModel:
+        """`create=False`: a read's model, which never stores a profile (`LearnerMemoryService.learner_model`)."""
         return self.memory.learner_model(goal.learner_id, goal.domain, self.framework_for(goal), goal.target_level,
-                                         universe, as_of=as_of)
+                                         universe, as_of=as_of, create=create)
 
     def completion_time(self, goal: LearningGoal, version: CurriculumVersion, as_of: datetime) -> datetime:
         """When the learner first reached the mastery that completes the goal (D11): the timestamp of the earliest
@@ -112,9 +120,17 @@ class CurriculumTracker:
         new deadline) is not lost. A goal no longer ACTIVE meanwhile (paused, cancelled) is left alone."""
         at = self.completion_time(goal, version, as_of)
 
+        applied = _completions.get()
+        if applied is not None:
+            applied.discard(goal.goal_id)
+
         def done(current: LearningGoal) -> LearningGoal | None:
             if current.status != GoalStatus.ACTIVE:
+                if applied is not None:
+                    applied.discard(goal.goal_id)  # a retried update: only the attempt that applied counts
                 return None
+            if applied is not None:
+                applied.add(goal.goal_id)
             return current.model_copy(update={"status": GoalStatus.COMPLETED, "updated_at": as_of,
                                               "completed_at": current.completed_at or at})
 
@@ -167,9 +183,21 @@ class CurriculumTracker:
             if update is None:  # its curriculum was deleted since it was read: with the learner's data
                 raise LearnerDataGone()
             if update.goal_completed:
-                goal = self.complete(goal, version, as_of)
+                applied: set[str] = set()
+                token = _completions.set(applied)
+                try:
+                    goal = self.complete(goal, version, as_of)
+                finally:
+                    _completions.reset(token)
                 if goal.status == GoalStatus.COMPLETED:
                     completed.add(goal.goal_id)
+                if goal.goal_id in applied and scope is not None:
+                    # Reported by the refresh whose update stored the completion (under the goal's row lock), so
+                    # once, however many refreshes (sweepers on every worker, evidence writes) saw the rule hold.
+                    final = update.replanned or version
+                    scope.emit(EventType.GOAL_COMPLETED, goal_id=goal.goal_id, curriculum_id=update.curriculum_id,
+                               version=final.version, rule=self.engine.config.completion_rule,
+                               objectives=update.progress.required)
                 # Completed, or paused or cancelled meanwhile: the curriculum follows the goal as stored now, never
                 # `goal` (a copy that a cancel committed after can make stale, #65).
                 self.follow_goal(goal.goal_id)
@@ -185,6 +213,27 @@ class CurriculumTracker:
             result.updates.append(update)
             result.entries.append(GoalCurriculum(goal=goal, version=current, progress=update.progress))
         result.completed_now = frozenset(completed)
+        return result
+
+    def peek(self, learner_id: str, as_of: datetime, *, graphs: Mapping[str, ConceptGraph],
+             domain: str | None = None) -> TrackedGoals:
+        """`tracked` without a single write (issue #66 PR 3, A1): every goal's progress computed in memory from the
+        stored state as of `as_of`. Nothing is stored, no transition is reported, no goal is completed, no curriculum
+        follows its goal and no event is emitted. A goal whose completion rule holds but that no write has completed
+        yet stays ACTIVE here, and the next-action selection yields its COMPLETE (as the refresh would have)."""
+        result = TrackedGoals(as_of=as_of)
+        for goal in self.memory.goals(learner_id, domain):
+            version = self.engine.current(curriculum_id_for(goal.goal_id))
+            if version is None:
+                continue
+            model = result.models.get(goal.domain)
+            if model is None:  # the same model as `tracked` reads (stored nothing: no profile is created)
+                graph = graphs.get(goal.domain)
+                model = self.model(goal, graph.ids if graph is not None else [], as_of, create=False)
+                result.models[goal.domain] = model
+            counts = self.review_counts(model, {o.concept_id: o.evidence_required for o in version.objectives})
+            progress = self.engine.progress(version, model, as_of, counts)
+            result.entries.append(GoalCurriculum(goal=goal, version=version, progress=progress))
         return result
 
     def next_action(self, learner_id: str, tracked: TrackedGoals,

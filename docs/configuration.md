@@ -20,7 +20,9 @@ They are validated when the container is built; errors say what to fix.
 | `TA_JOB_RETRY_BACKOFF_SECONDS` | `5` | Delay before a failed job's next attempt, doubled per attempt |
 | `TA_JOB_RETRY_MAX_BACKOFF_SECONDS` | `300` | Longest delay between attempts |
 | `TA_JOB_BUSY_RETRY_SECONDS` | `10` | Delay before retrying a job whose task was being executed by someone else (no attempt used) |
-| `TA_WORKER_SWEEP_SECONDS` | `60` | How often a serving worker queues the continuation of tasks a killed worker left mid-run (`0`: off; run `python -m app.services.worker --sweep` from cron instead) |
+| `TA_WORKER_SWEEP_SECONDS` | `60` | How often a serving worker sweeps: queues the continuation of tasks a killed worker left mid-run, refreshes curricula, reconciles learning cycles and publishes owed outboxes (`0`: off; production then needs `TA_SWEEP_EXTERNAL=true` and `python -m app.services.worker --sweep` from cron; docs/deployment.md "The sweeper") |
+| `TA_SWEEP_BATCH` | `100` | Learners, cycles and outboxes each pass of the learning sweep handles (round robin: each is reached within ceil(N / batch) passes); `--sweep` walks all, a batch at a time |
+| `TA_SWEEP_EXTERNAL` | `false` | Declares that cron runs `--sweep`, so production accepts `TA_WORKER_SWEEP_SECONDS=0` |
 | `TA_STREAM_MAX_SECONDS` | `600` | Progress streams: the most a stream stays open before it sends `reconnect` (the client reconnects and is authenticated again) |
 | `TA_STREAM_POLL_SECONDS` | `1.0` | Progress streams: how often an open stream reads the database |
 | `TA_STREAM_SETTLE_SECONDS` | `2.0` | Progress streams: an event is delivered once the highest event `seq` read at least this long ago covers it (defence in depth: event appends commit in `seq` order; see architecture, Progress streams) |

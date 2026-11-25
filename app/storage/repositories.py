@@ -31,6 +31,7 @@ from app.schemas.assignment import AssignmentLearner, ClassAssignment, Materiali
 from app.schemas.classroom import ClassMember, Classroom
 from app.schemas.review import GradeOverride, LessonRelease, ReleaseStatus
 from app.schemas.curriculum import (
+    ANY_PROGRESS,
     CurriculumProgress,
     CurriculumRecord,
     CurriculumStatus,
@@ -44,6 +45,7 @@ from app.schemas.events import Event
 from app.schemas.privacy import RETAINED_RECORDS, LearnerDataBusy
 from app.schemas.lease import Lease, LearnerDataGone, LeaseLost, WriteConflict, learner_guard, write_fence
 from app.schemas.learning_cycle import (
+    ACTIVE_CYCLE_STATUSES,
     TERMINAL_CYCLE_STATUSES,
     CycleConflict,
     CycleLeaseLost,
@@ -749,6 +751,17 @@ class SqlCurriculumRepository:
                              .model_dump_json()}, conflict)
             return wanted
 
+    def learners_to_refresh(self, after: str | None, limit: int) -> list[str]:
+        """The sweeper's round-robin (issue #66 PR 3): learners after `after` (in id order) with a curriculum, at most
+        `limit`. Read-only. Every one, not only those with an ACTIVE goal: the refresh also repairs a curriculum
+        whose status no longer follows its (completed, paused or cancelled) goal, a follow a crash lost (#65)."""
+        with self._sessions() as s:
+            query = (select(CurriculumRow.learner_id).distinct()
+                     .order_by(CurriculumRow.learner_id).limit(limit))
+            if after is not None:
+                query = query.where(CurriculumRow.learner_id > after)
+            return list(s.scalars(query))
+
     def records_for_learner(self, learner_id: str) -> list[CurriculumRecord]:
         with self._sessions() as s:
             rows = s.scalars(select(CurriculumRow).where(CurriculumRow.learner_id == learner_id)
@@ -786,10 +799,31 @@ class SqlCurriculumRepository:
                              .order_by(CurriculumVersionRow.version))
             return [CurriculumVersion.model_validate_json(r.body) for r in rows]
 
-    def save_progress(self, progress: CurriculumProgress) -> None:
+    def save_progress(self, progress: CurriculumProgress, *, expected: CurriculumProgress | None | object = ANY_PROGRESS) -> bool:
+        body = progress.model_dump_json()
         with self._sessions.begin() as s:
             _fence_current(s, self._time)
-            s.merge(CurriculumProgressRow(curriculum_id=progress.curriculum_id, body=progress.model_dump_json()))
+            if expected is ANY_PROGRESS:
+                s.merge(CurriculumProgressRow(curriculum_id=progress.curriculum_id, body=body))
+                return True
+            if expected is None:  # the first snapshot: only if no other refresh inserted one meanwhile
+                insert = sqlite_insert if s.get_bind().dialect.name == "sqlite" else postgresql_insert
+                done = s.execute(insert(CurriculumProgressRow).values(curriculum_id=progress.curriculum_id, body=body)
+                                 .on_conflict_do_nothing(index_elements=["curriculum_id"]))
+                return done.rowcount == 1
+            # A compare-and-set on the snapshot read: the stored row is compared as a model (so a change of the
+            # schema's serialisation never freezes old snapshots), then replaced only if its text is still the text
+            # just compared (PostgreSQL: a concurrent UPDATE waits on the row, then re-checks the body, which no
+            # longer matches; SQLite serialises writers).
+            raw = s.scalar(select(CurriculumProgressRow.body)
+                           .where(CurriculumProgressRow.curriculum_id == progress.curriculum_id))
+            if raw is None or CurriculumProgress.model_validate_json(raw) != expected:
+                return False
+            done = s.execute(update(CurriculumProgressRow)
+                             .where(CurriculumProgressRow.curriculum_id == progress.curriculum_id,
+                                    CurriculumProgressRow.body == raw)
+                             .values(body=body))
+            return done.rowcount == 1
 
     def progress(self, curriculum_id: str) -> CurriculumProgress | None:
         with self._sessions() as s:
@@ -940,6 +974,16 @@ class SqlTeachingRepository:
                              .order_by(TeachingOutboxRow.seq))
             return [OutboxItem.model_validate_json(r.body) for r in rows]
 
+    def with_pending_outbox(self, after: str | None, limit: int) -> list[str]:
+        """Sessions after `after` (in id order) with an unpublished outbox item, at most `limit`: the sweeper
+        publishes what a crash left (issue #66 PR 3)."""
+        with self._sessions() as s:
+            query = (select(TeachingOutboxRow.session_id).where(TeachingOutboxRow.published.is_(False)).distinct()
+                     .order_by(TeachingOutboxRow.session_id).limit(limit))
+            if after is not None:
+                query = query.where(TeachingOutboxRow.session_id > after)
+            return list(s.scalars(query))
+
     def mark_published(self, item_id: str) -> None:
         with self._sessions.begin() as s:
             _guard(s)
@@ -1077,6 +1121,11 @@ def _cycle_lease_columns(cycle: LearningCycle) -> dict:
     return {"lease_token": lease.token if lease else None, "lease_expires_ms": _ms(lease.until) if lease else None}
 
 
+# A cycle body (`LearningCycle.model_dump_json()`, compact) with no events left to publish contains this; the only
+# field of that name is the cycle's own (checked by tests/unit/test_sweeper.py).
+NO_PENDING_EVENTS = '"pending_events":[]'
+
+
 class SqlLearningCycleRepository:
     """Learning cycles, the one-active-cycle-per-learner slot and received responses. Every change is one transaction,
     applied only against the cycle version it was computed from."""
@@ -1156,6 +1205,19 @@ class SqlLearningCycleRepository:
             slot = s.get(LearningCycleSlotRow, learner_id)
             cycle_id = slot.cycle_id if slot else None
         return self.get(cycle_id) if cycle_id else None
+
+    def active_ids(self, after: str | None, limit: int) -> list[str]:
+        """Cycles after `after` (in id order), at most `limit`, that the sweeper reconciles: the active ones (a child
+        may have moved on) and any whose events a crash left unpublished (the body's `pending_events` is not empty;
+        a terminal cycle's reconcile only publishes them)."""
+        with self._sessions() as s:
+            query = (select(LearningCycleRow.cycle_id)
+                     .where(or_(LearningCycleRow.status.in_([c.value for c in ACTIVE_CYCLE_STATUSES]),
+                                LearningCycleRow.body.not_like(f"%{NO_PENDING_EVENTS}%")))
+                     .order_by(LearningCycleRow.cycle_id).limit(limit))
+            if after is not None:
+                query = query.where(LearningCycleRow.cycle_id > after)
+            return list(s.scalars(query))
 
     def for_learner(self, learner_id: str) -> list[LearningCycle]:
         with self._sessions() as s:

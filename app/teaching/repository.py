@@ -75,6 +75,10 @@ class TeachingRepository(Protocol):
 
     def mark_published(self, item_id: str) -> None: ...
 
+    def with_pending_outbox(self, after: str | None, limit: int) -> list[str]:
+        """Sessions after `after` (in id order) with an unpublished outbox item, at most `limit`."""
+        ...
+
 
 class InMemoryTeachingRepository:
     def __init__(self, clock: Callable[[], datetime] = utcnow) -> None:
@@ -176,6 +180,10 @@ class InMemoryTeachingRepository:
 
     def pending_outbox(self, session_id: str) -> list[OutboxItem]:
         return [o.model_copy(deep=True) for o in self._outbox if o.session_id == session_id and not o.published]
+
+    def with_pending_outbox(self, after: str | None, limit: int) -> list[str]:
+        return sorted({o.session_id for o in self._outbox
+                       if not o.published and (after is None or o.session_id > after)})[:limit]
 
     def mark_published(self, item_id: str) -> None:
         with self._lock:
