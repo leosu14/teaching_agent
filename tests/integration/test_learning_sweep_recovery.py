@@ -150,3 +150,32 @@ def test_the_cron_sweep_exits_non_zero_when_anything_failed(cycle_env_at, monkey
         outboxes=c.teaching_service.repository.with_pending_outbox, publish=c.teaching_service.publish_pending)
     assert worker_module.sweep_once(worker) == 1
     assert "curricula: 0 done, 1 failed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("failure", ["transient", "fence", "gone"])
+async def test_a_lesson_evidence_refresh_failure_is_left_to_the_sweeper_but_a_lost_fence_is_not(cycle_env_at,
+                                                                                              monkeypatch,
+                                                                                              failure) -> None:
+    """The lesson's evidence is stored before its curricula refresh: a refresh that fails (a graph load error) is
+    logged and the lesson goes on, the sweeper refreshing later; a lost lease or a deleted learner is the task's own
+    error and is raised."""
+    from types import SimpleNamespace
+
+    from app.curriculum.tracker import CurriculumTracker
+    from app.schemas.lease import LearnerDataGone, LeaseLost
+
+    env = cycle_env_at("diagnostic")
+    refresh = env.container.tools.registry.get("learner.record_diagnostic")._refresh
+    error = {"transient": RuntimeError("graph down"), "fence": LeaseLost("fence lost"),
+             "gone": LearnerDataGone()}[failure]
+
+    def broken(self, *args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(CurriculumTracker, "tracked", broken)
+    scope = SimpleNamespace(task_id=lesson_of(env, the_cycle(env)))
+    if failure == "transient":
+        await refresh(LEARNER, "spanish", scope)  # logged, not raised
+    else:
+        with pytest.raises(type(error)):
+            await refresh(LEARNER, "spanish", scope)

@@ -42,6 +42,7 @@ from app.observability.logging import log_event
 from app.observability.redaction import register_secret
 from app.observability.spend import TOTAL_SCOPE, SpendStore
 from app.observability.scope import ExecutionScope
+from app.schemas.lease import LearnerDataGone, LeaseLost
 from app.providers.core.http import HttpClient
 from app.providers.core.invoker import ProviderInvoker
 from app.providers.core.registry import ProviderRegistry
@@ -567,6 +568,8 @@ def build_container(
             graph = await evidence_knowledge.graph(subject)
             evidence_tracker.tracked(learner_id, curriculum.now(), graphs={subject: graph}, domain=subject,
                                      replan=False, task_id=scope.task_id, scope=scope)
+        except (LeaseLost, LearnerDataGone):  # the task lost its fence, or the learner is gone: the task's own error
+            raise
         except Exception as exc:  # noqa: BLE001 - the evidence is stored; the sweeper refreshes what this missed
             logging.getLogger(__name__).warning("lesson task %s: refreshing curricula after its evidence failed: %s",
                                                 scope.task_id, type(exc).__name__)
