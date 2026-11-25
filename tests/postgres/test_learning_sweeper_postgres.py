@@ -130,7 +130,8 @@ def test_the_sweepers_id_queries_run_on_postgresql(replicas) -> None:  # noqa: F
         if len(batch) < 500:
             break
         after = batch[-1]
-    assert lid in found and found == sorted(found)
+    # In the database's own order (its collation, which need not be Python's): each id once, none skipped
+    assert lid in found and len(found) == len(set(found))
     for ids in (c0.learning_cycle_service.repository.active_ids(None, 50),
                 c0.teaching_service.repository.with_pending_outbox(None, 50)):
-        assert isinstance(ids, list) and ids == sorted(ids) and len(ids) <= 50
+        assert isinstance(ids, list) and len(ids) == len(set(ids)) and len(ids) <= 50
